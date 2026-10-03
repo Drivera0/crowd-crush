@@ -323,6 +323,10 @@ func (a *App) detectTick(now int64) {
 		pend = append(pend, pc)
 	}
 	signLevel, signZone := worstZone(active.last)
+	zoneLevels := map[string]string{}
+	for _, z := range active.last.Zones {
+		zoneLevels[z.ID] = z.Level
+	}
 	hold := now < a.signHold
 	a.mu.Unlock()
 
@@ -338,7 +342,7 @@ func (a *App) detectTick(now int64) {
 		}
 	}
 	if !hold {
-		a.opt.Sign.Set(signLevel, signZone)
+		a.opt.Sign.Update(zoneLevels, signLevel, signZone)
 	}
 }
 

@@ -8,3 +8,4 @@ recordings/auto/
 # secrets
 .env
 arduino/sign/arduino_secrets.h
+arduino/zone-light/arduino_secrets.h

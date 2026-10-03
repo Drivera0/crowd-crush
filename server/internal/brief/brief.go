@@ -156,6 +156,14 @@ func (c *Client) call(ctx context.Context, sys, user string, maxTokens int, noTh
 		return "", errThinking
 	}
 	if resp.StatusCode != http.StatusOK {
+		var e struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if json.Unmarshal(raw, &e) == nil && e.Error.Message != "" {
+			return "", fmt.Errorf("gemini: %s: %s", resp.Status, truncate(e.Error.Message, 200))
+		}
 		return "", fmt.Errorf("gemini: %s: %s", resp.Status, truncate(string(raw), 200))
 	}
 	var r struct {

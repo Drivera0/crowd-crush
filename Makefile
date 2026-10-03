@@ -1,6 +1,6 @@
 # Pulse — common tasks. `make demo` builds everything and starts the server.
 
-.PHONY: all web build run demo sim test check tunnel recordings clean
+.PHONY: all web build run demo sim test check env doctor tunnel recordings clean
 
 all: build
 
@@ -34,6 +34,14 @@ test:
 
 check: test
 	cd web && npm run typecheck
+
+# Ask for each secret and write .env, then test it.
+env:
+	./scripts/setup-env.sh
+
+# Test the services in .env without starting the server.
+doctor:
+	go run ./server/cmd/pulse -check
 
 # Phones need HTTPS for motion sensors. Quick tunnel (random URL):
 tunnel:
