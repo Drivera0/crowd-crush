@@ -385,14 +385,18 @@ func (a *App) TestAlert() string {
 	now := hub.Now()
 	a.mu.Lock()
 	p := a.active()
-	zone := "B"
-	if _, ok := p.last.Zone(zone); !ok && len(p.last.Zones) > 0 {
-		zone = p.last.Zones[0].ID
-	}
-	best := -1.0
+	// The zone that looks worst, else B (the fallback clip's zone), else the first.
+	zone, best := "", 0.1
 	for _, z := range p.last.Zones {
-		if z.Score > best+0.05 {
-			best, zone = z.Score, z.ID
+		if z.Score > best {
+			zone, best = z.ID, z.Score
+		}
+	}
+	if zone == "" {
+		if _, ok := p.last.Zone("B"); ok || len(p.last.Zones) == 0 {
+			zone = "B"
+		} else {
+			zone = p.last.Zones[0].ID
 		}
 	}
 	info := briefInfo(p, zone, protocol.LevelRed, a.pnowLocked(now))

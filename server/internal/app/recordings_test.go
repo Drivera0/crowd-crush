@@ -88,4 +88,3 @@ func replayMaxLevel(t *testing.T, recs []store.Record) string {
 	}
 	return worst
 }
-
