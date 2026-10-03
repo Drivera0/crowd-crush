@@ -36,3 +36,31 @@ func TestDisabledIsNoop(t *testing.T) {
 	var c *Client
 	c.Set("red", "A")
 }
+
+func TestZoneSigns(t *testing.T) {
+	type hit struct{ who, q string }
+	got := make(chan hit, 20)
+	mk := func(who string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			got <- hit{who, r.URL.RawQuery}
+		}))
+	}
+	main, a, b := mk("main"), mk("A"), mk("B")
+	defer main.Close()
+	defer a.Close()
+	defer b.Close()
+	c := New(main.URL + ", a=" + a.URL + ",B=" + b.URL)
+	c.Update(map[string]string{"A": "calm", "B": "red"}, "red", "B")
+	want := map[hit]bool{{"main", "v=red&zone=B"}: true, {"A", "v=calm&zone=A"}: true, {"B", "v=red&zone=B"}: true}
+	for range 3 {
+		select {
+		case h := <-got:
+			if !want[h] {
+				t.Errorf("unexpected %+v", h)
+			}
+			delete(want, h)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("missing %v", want)
+		}
+	}
+}
