@@ -51,3 +51,25 @@ func TestGeminiRequestAndFallback(t *testing.T) {
 		t.Fatalf("want template on error, got %q, %v", text, err)
 	}
 }
+
+func TestRetriesWithoutThinking(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var body struct {
+			GenerationConfig map[string]any `json:"generationConfig"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		if _, ok := body.GenerationConfig["thinkingConfig"]; ok {
+			http.Error(w, `{"error":{"message":"Thinking budget is not supported"}}`, http.StatusBadRequest)
+			return
+		}
+		w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}`))
+	}))
+	defer srv.Close()
+	c := New("k", "")
+	c.base = srv.URL
+	if text, err := c.Brief(context.Background(), info); err != nil || text != "ok" || calls != 2 {
+		t.Fatalf("got %q %v after %d calls", text, err, calls)
+	}
+}

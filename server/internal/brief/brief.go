@@ -74,7 +74,7 @@ var ErrNoKey = errors.New("gemini: no API key")
 // New creates a client. An empty key makes every call return ErrNoKey.
 func New(key, model string) *Client {
 	if model == "" {
-		model = "gemini-2.5-flash"
+		model = "gemini-flash-latest"
 	}
 	return &Client{key: key, model: model, base: "https://generativelanguage.googleapis.com", http: &http.Client{Timeout: Timeout}}
 }
@@ -113,17 +113,30 @@ Use only the log provided. Be brief: at most three sentences. If the log doesn't
 	return c.generate(ctx, sys, "Log:\n"+history+"\n\nQuestion: "+question, 250)
 }
 
+// errThinking means the model rejected the thinking budget.
+var errThinking = errors.New("gemini: thinking config rejected")
+
 func (c *Client) generate(ctx context.Context, sys, user string, maxTokens int) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, Timeout)
 	defer cancel()
+	// Thinking off keeps briefings fast; models that refuse that get a retry
+	// without it (with room for the thinking tokens).
+	out, err := c.call(ctx, sys, user, maxTokens, true)
+	if errors.Is(err, errThinking) {
+		out, err = c.call(ctx, sys, user, maxTokens+1024, false)
+	}
+	return out, err
+}
+
+func (c *Client) call(ctx context.Context, sys, user string, maxTokens int, noThinking bool) (string, error) {
+	gen := map[string]any{"temperature": 0.4, "maxOutputTokens": maxTokens}
+	if noThinking {
+		gen["thinkingConfig"] = map[string]any{"thinkingBudget": 0}
+	}
 	body := map[string]any{
 		"systemInstruction": map[string]any{"parts": []map[string]string{{"text": sys}}},
 		"contents":          []map[string]any{{"role": "user", "parts": []map[string]string{{"text": user}}}},
-		"generationConfig": map[string]any{
-			"temperature":     0.4,
-			"maxOutputTokens": maxTokens,
-			"thinkingConfig":  map[string]any{"thinkingBudget": 0},
-		},
+		"generationConfig":  gen,
 	}
 	b, _ := json.Marshal(body)
 	u := fmt.Sprintf("%s/v1beta/models/%s:generateContent", c.base, url.PathEscape(c.model))
@@ -139,6 +152,9 @@ func (c *Client) generate(ctx context.Context, sys, user string, maxTokens int) 
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode == http.StatusBadRequest && noThinking && strings.Contains(strings.ToLower(string(raw)), "thinking") {
+		return "", errThinking
+	}
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("gemini: %s: %s", resp.Status, truncate(string(raw), 200))
 	}

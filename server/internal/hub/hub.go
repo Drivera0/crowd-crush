@@ -25,7 +25,7 @@ const (
 	ResyncEvery   = 30 * time.Second
 	burstSettle   = 400 * time.Millisecond
 	helloTimeout  = 10 * time.Second
-	readTimeout   = 15 * time.Second
+	readTimeout   = ResyncEvery + 15*time.Second // pongs arrive at least this often
 	writeTimeout  = 3 * time.Second
 	maxMessageLen = 8 << 10
 )
@@ -176,12 +176,13 @@ func (hb *Hub) ServePhone(w http.ResponseWriter, r *http.Request) {
 
 	pc := &phoneConn{conn: newConn(ws, 32), id: hello.ID, sync: &clocksync.Sync{}}
 	hb.mu.Lock()
-	if old, ok := hb.phones[hello.ID]; ok {
-		old.close() // same phone reconnected: the new socket wins
-		old.ws.Close(websocket.StatusGoingAway, "replaced")
-	}
+	old := hb.phones[hello.ID]
 	hb.phones[hello.ID] = pc
 	hb.mu.Unlock()
+	if old != nil { // same phone reconnected: the new socket wins
+		old.close()
+		old.ws.CloseNow()
+	}
 	defer func() {
 		pc.close()
 		hb.mu.Lock()
