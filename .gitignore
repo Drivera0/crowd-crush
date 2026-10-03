@@ -1,0 +1,9 @@
+# build output
+/bin/
+web/node_modules/
+web/*/dist/
+# runtime data
+/audio/
+recordings/auto/
+# secrets
+.env
