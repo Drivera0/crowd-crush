@@ -37,18 +37,29 @@ const gNodes = svgEl('g');
 map.append(gZones, gEdges, gPulses, gNodes);
 
 let gridKey = '';
+const HEADER = 40; // label strip above each band of zone rows
+let bandStarts: number[] = [0]; // first row of each zone band
+
+/** y of the top of grid row r, leaving a header above every zone band. */
+function rowY(r: number): number {
+  let band = 0;
+  for (let i = 0; i < bandStarts.length; i++) if (bandStarts[i] <= r) band = i;
+  return r * CELL + (band + 1) * HEADER;
+}
 const zoneEls = new Map<string, { rect: SVGRectElement; label: SVGTextElement; score: SVGTextElement }>();
 const edgeEls = new Map<string, SVGLineElement>();
 const nodeEls = new Map<string, { g: SVGGElement; core: SVGCircleElement; ring: SVGCircleElement; text: SVGTextElement }>();
 const nodePos = new Map<string, { x: number; y: number }>();
 
-function layoutGrid(rows: number, cols: number) {
-  const key = `${rows}x${cols}`;
+function layoutGrid(rows: number, cols: number, zones: Zone[]) {
+  const starts = [...new Set(zones.map((z) => z.row0))].sort((a, b) => a - b);
+  const key = `${rows}x${cols}:${starts.join(',')}`;
   if (key === gridKey) return;
   gridKey = key;
+  bandStarts = starts.length ? starts : [0];
   const w = cols * CELL;
-  const h = rows * CELL;
-  map.setAttribute('viewBox', `${-PAD} ${-PAD - 30} ${w + 2 * PAD} ${h + 2 * PAD + 30}`);
+  const h = rowY(rows);
+  map.setAttribute('viewBox', `${-PAD} ${-PAD} ${w + 2 * PAD} ${h + 2 * PAD}`);
   gZones.replaceChildren();
   zoneEls.clear();
 }
@@ -68,15 +79,15 @@ function renderZones(zones: Zone[]) {
       zoneEls.set(z.id, el);
     }
     const x = z.col0 * CELL + 6;
-    const y = z.row0 * CELL + 6;
+    const top = rowY(z.row0) - HEADER + 6;
     el.rect.setAttribute('x', String(x));
-    el.rect.setAttribute('y', String(y - 30));
+    el.rect.setAttribute('y', String(top));
     el.rect.setAttribute('width', String((z.col1 - z.col0 + 1) * CELL - 12));
-    el.rect.setAttribute('height', String((z.row1 - z.row0 + 1) * CELL - 12 + 30));
+    el.rect.setAttribute('height', String(rowY(z.row1) + CELL - 6 - top));
     el.label.setAttribute('x', String(x + 14));
-    el.label.setAttribute('y', String(y + 8));
+    el.label.setAttribute('y', String(top + 36));
     el.score.setAttribute('x', String(x + 50));
-    el.score.setAttribute('y', String(y + 2));
+    el.score.setAttribute('y', String(top + 30));
     el.score.textContent = `${z.level} · ${z.score.toFixed(2)}`;
     el.rect.setAttribute('class', `zone-rect ${z.level}`);
     el.label.setAttribute('class', `zone-label ${z.level}`);
@@ -103,7 +114,7 @@ function placeNodes(nodes: Node[]) {
   for (const list of byCell.values()) {
     list.forEach((n, i) => {
       const cx = n.col * CELL + CELL / 2;
-      const cy = n.row * CELL + CELL / 2 + 8;
+      const cy = rowY(n.row) + CELL / 2;
       if (list.length === 1) {
         nodePos.set(n.id, { x: cx, y: cy });
       } else {
@@ -428,7 +439,7 @@ function onSnapshot(s: Snapshot) {
     }
   }
 
-  layoutGrid(s.rows, s.cols);
+  layoutGrid(s.rows, s.cols, s.zones);
   renderZones(s.zones);
   placeNodes(s.nodes);
   renderEdges(s.nodes, s.waves);
