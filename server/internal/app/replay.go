@@ -11,6 +11,7 @@ import (
 
 	"github.com/Drivera0/crowd-crush/server/internal/detect"
 	"github.com/Drivera0/crowd-crush/server/internal/hub"
+	"github.com/Drivera0/crowd-crush/server/internal/protocol"
 	"github.com/Drivera0/crowd-crush/server/internal/store"
 )
 
@@ -129,6 +130,7 @@ func (a *App) feedReplay(r *replayState, pnow int64) {
 			if ct == 0 {
 				ct = rec.T
 			}
+			m.addSample(protocol.Sample{T: ct, AX: rec.AX, AY: rec.AY, AZ: rec.AZ, Rot: rec.Rot})
 			p.det.Add(rec.ID, detect.Sample{T: ct, AX: rec.AX, AY: rec.AY, AZ: rec.AZ, Rot: rec.Rot})
 		case store.KindBye:
 			if m := p.meta[rec.ID]; m != nil {

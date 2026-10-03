@@ -165,3 +165,28 @@ type Config struct {
 	Yellow float64 `json:"yellow"`
 	Red    float64 `json:"red"`
 }
+
+// Sample is one 100 ms motion summary as the server received it.
+type Sample struct {
+	T   int64   `json:"t"` // phone clock, ms
+	AX  float64 `json:"ax"`
+	AY  float64 `json:"ay"`
+	AZ  float64 `json:"az"`
+	Rot float64 `json:"rot"`
+}
+
+// NodeDetail is GET /api/node/{id}: everything the server keeps about one phone.
+type NodeDetail struct {
+	ID        string   `json:"id"`
+	Row       int      `json:"row"`
+	Col       int      `json:"col"`
+	UA        string   `json:"ua"`
+	Zone      string   `json:"zone"`
+	Connected bool     `json:"connected"`
+	Synced    bool     `json:"synced"`
+	RTT       int64    `json:"rtt"`
+	Offset    int64    `json:"offset"`
+	JoinedAt  int64    `json:"joinedAt"` // server clock, ms; 0 if unknown (replay)
+	Messages  int64    `json:"messages"` // motion summaries received
+	Samples   []Sample `json:"samples"`  // last ~30 s, oldest first
+}

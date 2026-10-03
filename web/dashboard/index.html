@@ -1,103 +1,313 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Pulse · Dashboard</title>
+    <title>Pulse · Crowd Safety Console</title>
+    <!-- The console has its own light and dark themes; stop dark-mode extensions recolouring it. -->
+    <meta name="darkreader-lock" />
+    <meta name="color-scheme" content="dark light" />
+    <script>
+      try {
+        const t = localStorage.getItem('pulse.theme');
+        if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+      } catch {}
+    </script>
   </head>
   <body>
-    <div id="layout">
-      <header>
-        <div class="brand"><span class="logo"></span>PULSE</div>
+    <div id="app">
+      <header class="topbar">
+        <div class="brand">
+          <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+            <rect width="32" height="32" rx="8" />
+            <path d="M5 17h5l3-7 4 13 3-9 2 3h5" />
+          </svg>
+          <div class="brand-text">
+            <b>Pulse</b>
+            <span>Crowd Safety Console</span>
+          </div>
+        </div>
+        <span class="divider"></span>
+        <div class="event">
+          <span class="label">Event</span>
+          <input id="eventName" value="Main Floor" maxlength="48" aria-label="Event or venue section name" />
+        </div>
+        <div class="spacer"></div>
+        <div id="status" class="status calm" role="status" aria-live="polite">
+          <span class="status-dot"></span>
+          <span id="statusText">All clear</span>
+        </div>
         <span id="mode" class="badge live">LIVE</span>
         <span id="recBadge" class="badge rec" hidden>● REC</span>
-        <span id="replayInfo" class="replay-info" hidden></span>
-        <div class="counters">
-          <div><b id="cPhones">0</b><span>phones</span></div>
-          <div><b id="cRate">0</b><span>msg/s</span></div>
-          <div><b id="cRtt">–</b><span>median RTT ms</span></div>
-          <div><b id="cWaves">0</b><span>wave edges</span></div>
+        <time id="clock" class="clock">--:--:--</time>
+        <div class="actions">
+          <button id="soundBtn" class="icon-btn" data-tip="Turn on spoken alerts" aria-label="Spoken alerts">
+            <svg viewBox="0 0 24 24"><path d="M4 9h4l5-4v14l-5-4H4z" /><path class="x" d="M17 9l4 6M21 9l-4 6" /><path class="on" d="M17 8a5 5 0 010 8M19.5 5.5a8.5 8.5 0 010 13" /></svg>
+          </button>
+          <button id="qrBtn" class="icon-btn" data-tip="Attendee check-in QR" aria-label="Show check-in QR code">
+            <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><path d="M14 14h3v3h-3zM18 18h3v3h-3zM14 20h2M20 14v2" /></svg>
+          </button>
+          <button id="themeBtn" class="icon-btn" data-tip="Switch light / dark" aria-label="Switch theme">
+            <svg viewBox="0 0 24 24"><path class="moon" d="M20 14.5A8 8 0 019.5 4a8 8 0 1010.5 10.5z" /><g class="sun"><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" /></g></svg>
+          </button>
+          <button id="fsBtn" class="icon-btn" data-tip="Full screen" aria-label="Full screen">
+            <svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" /></svg>
+          </button>
         </div>
-        <div class="services" id="services"></div>
-        <span id="wsDot" class="ws-dot" title="dashboard connection"></span>
-        <button id="qrBtn" class="ghost" title="Show join QR">QR</button>
-        <button id="fsBtn" class="ghost" title="Full screen">⛶</button>
+        <span id="wsDot" class="ws-dot" title="Connection to the Pulse server"></span>
       </header>
 
-      <section id="mapWrap">
-        <svg id="map" preserveAspectRatio="xMidYMid meet"></svg>
-        <div id="legend">
-          <span><i class="lg ok"></i>ok</span>
-          <span><i class="lg handling"></i>handling</span>
-          <span><i class="lg swaying"></i>swaying</span>
-          <span><i class="lg wave"></i>wave</span>
-          <span><i class="lg connecting"></i>connecting</span>
-          <span><i class="lg stale"></i>stale</span>
-          <span class="front">ring size = sway · pulses = travelling wave</span>
+      <section class="kpis">
+        <div class="kpi">
+          <span class="k-label">Attendees connected</span>
+          <b id="cPhones">0</b>
+          <span class="k-sub">phones streaming motion</span>
         </div>
-        <div id="tooltip" hidden></div>
-        <div id="qr" hidden>
-          <div class="qr-card">
-            <img id="qrImg" alt="QR code to join" />
-            <div class="qr-text">
-              <h2>Scan to join</h2>
-              <p id="qrUrl"></p>
-              <p class="muted">Hold your phone flat against your chest.</p>
-            </div>
-          </div>
+        <div class="kpi">
+          <span class="k-label">Crowd risk</span>
+          <b id="kRisk">0</b>
+          <span class="k-sub" id="kRiskSub">of 100 · calm</span>
+        </div>
+        <div class="kpi">
+          <span class="k-label">Active alerts</span>
+          <b id="kAlerts">0</b>
+          <span class="k-sub" id="kAlertsSub">nothing needs attention</span>
+        </div>
+        <div class="kpi">
+          <span class="k-label">Watch areas</span>
+          <b id="kAreas">0</b>
+          <span class="k-sub">drawn by your team</span>
+        </div>
+        <div class="kpi">
+          <span class="k-label">Network latency</span>
+          <b id="cRtt">–</b>
+          <span class="k-sub">median round trip, ms</span>
         </div>
       </section>
 
-      <aside id="side">
-        <div class="panel">
-          <h3>Zones</h3>
-          <div id="zones"></div>
-        </div>
-
-        <div class="panel brief-panel" id="briefPanel">
-          <h3>Briefing <span id="briefMeta" class="muted"></span></h3>
-          <p id="brief" class="brief muted">No alerts yet.</p>
-          <div class="row">
-            <button id="soundBtn">🔇 Enable sound</button>
-            <button id="replayAudioBtn" class="ghost" disabled>▶ Play again</button>
-          </div>
-        </div>
-
-        <div class="panel log-panel">
-          <h3>Alert log</h3>
-          <ol id="log"></ol>
-        </div>
-
-        <div class="panel controls">
-          <h3>Controls</h3>
-          <div class="row">
-            <div class="seg">
-              <button id="liveBtn" class="on">Live</button>
-              <button id="replayBtn">Replay</button>
+      <main class="main">
+        <section id="mapWrap" class="card map-card">
+          <div class="card-head">
+            <div>
+              <h2>Live crowd map</h2>
+              <p class="sub">Each dot is an attendee's phone. Lines connect neighbours that compare readings.</p>
             </div>
-            <select id="recSelect" title="Recording to replay"></select>
-            <select id="speedSelect" title="Replay speed">
-              <option value="1">1×</option>
-              <option value="2">2×</option>
-              <option value="4">4×</option>
-            </select>
+            <div id="legend">
+              <span><i class="lg ok"></i>Calm</span>
+              <span><i class="lg swaying"></i>Swaying</span>
+              <span><i class="lg wave"></i>In a crowd push</span>
+              <span><i class="lg handling"></i>Phone in hand</span>
+              <span><i class="lg stale"></i>Offline</span>
+            </div>
           </div>
-          <div class="row">
-            <input id="recLabel" placeholder="run label, e.g. wave-push-end" maxlength="40" />
-            <button id="recBtn">● Record run</button>
+
+          <div class="stage">
+            <canvas id="mesh" aria-label="Live map of phones in the crowd"></canvas>
+
+            <div class="toolbar" role="toolbar" aria-label="Map tools">
+              <button data-tool="select" class="on" data-tip="Select, move, pan (Esc)" aria-label="Select">
+                <svg viewBox="0 0 24 24"><path d="M5 3l14 8-6 2-2 6z" /></svg>
+              </button>
+              <span class="sep"></span>
+              <button data-tool="rect" data-tip="Draw a rectangle area" aria-label="Rectangle">
+                <svg viewBox="0 0 24 24"><rect x="4" y="6" width="16" height="12" rx="2" /></svg>
+              </button>
+              <button data-tool="circle" data-tip="Draw a circle area" aria-label="Circle">
+                <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" /></svg>
+              </button>
+              <button data-tool="free" data-tip="Draw an area freehand" aria-label="Freehand">
+                <svg viewBox="0 0 24 24"><path d="M4 16c3-9 6 2 9-5s5 4 7-1" /></svg>
+              </button>
+            </div>
+
+            <div class="zoom" role="group" aria-label="Zoom">
+              <button id="zoomIn" data-tip="Zoom in" aria-label="Zoom in">+</button>
+              <span id="zoomPct">100%</span>
+              <button id="zoomOut" data-tip="Zoom out" aria-label="Zoom out">−</button>
+              <button id="zoomFit" data-tip="Reset view" aria-label="Reset view">
+                <svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" /></svg>
+              </button>
+            </div>
+
+            <div id="replayBanner" class="replay-banner" hidden>
+              <span class="rb-tag">REPLAY</span>
+              <span id="replayInfo">recording</span>
+              <span class="rb-note">Not live: a saved run is playing through the detector.</span>
+              <button id="backLiveBtn" class="sm">Back to live</button>
+            </div>
+            <div id="hint" class="hint"></div>
+            <div id="tooltip" hidden></div>
+
+            <aside id="drawer" class="drawer" hidden aria-label="Attendee details">
+              <div class="d-head">
+                <span id="dAvatar" class="d-avatar"></span>
+                <div>
+                  <div class="d-title">Attendee <span id="dId" class="mono"></span></div>
+                  <div class="d-sub" id="dDevice">–</div>
+                </div>
+                <span id="dStatus" class="st"></span>
+                <button id="dClose" class="icon-btn sm-icon" aria-label="Close">✕</button>
+              </div>
+              <p id="dExplain" class="d-explain"></p>
+
+              <h4>Live telemetry · last 30 s</h4>
+              <div class="d-charts">
+                <div class="d-chart"><div class="dc-head"><span>Side to side</span><b id="vX">–</b></div><canvas id="chX"></canvas></div>
+                <div class="d-chart"><div class="dc-head"><span>Forward / back</span><b id="vZ">–</b></div><canvas id="chZ"></canvas></div>
+                <div class="d-chart"><div class="dc-head"><span>Up / down</span><b id="vY">–</b></div><canvas id="chY"></canvas></div>
+                <div class="d-chart"><div class="dc-head"><span>Rotation</span><b id="vR">–</b></div><canvas id="chR"></canvas></div>
+              </div>
+
+              <h4>Sway vs alert threshold</h4>
+              <div class="meter"><div id="dSwayBar" class="meter-fill"></div><div class="meter-th" style="left: 25%"></div></div>
+              <div class="meter-cap"><span id="dSway">0.00 m/s²</span><span>threshold 0.25</span></div>
+
+              <h4>Connection</h4>
+              <dl class="d-grid">
+                <dt>Spot</dt><dd id="dSpot">–</dd>
+                <dt>Detector zone</dt><dd id="dZone">–</dd>
+                <dt>Joined</dt><dd id="dJoined">–</dd>
+                <dt>Readings received</dt><dd id="dMsgs">–</dd>
+                <dt>Round trip</dt><dd id="dRtt">–</dd>
+                <dt>Clock offset</dt><dd id="dOffset">–</dd>
+                <dt>Last reading</dt><dd id="dAge">–</dd>
+                <dt>Neighbours</dt><dd id="dNeigh">–</dd>
+              </dl>
+              <p class="d-privacy">
+                <svg viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z" /></svg>
+                Collected: a random session ID, the spot the attendee tapped, and 10 motion summaries a second. No name, contacts, location, audio or photos.
+              </p>
+            </aside>
+
+            <div id="qr" hidden>
+              <div class="qr-card">
+                <img id="qrImg" alt="QR code for attendees to join" />
+                <div class="qr-text">
+                  <h2>Scan to join</h2>
+                  <p id="qrUrl"></p>
+                  <p class="muted">Hold your phone flat against your chest.</p>
+                </div>
+              </div>
+            </div>
           </div>
-          <div class="row">
-            <button id="testBtn" class="warn">Test alert</button>
-            <span id="ctlMsg" class="muted"></span>
+        </section>
+
+        <aside class="rail">
+          <div class="card risk calm" id="riskPanel">
+            <div class="card-head"><h3>Crowd risk</h3><span id="riskLevel" class="pill">Calm</span></div>
+            <div class="risk-body">
+              <div class="gauge-wrap">
+                <svg class="gauge" viewBox="0 0 120 120">
+                  <circle class="track" cx="60" cy="60" r="50" />
+                  <circle id="gaugeArc" class="arc" cx="60" cy="60" r="50" />
+                </svg>
+                <div class="gauge-num" id="riskNum">0</div>
+              </div>
+              <div class="risk-text">
+                <p id="riskSub">No pushes travelling through the crowd.</p>
+                <svg id="riskSpark" class="spark" viewBox="0 0 59 1" preserveAspectRatio="none">
+                  <line id="thY" class="th y" x1="0" x2="59" />
+                  <line id="thR" class="th r" x1="0" x2="59" />
+                  <polygon id="riskArea" class="area" />
+                  <polyline id="riskLine" class="line" />
+                </svg>
+                <div class="spark-cap"><span>60 s ago</span><span>now</span></div>
+              </div>
+            </div>
           </div>
-          <form id="askForm" class="row">
-            <input id="askInput" placeholder="Ask about the last 10 minutes…" maxlength="300" />
-            <button type="submit">Ask</button>
-          </form>
-          <p id="askAnswer" class="answer" hidden></p>
-        </div>
-      </aside>
+
+          <div class="card">
+            <div class="card-head">
+              <h3>Watch areas</h3>
+              <button id="addArea" class="sm">+ Draw area</button>
+            </div>
+            <ul id="areas" class="areas"></ul>
+            <div id="areasEmpty" class="empty">
+              <p>Mark the spots your team knows get dangerous: barriers, gates, the stage front.</p>
+              <p class="muted">Use the shape tools on the map. An area turns <b class="t-watch">Watch</b> when phones inside start swaying and <b class="t-danger">Danger</b> when a push moves through it.</p>
+            </div>
+          </div>
+
+          <div class="card brief-panel" id="briefPanel">
+            <div class="card-head">
+              <h3>AI briefing</h3>
+              <span id="briefMeta" class="meta"></span>
+            </div>
+            <p id="brief" class="brief muted">Nothing to report. When the detector raises a red alert, a short briefing for staff appears here and is read aloud.</p>
+            <button id="replayAudioBtn" class="sm ghost" disabled>▶ Play again</button>
+          </div>
+
+          <div class="card log-panel">
+            <div class="card-head"><h3>Incident timeline</h3></div>
+            <ol id="log"></ol>
+            <p id="logEmpty" class="muted small">No incidents yet.</p>
+          </div>
+
+          <div class="card ops">
+            <div class="card-head"><h3>Data source</h3></div>
+            <div class="seg" role="radiogroup" aria-label="Data source">
+              <button id="liveBtn" class="on" role="radio">
+                <b>Live</b><span>Phones in the crowd right now</span>
+              </button>
+              <button id="replayBtn" role="radio">
+                <b>Replay</b><span>Play back a saved run</span>
+              </button>
+            </div>
+            <div id="replayOpts" class="replay-opts" hidden>
+              <p class="muted small">A replay feeds a saved recording through the same detector, as if it were happening now. Use it to rehearse, or as a backup if phones can't connect.</p>
+              <div class="row">
+                <select id="recSelect" title="Recording to replay"></select>
+                <select id="speedSelect" title="Replay speed">
+                  <option value="1">1×</option>
+                  <option value="2">2×</option>
+                  <option value="4">4×</option>
+                </select>
+                <button id="replayPlayBtn" class="primary">▶ Play</button>
+              </div>
+            </div>
+
+            <div class="ops-block">
+              <h4>Record</h4>
+              <p class="muted small">Save the live feed so it can be replayed or used to tune the detector.</p>
+              <div class="row">
+                <input id="recLabel" placeholder="Label, e.g. push-at-barrier" maxlength="40" />
+                <button id="recBtn">● Start recording</button>
+              </div>
+            </div>
+
+            <div class="ops-block">
+              <h4>Drill</h4>
+              <p class="muted small">Fire the whole alert chain (briefing, voice, signage) without a real incident.</p>
+              <div class="row">
+                <button id="testBtn" class="warn">Run test alert</button>
+                <span id="ctlMsg" class="muted small"></span>
+              </div>
+            </div>
+
+            <div class="ops-block">
+              <h4>Ask the AI</h4>
+              <form id="askForm" class="row">
+                <input id="askInput" placeholder="What happened in the last 10 minutes?" maxlength="300" />
+                <button type="submit">Ask</button>
+              </form>
+              <p id="askAnswer" class="answer" hidden></p>
+            </div>
+          </div>
+
+          <details class="card fold">
+            <summary>System health</summary>
+            <div class="sys">
+              <div><b id="cRate">0</b><span>messages / s</span></div>
+              <div><b id="cWaves">0</b><span>wave links</span></div>
+              <div><b id="mLinks">0</b><span>mesh links</span></div>
+              <div><b id="mHops">0</b><span>mesh hops / s</span></div>
+            </div>
+            <div class="services" id="services"></div>
+          </details>
+        </aside>
+      </main>
     </div>
+    <div id="toasts"></div>
     <script type="module" src="./src/main.ts"></script>
   </body>
 </html>
