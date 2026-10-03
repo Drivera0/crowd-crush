@@ -26,6 +26,11 @@ var levelRank = map[string]int{protocol.LevelCalm: 0, protocol.LevelYellow: 1, p
 // clockErrMs adds a fixed clock-sync error per phone, like real phones after
 // NTP-style correction.
 func runScenario(t *testing.T, name string, n int, dur float64, clockErrMs int64) outcome {
+	return runScenarioFlip(t, name, n, dur, clockErrMs, false)
+}
+
+// flipOdd holds every other phone upside down (x axis negated).
+func runScenarioFlip(t *testing.T, name string, n int, dur float64, clockErrMs int64, flipOdd bool) outcome {
 	t.Helper()
 	sc, err := sim.New(name, n, 1, n, 42)
 	if err != nil {
@@ -50,7 +55,11 @@ func runScenario(t *testing.T, name string, n int, dur float64, clockErrMs int64
 	for now := int64(t0); now <= t0+int64(dur*1000); now += 250 {
 		for j < len(evs) && evs[j].T <= now {
 			e := evs[j]
-			d.Add(fmt.Sprint(e.Phone), Sample{T: e.T + errs[e.Phone], AX: e.AX, AY: e.AY, AZ: e.AZ, Rot: e.Rot})
+			ax := e.AX
+			if flipOdd && e.Phone%2 == 1 {
+				ax = -ax
+			}
+			d.Add(fmt.Sprint(e.Phone), Sample{T: e.T + errs[e.Phone], AX: ax, AY: e.AY, AZ: e.AZ, Rot: e.Rot})
 			j++
 		}
 		r := d.Step(now)
@@ -131,6 +140,16 @@ func TestScenarios(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestFlippedPhonesStillSeeWave(t *testing.T) {
+	o := runScenarioFlip(t, "wave", 8, 70, 25, true)
+	if o.maxLevel != protocol.LevelRed || o.redAt > 60 {
+		t.Fatalf("max %s red at %.1f s; want red within 60 s", o.maxLevel, o.redAt)
+	}
+	if c := runScenarioFlip(t, "dance", 8, 60, 25, true); c.maxLevel != protocol.LevelCalm {
+		t.Fatalf("flipped dance reached %s", c.maxLevel)
 	}
 }
 

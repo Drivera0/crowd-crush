@@ -7,3 +7,4 @@ web/*/dist/
 recordings/auto/
 # secrets
 .env
+arduino/sign/arduino_secrets.h

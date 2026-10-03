@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pulse · Dashboard</title>
+  </head>
+  <body>
+    <div id="layout">
+      <header>
+        <div class="brand"><span class="logo"></span>PULSE</div>
+        <span id="mode" class="badge live">LIVE</span>
+        <span id="recBadge" class="badge rec" hidden>● REC</span>
+        <span id="replayInfo" class="replay-info" hidden></span>
+        <div class="counters">
+          <div><b id="cPhones">0</b><span>phones</span></div>
+          <div><b id="cRate">0</b><span>msg/s</span></div>
+          <div><b id="cRtt">–</b><span>median RTT ms</span></div>
+          <div><b id="cWaves">0</b><span>wave edges</span></div>
+        </div>
+        <div class="services" id="services"></div>
+        <span id="wsDot" class="ws-dot" title="dashboard connection"></span>
+        <button id="qrBtn" class="ghost" title="Show join QR">QR</button>
+        <button id="fsBtn" class="ghost" title="Full screen">⛶</button>
+      </header>
+
+      <section id="mapWrap">
+        <svg id="map" preserveAspectRatio="xMidYMid meet"></svg>
+        <div id="legend">
+          <span><i class="lg ok"></i>ok</span>
+          <span><i class="lg handling"></i>handling</span>
+          <span><i class="lg swaying"></i>swaying</span>
+          <span><i class="lg wave"></i>wave</span>
+          <span><i class="lg connecting"></i>connecting</span>
+          <span><i class="lg stale"></i>stale</span>
+          <span class="front">ring size = sway · pulses = travelling wave</span>
+        </div>
+        <div id="tooltip" hidden></div>
+        <div id="qr" hidden>
+          <div class="qr-card">
+            <img id="qrImg" alt="QR code to join" />
+            <div class="qr-text">
+              <h2>Scan to join</h2>
+              <p id="qrUrl"></p>
+              <p class="muted">Hold your phone flat against your chest.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <aside id="side">
+        <div class="panel">
+          <h3>Zones</h3>
+          <div id="zones"></div>
+        </div>
+
+        <div class="panel brief-panel" id="briefPanel">
+          <h3>Briefing <span id="briefMeta" class="muted"></span></h3>
+          <p id="brief" class="brief muted">No alerts yet.</p>
+          <div class="row">
+            <button id="soundBtn">🔇 Enable sound</button>
+            <button id="replayAudioBtn" class="ghost" disabled>▶ Play again</button>
+          </div>
+        </div>
+
+        <div class="panel log-panel">
+          <h3>Alert log</h3>
+          <ol id="log"></ol>
+        </div>
+
+        <div class="panel controls">
+          <h3>Controls</h3>
+          <div class="row">
+            <div class="seg">
+              <button id="liveBtn" class="on">Live</button>
+              <button id="replayBtn">Replay</button>
+            </div>
+            <select id="recSelect" title="Recording to replay"></select>
+            <select id="speedSelect" title="Replay speed">
+              <option value="1">1×</option>
+              <option value="2">2×</option>
+              <option value="4">4×</option>
+            </select>
+          </div>
+          <div class="row">
+            <input id="recLabel" placeholder="run label, e.g. wave-push-end" maxlength="40" />
+            <button id="recBtn">● Record run</button>
+          </div>
+          <div class="row">
+            <button id="testBtn" class="warn">Test alert</button>
+            <span id="ctlMsg" class="muted"></span>
+          </div>
+          <form id="askForm" class="row">
+            <input id="askInput" placeholder="Ask about the last 10 minutes…" maxlength="300" />
+            <button type="submit">Ask</button>
+          </form>
+          <p id="askAnswer" class="answer" hidden></p>
+        </div>
+      </aside>
+    </div>
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>

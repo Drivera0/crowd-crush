@@ -157,8 +157,11 @@ type Alerts struct {
 	Alerts []Alert `json:"alerts"`
 }
 
-// Config is served at GET /api/config so the phone page can draw the grid.
+// Config is served at GET /api/config so the phone page can draw the grid
+// and the dashboard can draw the zone thresholds.
 type Config struct {
-	Rows int `json:"rows"`
-	Cols int `json:"cols"`
+	Rows   int     `json:"rows"`
+	Cols   int     `json:"cols"`
+	Yellow float64 `json:"yellow"`
+	Red    float64 `json:"red"`
 }
