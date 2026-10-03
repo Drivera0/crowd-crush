@@ -21,7 +21,8 @@ func (a *App) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /ws/dash", a.Hub.ServeDash)
 
 	mux.HandleFunc("GET /api/config", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, protocol.Config{Rows: a.opt.Detect.Rows, Cols: a.opt.Detect.Cols})
+		d := a.opt.Detect
+		writeJSON(w, protocol.Config{Rows: d.Rows, Cols: d.Cols, Yellow: d.YellowScore, Red: d.RedScore})
 	})
 	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]bool{

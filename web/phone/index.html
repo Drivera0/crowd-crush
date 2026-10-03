@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+    <meta name="theme-color" content="#0b0f14" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <title>Pulse</title>
+  </head>
+  <body>
+    <main id="app">
+      <!-- 1. Join -->
+      <section id="join" class="screen">
+        <h1>Pulse</h1>
+        <p class="lead">Early warning for crowd crushes, using the phones already in the crowd.</p>
+        <button id="joinBtn" class="big">Join</button>
+        <p class="fine">Shares only motion numbers and the spot you tap. No name, location, audio or photos.</p>
+        <p id="joinErr" class="err" hidden></p>
+      </section>
+
+      <!-- 2. Pick your spot -->
+      <section id="pick" class="screen" hidden>
+        <h2>Tap your spot</h2>
+        <p id="pickHint" class="fine"></p>
+        <div id="grid" class="grid"></div>
+      </section>
+
+      <!-- 3. Streaming -->
+      <section id="live" class="screen" hidden>
+        <div class="top">
+          <span id="dot" class="dot"></span>
+          <span id="conn">Connecting…</span>
+          <span id="spot" class="spot"></span>
+        </div>
+        <div class="centre">
+          <div id="icon" class="icon">📱</div>
+          <h2 id="headline">Hold your phone flat against your chest</h2>
+          <p id="sub" class="lead">Screen facing out, top of the phone up.</p>
+        </div>
+        <div class="bottom">
+          <p id="stats" class="fine"></p>
+          <p id="warn" class="err" hidden></p>
+          <button id="moveBtn" class="small">Change spot</button>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>

@@ -392,7 +392,9 @@ func (d *Detector) Step(now int64) Result {
 				canCorr := a.lastT >= a.handlingUntil && b.lastT >= b.handlingUntil &&
 					a.sway >= cfg.EdgeMinSway && b.sway >= cfg.EdgeMinSway
 				if canCorr {
-					lag, corr, second, ok := xcorr(a.h, b.h, a.valid, b.valid, maxLag, minOverlap, cfg.Axis == "xz")
+					// |corr|: a phone held upside down, or iOS vs Android sign conventions,
+					// flips the axis but not the timing.
+					lag, corr, second, ok := xcorr(a.h, b.h, a.valid, b.valid, maxLag, minOverlap, true)
 					if ok {
 						e.LagMs = int64(math.Round(lag * float64(cfg.StepMs)))
 						e.Corr = corr

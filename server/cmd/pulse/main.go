@@ -5,6 +5,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -39,6 +40,7 @@ func main() {
 	cols := flag.Int("cols", 0, "grid cols (overrides config)")
 	zoneCols := flag.Int("zone-cols", 0, "grid cols per zone (overrides config)")
 	zoneRows := flag.Int("zone-rows", 0, "grid rows per zone (overrides config)")
+	dumpConfig := flag.Bool("dump-config", false, "print the detector config as JSON and exit")
 	publicURL := flag.String("public-url", os.Getenv("PUBLIC_URL"), "URL phones should open (for the QR code); default: the dashboard's own host")
 	flag.Parse()
 
@@ -59,6 +61,11 @@ func main() {
 	}
 	if err := cfg.Validate(); err != nil {
 		log.Fatalf("config: %v", err)
+	}
+	if *dumpConfig {
+		b, _ := json.MarshalIndent(cfg, "", "  ")
+		fmt.Println(string(b))
+		return
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
