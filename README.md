@@ -14,7 +14,7 @@ make build          # npm install + build the two web apps + Go binaries
 make sim            # 8 fake phones, "wave" scenario, in another terminal
 ```
 
-Needs Go 1.25+ and Node 20+. `make test` runs the Go tests (detector scenarios, recordings, clock sync, sponsor clients).
+**Laptop setup (keys, .tech domain, flashing boards): [docs/SETUP.md](docs/SETUP.md).** Needs Go 1.25+ and Node 20+. `make test` runs the Go tests (detector scenarios, recordings, clock sync, sponsor clients).
 
 ### Real phones need HTTPS
 
@@ -37,7 +37,7 @@ Copy `.env.example` to `.env` (git-ignored); the server reads it on start. All o
 | `TIGER_DATABASE_URL` | readings recorded to `recordings/auto/*.jsonl` |
 | `GEMINI_API_KEY` (`GEMINI_MODEL`) | template briefing sentence |
 | `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` | dashboard uses the browser's speech synthesis |
-| `SIGN_URL` | no sign |
+| `SIGN_URL` | no sign (Arduino + ESP32 zone lights: see docs/SETUP.md) |
 | `PUBLIC_URL` | QR code uses the dashboard's own host |
 
 The dashboard header shows which services are live.
