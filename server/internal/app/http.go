@@ -32,7 +32,25 @@ func (a *App) Routes(mux *http.ServeMux) {
 			"sign":       a.opt.Sign.Enabled(),
 		})
 	})
-	mux.HandleFunc("GET /api/recordings", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/node/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		a.mu.Lock()
+		p := a.active()
+		m := p.meta[id]
+		if m == nil {
+			a.mu.Unlock()
+			httpError(w, errors.New("no such phone"), http.StatusNotFound)
+			return
+		}
+		d := protocol.NodeDetail{
+			ID: id, Row: m.row, Col: m.col, UA: m.ua, Zone: p.det.ZoneOf(m.row, m.col),
+			Connected: m.connected, Synced: m.synced, RTT: m.rtt, Offset: m.offset,
+			JoinedAt: m.joinedAt, Messages: m.msgs, Samples: m.samples(),
+		}
+		a.mu.Unlock()
+		writeJSON(w, d)
+	})
+	mux.HandleFunc("GET /api/recordings",func(w http.ResponseWriter, r *http.Request) {
 		files, _ := store.ListJSONL(a.opt.RecordingsDir)
 		out := map[string]any{"files": files, "runs": []store.Run{}}
 		if a.opt.Tiger != nil {

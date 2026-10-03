@@ -53,6 +53,27 @@ type nodeMeta struct {
 	lastRecv  int64
 	connected bool
 	goneAt    int64
+	joinedAt  int64
+	msgs      int64
+	tele      []protocol.Sample // last teleKeep samples, for the dashboard's node panel
+}
+
+const teleKeep = 300 // 30 s at 10 Hz
+
+func (m *nodeMeta) addSample(s protocol.Sample) {
+	m.msgs++
+	m.tele = append(m.tele, s)
+	if len(m.tele) > teleKeep*2 {
+		m.tele = append(m.tele[:0], m.tele[len(m.tele)-teleKeep:]...)
+	}
+}
+
+func (m *nodeMeta) samples() []protocol.Sample {
+	s := m.tele
+	if len(s) > teleKeep {
+		s = s[len(s)-teleKeep:]
+	}
+	return append([]protocol.Sample(nil), s...)
 }
 
 type histPoint struct {
@@ -167,7 +188,7 @@ func (a *App) PhoneHello(id string, row, col int, ua string) {
 	defer a.mu.Unlock()
 	m := a.live.meta[id]
 	if m == nil {
-		m = &nodeMeta{}
+		m = &nodeMeta{joinedAt: now}
 		a.live.meta[id] = m
 		log.Printf("phone %s joined at row %d col %d (%s)", short(id), row, col, ua)
 	}
@@ -196,6 +217,7 @@ func (a *App) PhoneMotion(id string, mo protocol.Motion, recv int64) {
 		return
 	}
 	m.lastRecv = recv
+	m.addSample(protocol.Sample{T: mo.T, AX: mo.AX, AY: mo.AY, AZ: mo.AZ, Rot: mo.Rot})
 	a.live.det.Add(id, detect.Sample{T: mo.T, AX: mo.AX, AY: mo.AY, AZ: mo.AZ, Rot: mo.Rot})
 	a.record(store.Record{K: store.KindM, T: recv, ID: id, CT: mo.T, AX: mo.AX, AY: mo.AY, AZ: mo.AZ, Rot: mo.Rot})
 	zone := a.live.det.ZoneOf(m.row, m.col)

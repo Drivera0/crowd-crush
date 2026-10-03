@@ -124,6 +124,31 @@ export interface Config {
   red: number;
 }
 
+/** One 100 ms motion summary as the server received it (phone clock). */
+export interface Sample {
+  t: number;
+  ax: number;
+  ay: number;
+  az: number;
+  rot: number;
+}
+
+/** GET /api/node/{id} */
+export interface NodeDetail {
+  id: string;
+  row: number;
+  col: number;
+  ua: string;
+  zone: string;
+  connected: boolean;
+  synced: boolean;
+  rtt: number;
+  offset: number;
+  joinedAt: number;
+  messages: number;
+  samples: Sample[];
+}
+
 /** WebSocket URL on the same host as the page. */
 export function wsURL(path: string): string {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
