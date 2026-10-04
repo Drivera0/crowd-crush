@@ -25,7 +25,7 @@
 // burst of ripples while the phone is being shaken. Staff can drag one to
 // where it really is.
 
-import type { Cluster, Hardware, Level, Node, NodeStatus, SimFrame, SimState, VenueLayout, Wave } from '../../shared/protocol';
+import type { Cluster, Hardware, Level, Node, NodeStatus, SimFrame, SimFurniture, SimState, VenueLayout, Wave } from '../../shared/protocol';
 
 type RGB = [number, number, number];
 
@@ -106,6 +106,10 @@ const FADE_OUT_MS = 450;
 const COLOR_FADE_MS = 200;
 const IDLE_MAX_M = 0.04; // sway idle motion, at most 4 cm
 const SIM_SNAP_M = 1.5; // a sim body that moved further than this in one frame is a different person: snap
+/** Simulated body buffers: x, y, pressure, heading (rad) per person, interpolated between frames. */
+const SIM_STRIDE = 4;
+/** Body states on the wire (crowdsim/person.go). */
+const ST_STANDING = 0, ST_WALKING = 1, ST_SEATED = 2, ST_QUEUEING = 3, ST_PUSHING = 4;
 const SIM_MATCH_M = 1.5; // phone node ↔ simulated body matching radius
 const NEIGHBOURS = 3; // nearest bodies each node links to when the server sends no links
 const MAX_PACKETS = 260;
@@ -113,7 +117,7 @@ const MAX_PACKETS = 260;
 interface Ripple { t0: number; style: string; max: number; w?: number }
 
 /** Names are drawn on the map while at most this many real phones are connected (otherwise on hover / selection). */
-const NAMES_MAX = 12;
+const NAMES_MAX = 8;
 const SHAKE_RIPPLE_MS = 260;
 
 interface Body {
@@ -172,6 +176,13 @@ function hash(s: string): number {
 const rgba = (c: RGB, a: number) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 const clamp = (v: number, lo: number, hi: number) => (v < lo ? lo : v > hi ? hi : v);
+/** Interpolate an angle (rad) the short way round. */
+function lerpAngle(a: number, b: number, f: number): number {
+  let d = (b - a) % (Math.PI * 2);
+  if (d > Math.PI) d -= Math.PI * 2;
+  else if (d < -Math.PI) d += Math.PI * 2;
+  return a + d * f;
+}
 const ease = (f: number) => (f < 0.5 ? 4 * f * f * f : 1 - (-2 * f + 2) ** 3 / 2);
 const easeOut = (f: number) => 1 - (1 - f) ** 3;
 const smooth = (e0: number, e1: number, x: number) => {
@@ -212,11 +223,13 @@ export class Mesh {
   private perPhone = 1;
   private sim: SimFrame | null = null;
   private simGeo: SimState | null = null;
-  // Simulated bodies, stride 3 (x, y, pressure), venue m: interpolated from prev to cur over one frame gap.
+  // Simulated bodies, stride SIM_STRIDE (x, y, pressure, heading), venue m: interpolated from prev to cur over one frame gap.
   private simPrev = new Float32Array(0);
   private simCur = new Float32Array(0);
   private simDraw = new Float32Array(0);
   private simPhone = new Uint8Array(0);
+  /** State of each simulated body (ST_STANDING … ST_PUSHING, latest frame). */
+  private simState = new Uint8Array(0);
   /** Packed density of each simulated body (people/m², latest frame; not interpolated). */
   private simDens = new Float32Array(0);
   private simClaim = new Uint8Array(0);
@@ -288,6 +301,8 @@ export class Mesh {
   quietGossip = false;
   /** Drawn above the background, below everything else (custom areas). */
   underlay: ((g: CanvasRenderingContext2D, now: number) => void) | null = null;
+  /** Table demo layer (tablelayer.ts): drawn below and above the dots; it draws two-phone pushes, so drawWaves skips them. */
+  table: { draw(g: CanvasRenderingContext2D, now: number, above: boolean): void; hit(wx: number, wy: number): [string, string] | null } | null = null;
 
   constructor(private canvas: HTMLCanvasElement) {
     this.ctx = canvas.getContext('2d')!;
@@ -317,6 +332,8 @@ export class Mesh {
 
   update(nodes: Node[], waves: Wave[], links: [string, string][], clusters: Cluster[], venue: { w: number; h: number }) {
     const now = performance.now();
+    // A scenario preview (nothing running) is shown in the room it would build, not the live venue.
+    if (this.simPreview && !this.sim && this.simPreview.venue) venue = this.simPreview.venue;
     if (venue.w !== this.venue.w || venue.h !== this.venue.h) {
       this.venue = { w: Math.max(1, venue.w), h: Math.max(1, venue.h) };
       this.layout();
@@ -406,6 +423,7 @@ export class Mesh {
     this.waveNodes.clear();
     for (const w of waves) {
       this.waveKeys.add(key(w.from, w.to));
+      if (w.pair) continue; // a two-phone push is yellow (tablelayer.ts): no red rings
       this.waveNodes.add(w.from);
       this.waveNodes.add(w.to);
     }
@@ -427,12 +445,21 @@ export class Mesh {
     b.vx = b.vy = 0;
   }
 
+  /** A scenario's venue shown before it runs (Simulation page, nothing running): its furniture, doors and exits. null = none. */
+  private simPreview: SimState | null = null;
+
+  /** Show (or clear) a scenario preview while no simulation runs; the venue size must already be set to the preview's. */
+  setSimPreview(geo: SimState | null) {
+    this.simPreview = geo;
+    if (!this.sim) this.simGeo = geo;
+  }
+
   /** Simulated people (null when not simulating) and the venue's walls and exits. */
   setSim(frame: SimFrame | null, geo: SimState | null) {
     this.sim = frame;
     if (geo) this.simGeo = geo;
     if (!frame) {
-      this.simGeo = null;
+      this.simGeo = this.simPreview;
       if (this.simN) {
         this.simN = 0;
         this.simT = NaN;
@@ -448,10 +475,10 @@ export class Mesh {
     this.simAt = now;
     const list = frame.bodies;
     const n = list.length;
-    if (this.simCur.length < n * 3) {
+    if (this.simCur.length < n * SIM_STRIDE) {
       const cap = Math.max(64, n * 2);
       const grow = (old: Float32Array) => {
-        const f = new Float32Array(cap * 3);
+        const f = new Float32Array(cap * SIM_STRIDE);
         f.set(old);
         return f;
       };
@@ -459,6 +486,7 @@ export class Mesh {
       this.simCur = grow(this.simCur);
       this.simDraw = grow(this.simDraw);
       this.simPhone = new Uint8Array(cap);
+      this.simState = new Uint8Array(cap);
       this.simDens = new Float32Array(cap);
       this.simClaim = new Uint8Array(cap);
       this.simBucket = new Uint8Array(cap);
@@ -469,16 +497,16 @@ export class Mesh {
     // arrays in order and pair each body with the nearest old one a few places ahead.
     const shifted = old > 0 && n !== old;
     if (shifted) {
-      if (this.simOldC.length < old * 3) {
+      if (this.simOldC.length < old * SIM_STRIDE) {
         this.simOldP = new Float32Array(this.simCur.length);
         this.simOldC = new Float32Array(this.simCur.length);
       }
-      this.simOldP.set(P.subarray(0, old * 3));
-      this.simOldC.set(C.subarray(0, old * 3));
+      this.simOldP.set(P.subarray(0, old * SIM_STRIDE));
+      this.simOldC.set(C.subarray(0, old * SIM_STRIDE));
     }
     const SP = shifted ? this.simOldP : P, SC = shifted ? this.simOldC : C;
     if (shifted) {
-      if (this.simRemap.length < old) this.simRemap = new Int32Array(this.simCur.length / 3);
+      if (this.simRemap.length < old) this.simRemap = new Int32Array(this.simCur.length / SIM_STRIDE);
       this.simRemap.fill(-1, 0, old);
     }
     const ahead = Math.max(0, old - n) + 1;
@@ -486,13 +514,16 @@ export class Mesh {
     for (let i = 0; i < n; i++) {
       const [x, y, p, ph] = list[i];
       this.simDens[i] = list[i][4] ?? 0;
-      const j = i * 3;
+      // Heading in radians (older servers send none: face up the map); state code.
+      const hd = list[i][5] != null ? (list[i][5]! * Math.PI) / 180 : -Math.PI / 2;
+      this.simState[i] = list[i][6] ?? ST_STANDING;
+      const j = i * SIM_STRIDE;
       let o = -1;
       if (!shifted) o = i < old ? i : -1;
       else {
         let bd = 0.25;
         for (let q = ptr, end = Math.min(old, ptr + ahead); q < end; q++) {
-          const d = (x - SC[q * 3]) ** 2 + (y - SC[q * 3 + 1]) ** 2;
+          const d = (x - SC[q * SIM_STRIDE]) ** 2 + (y - SC[q * SIM_STRIDE + 1]) ** 2;
           if (d < bd) {
             bd = d;
             o = q;
@@ -505,20 +536,23 @@ export class Mesh {
       }
       if (o >= 0) {
         // Start from where the body is drawn right now, so a late frame never jumps.
-        const k = o * 3;
+        const k = o * SIM_STRIDE;
         const dx = lerp(SP[k], SC[k], a), dy = lerp(SP[k + 1], SC[k + 1], a), dp = lerp(SP[k + 2], SC[k + 2], a);
         const far = (x - dx) * (x - dx) + (y - dy) * (y - dy) > SIM_SNAP_M * SIM_SNAP_M;
         P[j] = far ? x : dx;
         P[j + 1] = far ? y : dy;
         P[j + 2] = far ? p : dp;
+        P[j + 3] = far ? hd : lerpAngle(SP[k + 3], SC[k + 3], a);
       } else {
         P[j] = x;
         P[j + 1] = y;
         P[j + 2] = p;
+        P[j + 3] = hd;
       }
       C[j] = x;
       C[j + 1] = y;
       C[j + 2] = p;
+      C[j + 3] = hd;
       this.simPhone[i] = ph ? 1 : 0;
     }
     if (shifted) for (const b of this.list) if (b.simIdx >= 0) b.simIdx = b.simIdx < old ? this.simRemap[b.simIdx] : -1;
@@ -544,7 +578,7 @@ export class Mesh {
         b.simIdx = -1; // a real phone is its own body
         continue;
       }
-      const ok = i < n && ph[i] && !claim[i] && (C[i * 3] - b.rx) ** 2 + (C[i * 3 + 1] - b.ry) ** 2 < r2;
+      const ok = i < n && ph[i] && !claim[i] && (C[i * SIM_STRIDE] - b.rx) ** 2 + (C[i * SIM_STRIDE + 1] - b.ry) ** 2 < r2;
       if (ok) claim[i] = 1;
       else b.simIdx = -1;
     }
@@ -553,7 +587,7 @@ export class Mesh {
       let best = -1, bd = r2;
       for (let i = 0; i < n; i++) {
         if (!ph[i] || claim[i]) continue;
-        const d = (C[i * 3] - b.rx) ** 2 + (C[i * 3 + 1] - b.ry) ** 2;
+        const d = (C[i * SIM_STRIDE] - b.rx) ** 2 + (C[i * SIM_STRIDE + 1] - b.ry) ** 2;
         if (d < bd) {
           bd = d;
           best = i;
@@ -563,7 +597,7 @@ export class Mesh {
         claim[best] = 1;
         b.simIdx = best;
         // Glide onto the body if the dot is visibly elsewhere.
-        const j = best * 3;
+        const j = best * SIM_STRIDE;
         if (b.vis > 0.5 && (this.simDraw[j] - b.px) ** 2 + (this.simDraw[j + 1] - b.py) ** 2 > 0.09) this.startEase(b, performance.now());
       }
     }
@@ -572,7 +606,12 @@ export class Mesh {
   private interpolateSim(now: number) {
     const a = clamp((now - this.simAt) / this.simGap, 0, 1);
     const P = this.simPrev, C = this.simCur, D = this.simDraw;
-    for (let j = 0, m = this.simN * 3; j < m; j++) D[j] = P[j] + (C[j] - P[j]) * a;
+    for (let j = 0, m = this.simN * SIM_STRIDE; j < m; j += SIM_STRIDE) {
+      D[j] = P[j] + (C[j] - P[j]) * a;
+      D[j + 1] = P[j + 1] + (C[j + 1] - P[j + 1]) * a;
+      D[j + 2] = P[j + 2] + (C[j + 2] - P[j + 2]) * a;
+      D[j + 3] = lerpAngle(P[j + 3], C[j + 3], a); // the body turns the short way round
+    }
   }
 
   /** Floor-plan image drawn under everything, stretched to the venue rectangle. */
@@ -604,6 +643,8 @@ export class Mesh {
       const a = this.bodies.get(w.from), b = this.bodies.get(w.to);
       if (a && b && near(a, b) < tol) return [w.from, w.to];
     }
+    const band = this.table?.hit(x, y);
+    if (band) return band;
     for (const l of this.links) if (near(l.a, l.b) < tol) return [l.a.id, l.b.id];
     return null;
   }
@@ -825,8 +866,8 @@ export class Mesh {
     for (const b of this.list) {
       // Target: the matched simulated body (already smooth at 10 Hz), else the latest report.
       if (b.simIdx >= 0 && b.simIdx < this.simN) {
-        b.tx = D[b.simIdx * 3];
-        b.ty = D[b.simIdx * 3 + 1];
+        b.tx = D[b.simIdx * SIM_STRIDE];
+        b.ty = D[b.simIdx * SIM_STRIDE + 1];
       } else {
         b.tx = b.rx;
         b.ty = b.ry;
@@ -852,7 +893,7 @@ export class Mesh {
       b.sway = lerp(b.sway, Math.min(2, b.data.sway), kSway);
       // How packed in: Pulse's estimate for this phone; on a simulated body, at least the body's truth.
       let crush = b.status === 'stale' ? 0 : (b.data.crush ?? 0);
-      if (b.simIdx >= 0 && b.simIdx < this.simN) crush = Math.max(crush, bodyCrush(D[b.simIdx * 3 + 2], this.simDens[b.simIdx]));
+      if (b.simIdx >= 0 && b.simIdx < this.simN) crush = Math.max(crush, bodyCrush(D[b.simIdx * SIM_STRIDE + 2], this.simDens[b.simIdx]));
       b.crush = lerp(b.crush, crush, kCrush);
       b.stale = lerp(b.stale, b.status === 'stale' ? 0.45 : 1, kStale);
       b.vis = clamp(b.vis + (b.gone ? -dt * 1000 / FADE_OUT_MS : dt * 1000 / FADE_IN_MS), 0, 1);
@@ -966,6 +1007,7 @@ export class Mesh {
 
   private spawnWavePackets(now: number) {
     for (const w of this.waves) {
+      if (w.pair) continue; // two-phone push: tablelayer.ts
       const k = `${w.from}>${w.to}`;
       if (now - (this.waveSpawn.get(k) ?? 0) < 380) continue;
       const a = this.bodies.get(w.from), b = this.bodies.get(w.to);
@@ -1040,7 +1082,7 @@ export class Mesh {
     if (this.simN) {
       // Simulated crowd: everyone is known.
       const D = this.simDraw;
-      for (let i = 0; i < this.simN; i++) this.splat(D[i * 3], D[i * 3 + 1], norm);
+      for (let i = 0; i < this.simN; i++) this.splat(D[i * SIM_STRIDE], D[i * SIM_STRIDE + 1], norm);
     } else {
       // Phones only: each stands for perPhone people (the server's participation estimate).
       const wgt = norm * this.perPhone;
@@ -1123,6 +1165,17 @@ export class Mesh {
     const pulse = this.reduced ? 0.5 : 0.5 + 0.5 * Math.sin(now / 320);
 
     this.drawVenue(g);
+    if (this.simPreview && !this.sim) {
+      // A scenario preview while nothing runs: the room alone, not the live phones.
+      this.drawSimGeometry(g);
+      g.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+      g.fillStyle = light ? 'rgba(71,85,105,0.8)' : 'rgba(148,163,184,0.6)';
+      g.font = '500 14px Inter, system-ui, sans-serif';
+      g.textAlign = 'center';
+      g.fillText('No simulation running. This is the room the chosen scenario builds; press Start to fill it.', this.w / 2, this.h - 14);
+      g.textAlign = 'left';
+      return;
+    }
     this.drawDemoSpot(g);
     if (!this.sim) this.drawLayout(g);
     this.drawSimGeometry(g);
@@ -1168,6 +1221,7 @@ export class Mesh {
     }
     g.setLineDash([]);
     this.overlay?.(g, now);
+    this.table?.draw(g, now, false);
 
     this.drawClusters(g, pulse);
     this.drawWaves(g, now, pulse);
@@ -1187,6 +1241,7 @@ export class Mesh {
     this.drawNodes(g, now, pulse);
     this.drawNames(g);
     this.drawBadges(g);
+    this.table?.draw(g, now, true);
 
     // Links of the selected phone: who it shares readings with.
     const sel = this.selected ? this.bodies.get(this.selected) : undefined;
@@ -1217,7 +1272,7 @@ export class Mesh {
       g.fillStyle = light ? 'rgba(71,85,105,0.8)' : 'rgba(148,163,184,0.6)';
       g.font = '500 18px Inter, system-ui, sans-serif';
       g.textAlign = 'center';
-      g.fillText('Waiting for phones to join the mesh…', this.w / 2, this.h / 2);
+      g.fillText('No phones on the map yet. Attendees appear here when they scan the join QR.', this.w / 2, this.h / 2);
       g.textAlign = 'left';
     }
   }
@@ -1240,6 +1295,7 @@ export class Mesh {
   private drawWaves(g: CanvasRenderingContext2D, now: number, pulse: number) {
     g.lineCap = 'round';
     for (const w of this.waves) {
+      if (w.pair) continue; // two-phone push: tablelayer.ts
       const a = this.bodies.get(w.from), b = this.bodies.get(w.to);
       if (!a || !b) continue;
       const alpha = Math.min(a.vis, b.vis);
@@ -1525,6 +1581,15 @@ export class Mesh {
     g.font = '600 10px Inter, system-ui, sans-serif';
     g.textAlign = 'left';
     g.fillText('DEMO SPOT', p0.x - NODE_R - 2, p0.y + NODE_R + 16);
+    // Each lined-up phone's place in the row (node.slot): the number its owner sees on their phone.
+    g.font = '700 11px Inter, system-ui, sans-serif';
+    g.textAlign = 'center';
+    for (const b of this.bodies.values()) {
+      if (!b.data.slot) continue;
+      const p = this.venueToWorld(b.rx, b.ry);
+      g.fillText(`#${b.data.slot}`, p.x, p.y - NODE_R - 7);
+    }
+    g.textAlign = 'left';
   }
 
   size() {
@@ -1694,85 +1759,316 @@ export class Mesh {
     g.textAlign = 'left';
   }
 
-  /** Walls, the stage barrier and exits of the simulated venue. */
+  /** Walls, furniture, doors and exits of the simulated venue (also drawn as a preview of a scenario before it runs). */
   private drawSimGeometry(g: CanvasRenderingContext2D) {
     const geo = this.simGeo;
-    if (!geo || !this.sim) return;
+    if (!geo || (!this.sim && !this.simPreview)) return;
     const light = this.theme === 'light';
+    const { s } = this.fit;
+    this.drawFurniture(g, geo.furniture ?? [], light, s);
     g.lineCap = 'round';
     g.strokeStyle = light ? 'rgba(15,23,42,0.55)' : 'rgba(203,213,225,0.55)';
     g.lineWidth = 3;
+    g.beginPath();
     for (const [x0, y0, x1, y1] of geo.walls ?? []) {
       const a = this.venueToWorld(x0, y0), b = this.venueToWorld(x1, y1);
-      g.beginPath();
       g.moveTo(a.x, a.y);
       g.lineTo(b.x, b.y);
-      g.stroke();
     }
+    g.stroke();
     g.font = '600 10px Inter, system-ui, sans-serif';
     g.textAlign = 'center';
     for (const e of geo.exits ?? []) {
       const a = this.venueToWorld(e.x0, e.y0), b = this.venueToWorld(e.x1, e.y1);
-      g.strokeStyle = e.open ? 'rgba(34,197,94,0.95)' : 'rgba(239,68,68,0.95)';
-      g.lineWidth = 5;
-      g.setLineDash(e.open ? [] : [4, 4]);
+      const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+      const door = e.kind === 'door', stile = e.kind === 'turnstile', em = e.kind === 'emergency';
+      // Open: green for a way out, amber-white for an inner door, blue for a turnstile; closed: red, dashed.
+      const col = !e.open ? 'rgba(239,68,68,0.95)' : door ? (light ? 'rgba(217,119,6,0.9)' : 'rgba(251,191,36,0.9)') : stile ? 'rgba(56,189,248,0.95)' : 'rgba(34,197,94,0.95)';
+      g.strokeStyle = col;
+      g.lineWidth = door ? 4 : 5;
+      g.setLineDash(e.open ? (em ? [6, 3] : []) : [4, 4]);
       g.beginPath();
       g.moveTo(a.x, a.y);
       g.lineTo(b.x, b.y);
       g.stroke();
       g.setLineDash([]);
-      g.fillStyle = g.strokeStyle;
-      g.fillText(e.open ? 'EXIT' : 'CLOSED', (a.x + b.x) / 2, (a.y + b.y) / 2 - 6);
+      if (door && e.open) {
+        // A door leaf, swung open: a short arc from one jamb.
+        const len = Math.hypot(b.x - a.x, b.y - a.y);
+        const ang = Math.atan2(b.y - a.y, b.x - a.x);
+        g.lineWidth = 1.5;
+        g.beginPath();
+        g.arc(a.x, a.y, len, ang - Math.PI / 2, ang, false);
+        g.lineTo(a.x, a.y);
+        g.stroke();
+      }
+      g.fillStyle = col;
+      const label = !e.open ? 'CLOSED' : door ? '' : stile ? e.name.replace(/^Turnstile /, '') : em ? 'EMERGENCY' : 'EXIT';
+      if (label) {
+        // Keep the label inside the map: below an exit along the top wall, above one along the bottom.
+        const top = e.y0 <= 0.01 && e.y1 <= 0.01;
+        g.fillText(label, mx, top ? my + 14 : my - 6);
+      }
     }
     g.textAlign = 'left';
   }
 
-  /** Simulated people, interpolated at 10 Hz: grey, and tinted amber → red only where they are squeezed. */
+  /** Desks, seat rows, stage, counters, tiered aisles, turnstiles and fences, in venue metres. */
+  private drawFurniture(g: CanvasRenderingContext2D, items: SimFurniture[], light: boolean, s: number) {
+    if (!items.length) return;
+    const ink = light ? 'rgba(15,23,42,' : 'rgba(226,232,240,';
+    const wood = light ? 'rgba(180,140,90,' : 'rgba(170,130,80,';
+    g.lineCap = 'butt';
+    g.lineJoin = 'round';
+    g.textAlign = 'center';
+    g.font = `600 ${Math.max(9, Math.min(12, 0.4 * s))}px Inter, system-ui, sans-serif`;
+    for (const f of items) {
+      const a = this.venueToWorld(f.x0, f.y0), b = this.venueToWorld(f.x1, f.y1);
+      const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y), w = Math.abs(b.x - a.x), h = Math.abs(b.y - a.y);
+      switch (f.kind) {
+        case 'desk': {
+          g.fillStyle = wood + (light ? '0.35)' : '0.3)');
+          g.strokeStyle = wood + '0.8)';
+          g.lineWidth = 1;
+          g.beginPath();
+          g.roundRect(x, y, w, h, Math.min(3, h / 3));
+          g.fill();
+          g.stroke();
+          if (f.label) {
+            g.fillStyle = ink + '0.6)';
+            g.fillText(f.label, x + w / 2, y + h / 2 + 3.5);
+          }
+          break;
+        }
+        case 'chairs':
+        case 'seats': {
+          // n seats along the row, each a small square with a backrest on the side away from the front (the top).
+          const n = f.n ?? 1;
+          const pitch = w / n;
+          const sw = Math.min(pitch * 0.72, 0.5 * s), sd = Math.min(h * 0.8, 0.45 * s);
+          const fixed = f.kind === 'seats';
+          g.fillStyle = fixed ? (light ? 'rgba(127,29,29,0.22)' : 'rgba(153,27,27,0.35)') : ink + (light ? '0.1)' : '0.12)');
+          g.strokeStyle = fixed ? (light ? 'rgba(127,29,29,0.5)' : 'rgba(248,113,113,0.45)') : ink + '0.35)';
+          g.lineWidth = 1;
+          g.beginPath();
+          for (let i = 0; i < n; i++) {
+            const cx = x + (i + 0.5) * pitch, cy = y + h / 2;
+            g.roundRect(cx - sw / 2, cy - sd / 2, sw, sd, Math.min(2.5, sw / 4));
+          }
+          g.fill();
+          g.stroke();
+          // Backrests.
+          g.lineWidth = Math.max(1.5, 0.08 * s);
+          g.beginPath();
+          for (let i = 0; i < n; i++) {
+            const cx = x + (i + 0.5) * pitch, cy = y + h / 2;
+            g.moveTo(cx - sw / 2, cy + sd / 2);
+            g.lineTo(cx + sw / 2, cy + sd / 2);
+          }
+          g.stroke();
+          break;
+        }
+        case 'stage': {
+          g.fillStyle = light ? 'rgba(10,10,10,0.07)' : 'rgba(250,250,250,0.07)';
+          g.fillRect(x, y, w, h);
+          g.strokeStyle = light ? 'rgba(10,10,10,0.35)' : 'rgba(250,250,250,0.3)';
+          g.lineWidth = 1.5;
+          g.strokeRect(x, y, w, h);
+          g.fillStyle = ink + '0.5)';
+          g.fillText((f.label ?? 'STAGE').toUpperCase(), x + w / 2, y + h / 2 + 3.5);
+          break;
+        }
+        case 'board': {
+          g.fillStyle = light ? 'rgba(255,255,255,0.9)' : 'rgba(241,245,249,0.85)';
+          g.fillRect(x, y, w, Math.max(h, 3));
+          g.strokeStyle = ink + '0.5)';
+          g.lineWidth = 1;
+          g.strokeRect(x, y, w, Math.max(h, 3));
+          g.fillStyle = ink + '0.55)';
+          g.fillText(f.label ?? 'Board', x + w / 2, y + Math.max(h, 3) + 11);
+          break;
+        }
+        case 'counter': {
+          g.fillStyle = wood + (light ? '0.45)' : '0.4)');
+          g.fillRect(x, y, w, h);
+          g.strokeStyle = wood + '0.9)';
+          g.lineWidth = 1.2;
+          g.strokeRect(x, y, w, h);
+          g.fillStyle = light ? 'rgba(255,255,255,0.9)' : 'rgba(15,23,42,0.8)';
+          g.fillText((f.label ?? 'Bar').toUpperCase(), x + w / 2, y + h / 2 + 3.5);
+          break;
+        }
+        case 'stairs': {
+          // Treads: a ladder of thin lines down the aisle.
+          g.strokeStyle = ink + (light ? '0.18)' : '0.16)');
+          g.lineWidth = 1;
+          g.beginPath();
+          const step = Math.max(4, 0.3 * s);
+          for (let yy = y + step / 2; yy < y + h; yy += step) {
+            g.moveTo(x, yy);
+            g.lineTo(x + w, yy);
+          }
+          g.stroke();
+          break;
+        }
+        case 'turnstile': {
+          g.fillStyle = 'rgba(56,189,248,0.18)';
+          g.fillRect(x, y, w, h);
+          g.strokeStyle = 'rgba(56,189,248,0.7)';
+          g.lineWidth = 1.2;
+          g.strokeRect(x, y, w, h);
+          // The arm.
+          g.beginPath();
+          g.moveTo(x + w / 2, y + h / 2);
+          g.lineTo(x + w, y + h / 2);
+          g.stroke();
+          break;
+        }
+        case 'gate': {
+          g.fillStyle = ink + '0.08)';
+          g.fillRect(x, y, w, Math.max(h, 3));
+          if (f.label) {
+            g.fillStyle = ink + '0.55)';
+            g.fillText(f.label, x + w / 2, y + Math.max(h, 3) + 11);
+          }
+          break;
+        }
+        case 'fence': {
+          g.strokeStyle = ink + '0.6)';
+          g.lineWidth = 2;
+          g.setLineDash([2, 4]);
+          g.beginPath();
+          g.moveTo(a.x, a.y);
+          g.lineTo(b.x, b.y);
+          g.stroke();
+          g.setLineDash([]);
+          break;
+        }
+        case 'label': {
+          if (!f.label) break;
+          g.save();
+          g.translate(x + w / 2, y + h / 2);
+          if (h > w) g.rotate(-Math.PI / 2);
+          g.fillStyle = ink + '0.5)';
+          g.fillText(f.label, 0, 3.5);
+          g.restore();
+          break;
+        }
+      }
+    }
+    g.textAlign = 'left';
+  }
+
+  /**
+   * Simulated people seen from above, interpolated at 10 Hz: a shoulder
+   * ellipse turned to face the way the body faces, with a head a little
+   * forward of its centre; seated people narrower and sunk into their seat;
+   * someone being pushed leans into it (head forward, a short trail
+   * behind). The fill is the crush ramp from the simulator's truth (grey
+   * when free, amber → red as they are squeezed and the ellipse compresses).
+   * Cheap enough for 1,000 bodies at 60 fps: one fill path per tint step for
+   * shoulders, one for heads.
+   */
   private drawSimBodies(g: CanvasRenderingContext2D) {
     const n = this.simN;
     if (!this.sim || !n) return;
     const { s, ox, oy } = this.fit;
-    // Body-sized when zoomed out, capped near the phone dots' size in small venues.
-    const r = Math.max(3, Math.min(8, 0.22 * s)) * 0.8;
-    const D = this.simDraw, B = this.simBucket, ph = this.simPhone;
+    const light = this.theme === 'light';
+    // Shoulder half-width in px: body-sized (0.23 m) when zoomed in, never under 2.6 px.
+    const r = Math.max(2.6, Math.min(10, 0.23 * s));
+    const tiny = r < 3.2; // zoomed far out: plain dots are all that reads
+    const D = this.simDraw, B = this.simBucket, ph = this.simPhone, st = this.simState;
     const Q = 16; // tint steps
     const dens = this.simDens;
     let maxB = 0;
     for (let i = 0; i < n; i++) {
       // The truth: packed density and body pressure → the crush ramp (grey when free).
-      const q = Math.round(bodyCrush(D[i * 3 + 2], dens[i]) * Q);
+      const q = Math.round(bodyCrush(D[i * SIM_STRIDE + 2], dens[i]) * Q);
       B[i] = q;
       if (q > maxB) maxB = q;
     }
     // A halo around the people who are really being crushed (danger density and up, or squeezed hard).
     const hot = Math.ceil(0.72 * Q);
     if (maxB >= hot) {
-      g.fillStyle = rgba(RED, this.theme === 'light' ? 0.18 : 0.24);
+      g.fillStyle = rgba(RED, light ? 0.18 : 0.24);
       g.beginPath();
       for (let i = 0; i < n; i++) {
         if (B[i] < hot) continue;
-        const x = ox + D[i * 3] * s, y = oy + D[i * 3 + 1] * s;
-        g.moveTo(x + r * 1.9, y);
-        g.arc(x, y, r * 1.9, 0, Math.PI * 2);
+        const x = ox + D[i * SIM_STRIDE] * s, y = oy + D[i * SIM_STRIDE + 1] * s;
+        g.moveTo(x + r * 2.2, y);
+        g.arc(x, y, r * 2.2, 0, Math.PI * 2);
       }
       g.fill();
     }
-    // One path per tint step.
+    // Trails of people being pushed: a short smear back along their motion.
+    if (!tiny) {
+      g.strokeStyle = light ? 'rgba(220,38,38,0.35)' : 'rgba(248,113,113,0.4)';
+      g.lineWidth = Math.max(1, r * 0.5);
+      g.lineCap = 'round';
+      g.beginPath();
+      let any = false;
+      const P = this.simPrev, C = this.simCur;
+      for (let i = 0; i < n; i++) {
+        const j = i * SIM_STRIDE;
+        if (st[i] !== ST_PUSHING && D[j + 2] < 300) continue;
+        const vx = C[j] - P[j], vy = C[j + 1] - P[j + 1];
+        const l = Math.hypot(vx, vy);
+        if (l < 0.02) continue;
+        const k = Math.min(0.6, l * 4) * s / l;
+        const x = ox + D[j] * s, y = oy + D[j + 1] * s;
+        g.moveTo(x, y);
+        g.lineTo(x - vx * k, y - vy * k);
+        any = true;
+      }
+      if (any) g.stroke();
+    }
+    // Shoulders: one path per tint step.
+    const headStyle = light ? 'rgba(30,41,59,0.55)' : 'rgba(15,23,42,0.75)';
     for (let q = 0; q <= maxB; q++) {
       g.beginPath();
       let any = false;
       for (let i = 0; i < n; i++) {
-        if (B[i] !== q || ph[i]) continue; // phone carriers are drawn as nodes
-        const x = ox + D[i * 3] * s, y = oy + D[i * 3 + 1] * s;
-        const rr = r * (1 + (0.25 * q) / Q);
-        g.moveTo(x + rr, y);
-        g.arc(x, y, rr, 0, Math.PI * 2);
+        if (B[i] !== q) continue;
+        const j = i * SIM_STRIDE;
+        const x = ox + D[j] * s, y = oy + D[j + 1] * s;
+        if (tiny) {
+          g.moveTo(x + r, y);
+          g.arc(x, y, r, 0, Math.PI * 2);
+          any = true;
+          continue;
+        }
+        const state = st[i];
+        const squeeze = 1 - (0.3 * q) / Q; // compressed as the crush builds
+        // Seated: narrower shoulders, sunk into the seat. Standing/walking: a full shoulder line.
+        const rw = state === ST_SEATED ? r * 0.8 : r * squeeze;
+        const rd = state === ST_SEATED ? r * 0.5 : r * 0.58;
+        const hd = D[j + 3];
+        // ellipse(): rotation is of the x semi-axis, so the shoulders (wide axis) lie across the heading.
+        g.moveTo(x + rw * Math.cos(hd + Math.PI / 2), y + rw * Math.sin(hd + Math.PI / 2));
+        g.ellipse(x, y, rw, rd, hd + Math.PI / 2, 0, Math.PI * 2);
         any = true;
       }
       if (!any) continue;
       g.fillStyle = this.bodyStyle[Math.round((q / Q) * CRUSH_STEPS)];
       g.fill();
     }
+    if (tiny) return;
+    // Heads: a dot forward of the shoulder centre (further forward when leaning into a push).
+    g.beginPath();
+    for (let i = 0; i < n; i++) {
+      const j = i * SIM_STRIDE;
+      if (ph[i] && r < 5) continue; // the phone dot sits where the head would be
+      const x = ox + D[j] * s, y = oy + D[j + 1] * s;
+      const hd = D[j + 3];
+      const state = st[i];
+      const lean = state === ST_PUSHING ? 0.42 : state === ST_SEATED ? 0.05 : state === ST_WALKING ? 0.22 : state === ST_QUEUEING ? 0.1 : 0.15;
+      const hr = r * 0.42;
+      const hx = x + Math.cos(hd) * r * lean, hy = y + Math.sin(hd) * r * lean;
+      g.moveTo(hx + hr, hy);
+      g.arc(hx, hy, hr, 0, Math.PI * 2);
+    }
+    g.fillStyle = headStyle;
+    g.fill();
   }
 
   /**
@@ -1801,11 +2097,7 @@ export class Mesh {
         g.lineWidth = 1;
         g.stroke();
         g.setLineDash([]);
-        g.font = '600 10px Inter, system-ui, sans-serif';
-        g.textAlign = 'center';
-        g.fillStyle = rgba(col, light ? 0.8 : 0.7);
-        g.fillText(this.clusterLabels[ci] ?? '', p.x, top - 5);
-        g.textAlign = 'left';
+        // A calm crowd needs no caption (its numbers are in the dot tooltips); the outline alone says "a group".
         continue;
       }
 
@@ -1861,7 +2153,7 @@ export class Mesh {
     if (this.simN) {
       const D = this.simDraw;
       for (let i = 0; i < this.simN; i++) {
-        const x = D[i * 3], y = D[i * 3 + 1];
+        const x = D[i * SIM_STRIDE], y = D[i * SIM_STRIDE + 1];
         if ((x - c.x) ** 2 + (y - c.y) ** 2 < r2) hp.push(ox + x * s, oy + y * s);
       }
     } else {

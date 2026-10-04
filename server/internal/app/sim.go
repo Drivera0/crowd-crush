@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Drivera0/crowd-crush/server/internal/crowdsim"
+	"github.com/Drivera0/crowd-crush/server/internal/detect"
 	"github.com/Drivera0/crowd-crush/server/internal/hub"
 	"github.com/Drivera0/crowd-crush/server/internal/protocol"
 	"github.com/Drivera0/crowd-crush/server/internal/store"
@@ -98,6 +99,25 @@ type simRun struct {
 	simT    float64
 	alertAt float64 // s since start of Pulse's first red alert; < 0 = none
 	frame   protocol.SimFrame
+	// ownVenue: the simulated venue is the live one (same size), so the
+	// live areas apply; a classroom or auditorium is its own room and gets
+	// the default zones, as a replay from another venue does.
+	ownVenue bool
+	geo      simGeo // the simulated venue's geometry, for guidance and packing (refreshed when a door changes)
+}
+
+// simGeo is a copy of the simulated venue's geometry that the app can read
+// under its own lock (the world is behind simRun.mu, which is taken first).
+type simGeo struct {
+	exits []protocol.SimExit
+	walls [][4]float64
+	stage [][2]float64
+}
+
+func geoOf(w *crowdsim.World) simGeo {
+	g := simGeo{stage: w.G.StageOutline()}
+	g.exits, g.walls = crowdsim.GeometryJSON(w.G)
+	return g
 }
 
 var errSimRunning = errors.New("the simulation is already running (POST /api/sim/stop first)")
@@ -143,7 +163,11 @@ func (a *App) startSimAt(req SimStart, now int64) error {
 	// The operator knows roughly what share of the crowd runs Pulse; the
 	// density alerts need it to turn phones/m² into people/m².
 	cfg.Participation = req.Participation
-	s := &simRun{w: w, p: newPipeline(cfg), startMs: now, alertAt: -1, messy: !rl.Ideal()}
+	// A furnished scenario builds its own room; the pipeline runs in that
+	// venue (the snapshot carries its size), as a replay from another venue does.
+	own := cfg.VenueW == w.G.W && cfg.VenueH == w.G.H
+	cfg.VenueW, cfg.VenueH = w.G.W, w.G.H
+	s := &simRun{w: w, p: newPipeline(cfg), startMs: now, alertAt: -1, messy: !rl.Ideal(), ownVenue: own, geo: geoOf(w)}
 	a.mu.Lock()
 	if a.sim != nil {
 		a.mu.Unlock()
@@ -157,15 +181,43 @@ func (a *App) startSimAt(req SimStart, now int64) error {
 	}
 	defer a.broadcastDropped(dropped)
 	defer a.mu.Unlock()
-	a.applyZones(s.p)
+	a.applySimZones(s)
 	a.locAttach(s.p, true, now)
 	a.replay = nil
 	a.sim = s
 	a.feedSim(s, w.Events(), now)
 	s.frame = protocol.SimFrame{Bodies: w.Bodies(), Action: w.Action}
-	log.Printf("sim: %d people, %d phones (participation %.2f), scenario %s, phones: gps %.1f carry %.1f dropout %.1f",
-		len(w.Agents()), w.Phones(), req.Participation, req.Scenario, rl.GPS, rl.Carry, rl.Dropout)
+	log.Printf("sim: %d people, %d phones (participation %.2f), scenario %s in a %gx%g m venue, phones: gps %.1f carry %.1f dropout %.1f",
+		len(w.Agents()), w.Phones(), req.Participation, w.Scenario(), w.G.W, w.G.H, rl.GPS, rl.Carry, rl.Dropout)
 	return nil
+}
+
+// applySimZones gives the simulation its zones: the current areas when it
+// plays in the live venue, else the default split. Caller holds mu.
+func (a *App) applySimZones(s *simRun) {
+	if s.ownVenue {
+		a.applyZones(s.p)
+		return
+	}
+	s.p.det.SetZones(detect.DefaultZones(s.p.cfg()))
+}
+
+// simPreview describes a scenario's venue before it runs (GET
+// /api/sim?scenario=): its size, furniture, doors and exits, built the way
+// a start would build them, with one person so it costs nothing.
+func (a *App) simPreview(scenario string) (protocol.SimStatus, error) {
+	a.mu.Lock()
+	cfg := a.liveConfig()
+	layout := a.venue.Layout
+	a.mu.Unlock()
+	w, err := crowdsim.New(crowdsim.Config{W: cfg.VenueW, H: cfg.VenueH, People: 1, Participation: 1e-9, Scenario: scenario, Seed: 1, Layout: layout})
+	if err != nil {
+		return protocol.SimStatus{}, err
+	}
+	st := w.Status()
+	st.Running, st.T, st.People, st.Phones, st.Participation, st.Action, st.Truth = false, 0, 0, 0, 0, "", nil
+	st.Scenarios = crowdsim.ScenarioInfos()
+	return st, nil
 }
 
 // StopSim returns to live data.
@@ -202,8 +254,18 @@ func (a *App) SimAction(act crowdsim.Action) error {
 	if err := s.w.Apply(act); err != nil {
 		return err
 	}
-	if act.Type == crowdsim.ActDance || act.Type == crowdsim.ActIntermission {
+	switch act.Type {
+	case crowdsim.ActShove, crowdsim.ActSpawn:
+	default:
 		log.Printf("sim: %s at %.1f s", act.Type, s.w.T)
+	}
+	if act.Type == crowdsim.ActExit {
+		geo := geoOf(s.w)
+		a.mu.Lock()
+		if a.sim == s {
+			s.geo = geo
+		}
+		a.mu.Unlock()
 	}
 	return nil
 }
@@ -216,13 +278,14 @@ func (a *App) SimStatus() protocol.SimStatus {
 	layout := a.venue.Layout
 	a.mu.Unlock()
 	if s == nil {
-		st := protocol.SimStatus{}
+		st := protocol.SimStatus{Scenarios: crowdsim.ScenarioInfos()}
 		st.Exits, st.Walls = crowdsim.GeometryJSON(crowdsim.LayoutGeometry(cfg.VenueW, cfg.VenueH, layout))
 		return st
 	}
 	s.mu.Lock()
 	st := s.w.Status()
 	s.mu.Unlock()
+	st.Scenarios = crowdsim.ScenarioInfos()
 	a.mu.Lock()
 	alertAt := s.alertAt
 	a.mu.Unlock()

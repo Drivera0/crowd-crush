@@ -150,6 +150,7 @@ func (a *App) SetDemo(d protocol.DemoSpot, arrange bool) (protocol.DemoSpot, err
 		for i, id := range ids {
 			x, y := a.demoSlotLocked(i)
 			a.posIn(a.live, now, id, x, y)
+			a.live.meta[id].pinned = true
 		}
 	}
 	return d, nil
@@ -182,6 +183,83 @@ func (a *App) demoSlotLocked(i int) (x, y float64) {
 		y = d.Y - float64(row-down+1)*sp
 	}
 	return cfg.Clamp(d.X+float64(i%cols)*sp, y)
+}
+
+// demoGrid is how many slots fit across (cols) and below the spot (down).
+func (a *App) demoGrid() (sp float64, cols, down int) {
+	cfg := a.liveConfig()
+	d := a.demo
+	sp = d.Spacing
+	if sp <= 0 {
+		sp = DemoSpacing
+	}
+	cols = max(1, int(math.Floor((cfg.VenueW-d.X)/sp+1e-9))+1)
+	down = max(1, int(math.Floor((cfg.VenueH-d.Y)/sp+1e-9))+1)
+	return sp, cols, down
+}
+
+// demoSlotOfLocked is the slot (0-based) whose place is (x, y), -1 if
+// (x, y) isn't on one. The inverse of demoSlotLocked. Caller holds mu.
+func (a *App) demoSlotOfLocked(x, y float64) int {
+	sp, cols, down := a.demoGrid()
+	col := int(math.Round((x - a.demo.X) / sp))
+	r := int(math.Round((y - a.demo.Y) / sp))
+	row := r
+	if r < 0 {
+		row = down - 1 - r
+	}
+	if col < 0 || col >= cols || row < 0 {
+		return -1
+	}
+	i := row*cols + col
+	sx, sy := a.demoSlotLocked(i)
+	if math.Hypot(sx-x, sy-y) >= sp/2 {
+		return -1
+	}
+	return i
+}
+
+// demoSlotsLocked is every live phone's place in the demo row (1-based),
+// for phones the server lined up and that still stand on a slot, while the
+// demo spot is on. Disconnected phones keep their place until forgotten
+// (ForgetAfterMs), so a phone that reconnects finds it free. Caller holds mu.
+func (a *App) demoSlotsLocked() map[string]int {
+	if !a.demo.On {
+		return nil
+	}
+	out := map[string]int{}
+	for id, m := range a.live.meta {
+		if !m.pinned || m.unplaced {
+			continue
+		}
+		if i := a.demoSlotOfLocked(m.x, m.y); i >= 0 {
+			out[id] = i + 1
+		}
+	}
+	return out
+}
+
+// demoRowsLocked is the row message for every lined-up phone: its place,
+// who stands before it, and whether it starts a new row. Caller holds mu.
+func (a *App) demoRowsLocked() map[string]*protocol.DemoRow {
+	slots := a.demoSlotsLocked()
+	if len(slots) == 0 {
+		return nil
+	}
+	at := make(map[int]string, len(slots))
+	for id, n := range slots {
+		at[n] = id
+	}
+	_, cols, _ := a.demoGrid()
+	out := make(map[string]*protocol.DemoRow, len(slots))
+	for id, n := range slots {
+		r := &protocol.DemoRow{N: n, NewRow: n > 1 && (n-1)%cols == 0}
+		if prev, ok := at[n-1]; ok && !r.NewRow {
+			r.Prev = a.live.meta[prev].name
+		}
+		out[id] = r
+	}
+	return out
 }
 
 // demoFreeSlotLocked is the first slot nobody known to the server stands on.
@@ -222,6 +300,7 @@ func (a *App) PhoneHelloAuto(id, ua string) {
 	case a.demo.On:
 		x, y := a.demoFreeSlotLocked(id)
 		a.helloLiveLocked(now, id, x, y, ua)
+		a.live.meta[id].pinned = true // exact: the estimator leaves it there (locate.go)
 	default:
 		a.helloUnplacedIn(a.live, now, id, ua)
 		a.nameLiveLocked(id)

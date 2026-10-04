@@ -1,6 +1,6 @@
 # Pulse: live demo run sheet
 
-The words to say are in [PITCH.md](PITCH.md). This file covers the clicks, the phones and what to do when something breaks. The full pre-demo checklist is in [TODO.md](../TODO.md) under "Pre-demo checklist". Do it at home first, then the short version below at the venue.
+The words to say are in [PITCH.md](PITCH.md). This file covers the clicks, the phones and what to do when something breaks. Setting up the sign and zone lights on the table (USB, LED meanings, recovery): [TABLE-DEMO.md](TABLE-DEMO.md). The full pre-demo checklist is in [TODO.md](../TODO.md) under "Pre-demo checklist". Do it at home first, then the short version below at the venue.
 
 ## What's on the table
 
@@ -22,13 +22,13 @@ Solo build, so Dan presents and drives. If a friend helps, they hold Phone C and
 
 Run the "At the venue, before judges arrive" block of the TODO checklist. Then these demo-specific steps:
 
-1. `./bin/pulse -check`. Note which services are red; each one has a fallback below.
+1. `./bin/pulse -check`. Note which services are red; each one has a fallback below. Once Pulse and the tunnel are running, `scripts/preflight.sh` is the go/no-go list (public URL, every board flashed red and read back, demo spot).
 2. Start the tunnel (`cloudflared tunnel run ... pulse`, or `make tunnel`). Open the QR on a phone on **mobile data**. If it's a quick tunnel, open the dashboard through the tunnel URL so the QR matches.
 3. **Areas & alerts** → draw a small area at the front of the map, name it `Stage front`, mark it **High risk**, set **Capacity** to `3` phones and a message such as "Hold entry at the stage front and open the side exit." Save.
 4. Join Phones A, B, C. On each: Join → allow Motion & Orientation → tap/drag the dot inside `Stage front`. Lay them flat. The area is at its limit, not over it.
 5. Check the moment works: join a fourth phone (or your laptop browser through the tunnel), drag it into `Stage front`. Within about 3 s: zone red, briefing card, voice, sign flashes, and **the fourth phone shows the red "move this way" screen with an arrow**. Acknowledge and Resolve the card. Drag the fourth dot out again.
    - If the arrow does not appear for a capacity rule, the guidance only follows density or push alerts. Switch to plan B for the moment: remove the Capacity rule and restart the server with participation about `0.25` (`./bin/pulse -dump-config > detect.json`, edit `participation`, `./bin/pulse -config detect.json`), so four phones close together read as a red cluster. Re-test. Say so if asked: it's the same knob a real event would tune.
-6. Click the sound button once (spoken alerts on). Volume up.
+6. Click the sound button once (spoken alerts on). Volume up. **Settings** → type your name under "Your name", so Acknowledge and Resolve write "by Dan" into the timeline (nothing asks for it during the demo).
 7. **Recordings** → play one good recording to the end, then **Back to live**. Leave the picker on that recording.
 8. **Simulation** → start once and stop, so you know it works on this machine. Leave the people count at 250.
 9. Live page, full screen, QR visible. Phones A to C on the table, screens on (Low Power Mode off).

@@ -52,6 +52,9 @@ func (a *App) SetAreas(areas []protocol.Area) ([]protocol.Area, error) {
 	if a.replay != nil {
 		a.applyReplayZones(a.replay)
 	}
+	if a.sim != nil {
+		a.applySimZones(a.sim)
+	}
 	log.Printf("areas: %d custom area(s)", len(clean))
 	return cloneAreas(clean), nil
 }
@@ -170,11 +173,20 @@ func (a *App) lightLevels(levels map[string]string, lights []string) {
 	}
 }
 
-// lightFor is the light assigned to a zone, if any. Caller holds mu.
+// lightFor is the light assigned to a zone, if any: the area's, or with no
+// areas drawn the light keyed like the default zone (A=… shows zone A, as
+// the live levels already do). Caller holds mu.
 func (a *App) lightFor(zone string) string {
 	for _, ar := range a.areas {
 		if ar.ID == zone {
 			return ar.Light
+		}
+	}
+	if len(a.areas) == 0 {
+		for _, l := range a.opt.Sign.Zones() {
+			if l == zone {
+				return l
+			}
 		}
 	}
 	return ""

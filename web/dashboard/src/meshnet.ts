@@ -113,7 +113,7 @@ export function initMeshNet(ctx: MeshNetCtx) {
 
   /** "direct" or "relayed via Blue Otter · 2 hops", with the link count and mesh round trip. */
   const routeText = (n: MeshNode | undefined): string => {
-    if (!n) return 'direct · no links to other phones';
+    if (!n) return 'direct to the server · no links to other phones';
     const route = n.via
       ? `relayed via ${ctx.nameOf(n.via)} · ${n.hops ?? 1} ${(n.hops ?? 1) === 1 ? 'hop' : 'hops'}`
       : n.jam
@@ -168,9 +168,9 @@ export function initMeshNet(ctx: MeshNetCtx) {
         toast('No phone can be jammed yet: phones need a link to another phone first (two or more phones on the same network).', 'info');
         return;
       }
-      toast(on ? `Jammed ${phones.length} ${phones.length === 1 ? 'phone' : 'phones'}: their WebSockets are closed. Watch them keep reporting through their neighbours.` : 'Connections restored.', on ? 'watch' : 'ok');
+      toast(on ? `Jammed ${phones.length} ${phones.length === 1 ? 'phone' : 'phones'}: their own connection is closed. Watch them keep reporting through their neighbours.` : 'Connections restored.', on ? 'watch' : 'ok');
     } catch (e) {
-      toast(`Mesh: ${(e as Error).message}`, 'error');
+      toast(`Couldn't change the connections: ${(e as Error).message}`, 'error');
     }
   });
 
@@ -187,7 +187,9 @@ export function initMeshNet(ctx: MeshNetCtx) {
         c.hidden = true;
       } else {
         c.hidden = false;
-        c.textContent = `${f.reporting} of ${f.phones} ${f.phones === 1 ? 'phone' : 'phones'} reporting · ${f.viaMesh} via the mesh`;
+        c.textContent =
+          `${f.reporting} of ${f.phones} ${f.phones === 1 ? 'phone' : 'phones'} reporting` +
+          (f.viaMesh > 0 ? ` · ${f.viaMesh} through another phone` : '');
         c.classList.toggle('relay', f.viaMesh > 0);
       }
       $('meshLayerWrap').hidden = !f || (f.links.length === 0 && jammed === 0);

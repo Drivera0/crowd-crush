@@ -44,3 +44,30 @@ func TestBurstKeepsSmallestRTT(t *testing.T) {
 		t.Fatalf("new burst rtt = %d", rtt)
 	}
 }
+
+// TestSlowBurstKeepsBetterOffset: a congested burst (every ping slow) must
+// not replace a good offset with one that is only good to ± its RTT/2,
+// except after MaxKeptBursts of them in a row (the clock may have drifted).
+func TestSlowBurstKeepsBetterOffset(t *testing.T) {
+	var s Sync
+	s.Pong(0, 5000+40, 80) // rtt 80, off 5000
+	s.EndBurst()
+	for i := 0; i < MaxKeptBursts; i++ {
+		s.Pong(1000, 1000+5000+800, 1900) // rtt 900, off 5350: asymmetric, slow
+		s.EndBurst()
+		if off, rtt, _ := s.Result(); off != 5000 || rtt != 80 {
+			t.Fatalf("slow burst %d replaced the offset: off=%d rtt=%d", i, off, rtt)
+		}
+	}
+	s.Pong(1000, 1000+5000+800, 1900)
+	s.EndBurst()
+	if off, _, _ := s.Result(); off != 5350 {
+		t.Fatalf("after %d slow bursts the offset should follow: %d", MaxKeptBursts+1, off)
+	}
+	// A burst about as good as the current one is taken at once.
+	s.Pong(2000, 2000+5100+500, 3000) // rtt 1000, off 5100
+	s.EndBurst()
+	if off, _, _ := s.Result(); off != 5100 {
+		t.Fatalf("comparable burst not taken: %d", off)
+	}
+}

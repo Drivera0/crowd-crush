@@ -37,8 +37,8 @@ Copy `.env.example` to `.env` (git-ignored); the server reads it on start. All o
 | `TIGER_DATABASE_URL` | readings recorded to `recordings/auto/*.jsonl` |
 | `GEMINI_API_KEY` (`GEMINI_MODEL`) | template briefing sentence |
 | `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` | dashboard uses the browser's speech synthesis |
-| `SIGN_URL` | no sign (Arduino + ESP32 zone lights over Wi-Fi, or `serial:auto` for the sign on USB: see docs/SETUP.md) |
-| `PUBLIC_URL` | QR code uses the dashboard's own host |
+| `SIGN_URL` | no sign (boards on USB: `serial:auto,A=serial:auto,B=serial:auto`; or Wi-Fi URLs: see docs/SETUP.md, docs/TABLE-DEMO.md) |
+| `PUBLIC_URL` | QR code uses a running quick tunnel if one is found, else the dashboard's own host (a link pasted in the dashboard's QR window wins over both, and over `PUBLIC_URL`) |
 | `VENUE_W`, `VENUE_H` | 24 × 16 m venue |
 | `VENUE_LAT`, `VENUE_LON`, `VENUE_BEARING` | no geo-anchor: GPS fixes are ignored and phones are placed by hand (set it later with `PUT /api/venue`; it's saved in `data/venue.json`, which wins over the env on restart) |
 
@@ -183,7 +183,9 @@ Read it honestly. A sudden surge into a loose crowd is caught ~2 s after the cro
 | `GET/PUT /api/areas` | watch areas `{id, name, sens, poly, light, rules}` (`data/areas.json`) |
 | `POST /api/alerts/{id}/ack`, `/resolve` | optional body `{"by"}` (ack) / `{"by", "note"}` (resolve; `by` ≤ 60, `note` ≤ 280 chars, else 400; an empty body still works) → the updated alert with `ackBy` / `resolvedBy` / `note` (also broadcast to dashboards, kept in the log); 404 for an unknown id |
 | `POST /api/alerts/clear` | drops resolved and test alerts from the log, keeps open and acknowledged real incidents → `{"type":"alerts","alerts":[…]}`, also broadcast |
-| `GET /api/join` | `{"url", "reachable": "public"\|"lan"\|"local"}`: the URL the QR code points at and whether phones can reach it (`public`: `PUBLIC_URL` set or a public hostname; `lan`: private IP / LAN-only name; `local`: localhost) |
+| `GET/PUT /api/join` | the URL the QR code points at: `{url, reachable: public\|lan\|local, secure, source: settings\|env\|tunnel\|request, display, problem}`. Order: a link set in the dashboard's QR window (`PUT {"url"}`, saved in `data/join.json`, `""` clears), `PUBLIC_URL`, a running Cloudflare quick tunnel (auto-detected), the dashboard's own address |
+| `POST /api/join/test` | `{url?}` → the server fetches the join link itself: `{ok, status, ms, secure, pulse: this\|other, message}` |
+| `POST /api/join/report`, `GET /api/join/stats` | phones report why joining failed (`inapp`, `insecure`, `motion-denied`, `no-motion`, …); stats: `{joined, streaming, problems}` |
 | `GET /api/hardware` | signs and zone lights: online, Wi-Fi, BLE counts, `x, y`, `beacon`, `peers` |
 | `PUT /api/hardware/{key}/pos` | `{x, y}` (key `sign` or a light letter) → hardware list; 404 for an unknown board |
 | `GET /api/node/{id}` | one phone's details and last 30 s of readings |
@@ -216,7 +218,7 @@ Web dev with hot reload: run `./bin/pulse`, then `cd web && npm run dev:dash` (o
 
 `arduino/sign/sign.ino` for the Uno R4 WiFi: copy `arduino_secrets.h.example` to `arduino_secrets.h`, add Wi-Fi, flash, read the IP off the serial monitor, set `SIGN_URL=http://<ip>`. It serves `GET /level?v=calm|yellow|red&zone=B`: calm = heartbeat, yellow = `!`, red = flashing arrow + STOP (and pin 7 high for a buzzer/LED).
 
-**Over USB, no Wi-Fi:** `SIGN_URL=serial:auto` (or `serial:/dev/cu.usbmodem1101`, `serial:COM7`, `A=serial:…` for a zone) drives the sign through the cable at 115200 baud: one `L <calm|yellow|red> <zone>` line per level change, `S` for a `/pulse`-shaped status line. The server sets DTR (the R4 needs it), reconnects if the cable comes out, and re-sends the current level. If Wi-Fi doesn't connect within 15 s, the firmware carries on over USB only (a small "USB" shows while calm) and keeps retrying Wi-Fi. A server inside WSL can't see USB ports without `usbipd`, so USB mode is for the Mac at the demo. Details: [docs/SETUP.md](docs/SETUP.md).
+**Over USB, no Wi-Fi:** `SIGN_URL=serial:auto,A=serial:auto,B=serial:auto` drives the sign and both zone lights through their cables at 115200 baud: one `L <calm|yellow|red> <zone>` line per level change, `S` for a `/pulse`-shaped status line, `W <ssid> <password>` to save a Wi-Fi network. `serial:auto` asks each USB port which board it is (the two ESP32s share a USB ID), reconnects if a cable comes out, and re-sends the current level. Wi-Fi is optional on every board and retried in the background (several networks, e.g. home + hotspot). A server inside WSL can't see USB ports without `usbipd`, so USB mode is for the Mac at the demo. `scripts/boards.sh status|flash|wifi|env` does the rest. Details: [docs/SETUP.md](docs/SETUP.md), [docs/TABLE-DEMO.md](docs/TABLE-DEMO.md).
 
 ## Evaluation and load test
 

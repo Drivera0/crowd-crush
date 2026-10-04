@@ -470,7 +470,8 @@ export class Areas {
       this.canvas.style.cursor = '';
       // A click (not a drag) picks a phone, or clears the selection.
       if (press && !press.moved) {
-        const link = press.node ? null : this.mesh.linkUnder(press.x, press.y);
+        // On a dot: the phone, unless it's off the dot's core onto a table-demo push or band (tablelayer.ts).
+        const link = press.node ? (this.mesh.table?.hit(this.mesh.toWorld(press.x, press.y).x, this.mesh.toWorld(press.x, press.y).y) ?? null) : this.mesh.linkUnder(press.x, press.y);
         if (link) {
           this.onLink(link[0], link[1]);
           return;
@@ -527,7 +528,7 @@ export class Areas {
         x = Math.min(x, w.x);
         y = Math.min(y, w.y);
       }
-      const text = `${a.sens === 'high' ? '⚑ ' : ''}${a.name} · ${a.phones}`;
+      const text = `${a.sens === 'high' ? '⚑ ' : ''}${a.name}${a.phones ? ` · ${a.phones} inside` : ''}`;
       g.font = '600 12px Inter, system-ui, sans-serif';
       const tw = g.measureText(text).width;
       g.fillStyle = `rgba(${rgb},${a.level === 'calm' ? 0.22 : 0.85})`;

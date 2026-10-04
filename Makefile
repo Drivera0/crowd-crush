@@ -1,6 +1,6 @@
 # Pulse — common tasks. `make demo` builds everything and starts the server.
 
-.PHONY: all web build run demo sim test check env doctor tunnel recordings eval loadtest clean
+.PHONY: all web build run demo sim test check env doctor preflight boards tunnel recordings eval loadtest clean
 
 all: build
 
@@ -15,6 +15,7 @@ build: web
 	go build -o bin/pulse ./server/cmd/pulse
 	go build -o bin/sim ./server/cmd/sim
 	go build -o bin/dashtail ./server/cmd/dashtail
+	go build -o bin/boards ./server/cmd/boards
 
 run:
 	go run ./server/cmd/pulse $(ARGS)
@@ -51,6 +52,14 @@ env:
 # Test the services in .env without starting the server.
 doctor:
 	go run ./server/cmd/pulse -check
+
+# Table-demo go/no-go against the running server (boards, public URL, demo spot).
+preflight:
+	./scripts/preflight.sh
+
+# Boards on USB: make boards (status), or scripts/boards.sh flash|wifi|env.
+boards:
+	./scripts/boards.sh status
 
 # Phones need HTTPS for motion sensors. Quick tunnel (random URL):
 tunnel:

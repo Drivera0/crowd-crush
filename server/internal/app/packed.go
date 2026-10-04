@@ -30,6 +30,9 @@ func (a *App) standable(w, h float64, sim, layout bool) func(x, y float64) bool 
 	var stage [][2]float64
 	if l := a.venue.Layout; sim {
 		stage = crowdsim.LayoutGeometry(w, h, l).StageOutline()
+		if s := a.sim; s != nil {
+			stage = s.geo.stage
+		}
 	} else if l != nil && layout {
 		for _, pt := range l.Stage {
 			stage = append(stage, [2]float64{pt[0], pt[1]})

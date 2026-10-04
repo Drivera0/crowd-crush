@@ -7,6 +7,7 @@
 export type NodeStatus = 'connecting' | 'ok' | 'handling' | 'swaying' | 'wave' | 'stale';
 export type Level = 'calm' | 'yellow' | 'red';
 export type Point = [number, number];
+import type { DemoRow } from './join';
 
 // ---- Phone → server ----
 
@@ -112,6 +113,8 @@ export interface PhoneState {
   color?: string;
   /** This state comes from the crowd simulation running around the phone (a drill), not from the real crowd. */
   sim?: boolean;
+  /** Demo spot: this phone's place in the row at the table (shared/join.ts). */
+  row?: DemoRow;
 }
 
 export type ToPhone = Ping | PhoneState | import('./demo').Shake;
@@ -149,6 +152,8 @@ export interface Node {
   real?: boolean;
   /** Connected but not located yet (no x/y, no accepted GPS fix): x, y mean nothing and it counts toward nothing. Keep it off the map. */
   unplaced?: boolean;
+  /** Its place in the demo spot's row (1 = first), while the demo spot is on and it stands where the server lined it up. */
+  slot?: number;
   /**
    * How packed in this person is, next to the motion status (a still phone in a crush has status "ok").
    * dens: estimated people/m² around the phone; press: its level with the cluster thresholds, absent = calm;
@@ -186,6 +191,19 @@ export interface Wave {
   corr: number;
   /** The pair was found by motion (GPS-placed phones, positions only good to metres), not by distance on the map. */
   motion?: boolean;
+  /** Table demo only: a push between two phones with no third in range (no chain): yellow at most. */
+  pair?: boolean;
+}
+
+/** Table demo only: phones moving as one (matching, irregular sideways motion at a small steady lag). Yellow at most. */
+export interface Together {
+  members: string[];
+  /** Largest neighbour lag in the group (ms). */
+  lagMs: number;
+  /** Weakest neighbour match. */
+  corr: number;
+  /** When it started (server ms). */
+  since: number;
 }
 
 /** A group of phones packed together. */
@@ -266,8 +284,12 @@ export interface EvalReport {
 
 /** Simulated people (only in mode "sim"): [x, y, pressure N/m, hasPhone 0|1]. */
 export interface SimFrame {
-  /** Everyone as [x, y, pressure N/m, hasPhone 0|1, density people/m²]; density (people within 1 m ÷ the open part of that disc) is absent on older servers. */
-  bodies: [number, number, number, number, number?][];
+  /**
+   * Everyone as [x, y, pressure N/m, hasPhone 0|1, density people/m², heading °, state]; density (people
+   * within 1 m ÷ the open part of that disc), heading (where the body faces: 0 = +x, clockwise since y
+   * points down) and state (0 standing, 1 walking, 2 seated, 3 queueing, 4 pushing) are absent on older servers.
+   */
+  bodies: [number, number, number, number, number?, number?, number?][];
   t: number;
   action: string;
   /** How far the positions Pulse uses are from where the simulated people stand, once a second (shared/locate.ts). */
@@ -304,6 +326,10 @@ export interface Snapshot {
   stats: Stats;
   /** The phone-to-phone mesh: links between phones and how each reaches the server (absent in a replay). */
   mesh?: import('./mesh').MeshFrame;
+  /** The table demo profile is on (demo spot on; live only). */
+  table?: boolean;
+  /** Table demo only: groups of phones moving as one. */
+  together?: Together[];
 }
 
 export interface Alert {
@@ -338,6 +364,11 @@ export interface Alert {
    * run. Absent for live alerts and drills. These alerts leave the log when the simulation or run stops.
    */
   source?: 'sim' | 'replay';
+  /**
+   * Table demo only, on a wave alert that is yellow: what raised it. "pair" = a push between two phones,
+   * "together" = people moving as one. Absent otherwise (a crowd push).
+   */
+  cause?: 'pair' | 'together';
 }
 
 // ---- alert drills (POST /api/test-alert, GET /api/drill) ----
@@ -507,6 +538,45 @@ export interface Hardware {
   beacon?: string;
   /** Other Pulse boards this one hears, with an estimated distance (log-distance path loss). */
   peers?: { name: string; rssi: number; dist: number; age: number; mapDist?: number }[];
+  /** How the server reaches it now: "usb" (serial cable) or "wifi" (HTTP); absent while offline. */
+  link?: 'usb' | 'wifi';
+  /** Serial port, for a board on USB. */
+  port?: string;
+  /** Firmware build id the board reports ("1a2b3c4 2026-10-04"; "dev" = built by hand; absent = older than build ids). */
+  fw?: string;
+  /** Hash of the sketch in the server's checkout; fwOld = the board runs something else (reflash it). */
+  fwWant?: string;
+  fwOld?: boolean;
+  /** The board's own Wi-Fi: joined or not, the network it is on or trying, its address there. */
+  wifi?: boolean;
+  ssid?: string;
+  ip?: string;
+}
+
+/** One board in POST /api/hardware/test: shown red for a second, then asked what it shows. */
+export interface BoardTest {
+  key: string;
+  name: string;
+  url: string;
+  link?: 'usb' | 'wifi';
+  port?: string;
+  /** The board took the command. */
+  sent: boolean;
+  /** It then reported the test level back. */
+  confirmed: boolean;
+  level?: string;
+  fw?: string;
+  fwOld?: boolean;
+  error?: string;
+  ms: number;
+}
+
+/** POST /api/hardware/table: boards and laptop in a row, the demo spot beside them, what each light shows. */
+export interface TableDemo {
+  hardware: Hardware[];
+  demo: { on: boolean; x: number; y: number; spacing: number };
+  lights: { key: string; shows: string }[];
+  notes?: string[];
 }
 
 /** GET /api/sim: the in-process crowd simulation (Social Force Model). */
@@ -518,6 +588,41 @@ export interface SimExit {
   x1: number;
   y1: number;
   open: boolean;
+  /** Absent: a way out of the venue. "door": between two rooms. "turnstile": one person at a time. "emergency": used only in an alarm. */
+  kind?: 'door' | 'turnstile' | 'emergency';
+}
+
+/** A piece of the simulated venue the map draws (venue metres). "fence" is a line x0,y0 → x1,y1; "label" is text only. */
+export interface SimFurniture {
+  kind: 'desk' | 'chairs' | 'seats' | 'stage' | 'board' | 'counter' | 'stairs' | 'turnstile' | 'gate' | 'fence' | 'label' | string;
+  label?: string;
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+  /** chairs, seats: how many along the row. */
+  n?: number;
+}
+
+/** A director action a scenario offers: a plain button, one that sends the strength slider, a click on the map, or a drag. */
+export interface SimActionSpec {
+  type: string;
+  label: string;
+  tip: string;
+  kind: 'behaviour' | 'strength' | 'point' | 'drag';
+}
+
+/** A start scenario for the picker. w, h = the venue it builds (absent: the live venue). */
+export interface SimScenario {
+  id: string;
+  name: string;
+  desc: string;
+  people: number;
+  maxPeople: number;
+  participation: number;
+  w?: number;
+  h?: number;
+  actions: SimActionSpec[];
 }
 
 export interface SimState {
@@ -529,6 +634,12 @@ export interface SimState {
   action?: string;
   exits?: SimExit[];
   walls?: [number, number, number, number][];
+  /** The running (or previewed) scenario, the venue it built, and its furniture. */
+  scenario?: string;
+  venue?: { w: number; h: number };
+  furniture?: SimFurniture[];
+  /** Every scenario on offer. */
+  scenarios?: SimScenario[];
   truth?: {
     maxDensity: number;
     maxPressure: number;
@@ -543,8 +654,8 @@ export interface SimState {
 }
 
 export type SimAction =
-  | { type: 'calm' | 'stage' | 'disperse' | 'dance' | 'intermission' }
-  | { type: 'surge'; strength: number }
+  | { type: 'calm' | 'stage' | 'disperse' | 'dance' | 'intermission' | 'dismiss' | 'arrive' | 'rush' }
+  | { type: 'surge' | 'alarm'; strength: number }
   | { type: 'attract'; x: number; y: number }
   | { type: 'shove'; x: number; y: number; dx: number; dy: number; strength?: number }
   | { type: 'exit'; id: string; open: boolean }

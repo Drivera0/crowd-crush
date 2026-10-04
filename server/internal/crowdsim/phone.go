@@ -81,6 +81,9 @@ type Event struct {
 	M           protocol.Motion // motion
 }
 
+// postureSec is how long standing up or sitting down shows in the phone.
+const postureSec = 1.2
+
 const (
 	summaryTicks = 5    // 100 ms at 50 Hz
 	noiseSD      = 0.04 // m/s² per raw sample
@@ -228,6 +231,18 @@ func (w *World) bodyMotion(a *Agent, speed float64, r *rand.Rand) (bx, by, bz, r
 		bz += 0.15 * st.amp * math.Sin(ph+0.5)
 		by += st.bnc * math.Sin(2*math.Pi*w.BeatHz*t)
 		rot += 12 * st.amp * math.Abs(math.Cos(ph))
+	}
+	// Standing up or sitting down (venue.go): the torso rises or drops over
+	// about a second and leans forward on the way (a chest-worn phone sees
+	// ~1.5 m/s² vertical and ~0.5 m/s² forward; from memory of
+	// sit-to-stand accelerometry, which puts the peak at 1–3 m/s²).
+	if a.transT >= 0 {
+		if t := w.T - a.transT; t < postureSec {
+			ph := math.Pi * t / postureSec
+			by += a.transDir * 1.5 * math.Sin(2*ph)
+			bz += 0.5 * math.Sin(ph)
+			rot += 25 * math.Sin(ph)
+		}
 	}
 	// Weight shifts while standing.
 	if idle && w.T >= st.wsNext && w.T >= st.wsStart+st.wsDur {

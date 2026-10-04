@@ -124,12 +124,20 @@ type phone struct {
 	// RMS of the horizontal and vertical band-passed motion over the whole
 	// correlation window.
 	hrms, vrms float64
+
+	// Table demo profile (table.go): the phone's zones all run the profile
+	// this step, and its traces over the longer "moving together" window.
+	table bool
+	long  longTrace
 }
 
 type zone struct {
 	def ZoneDef
 
-	score     float64
+	score float64
+	// ema is the smoothed wave score; score is ema raised by the table demo
+	// profile's floors (equal to ema without the profile).
+	ema       float64
 	raw       float64
 	state     LevelState
 	direction string
@@ -161,6 +169,15 @@ type Edge struct {
 	// listed only when they look like a wave hop (|corr| ≥ ChainCorr at a
 	// wave-like lag, not vertical).
 	Motion bool
+	// Pair (table demo profile only, table.go): a push between these two
+	// phones that is not part of a chain (two judges, or a push that reached
+	// only two people). Wave is set too; it counts toward the zone at most
+	// up to yellow, and its phones are not marked wave.
+	Pair bool
+	// Together (table demo profile only): the two phones have been moving
+	// as one (matching irregular horizontal motion at a small, steady lag)
+	// for at least Table.TogetherHoldMs. Not a wave.
+	Together bool
 }
 
 // ZoneResult is the per-zone output of a step.
@@ -194,6 +211,8 @@ type Result struct {
 	Edges   []Edge // all neighbour pairs that were compared
 	Zones   []ZoneResult
 	Changes []Change
+	// Together: groups of phones moving as one (table demo profile only).
+	Together []TogetherGroup
 }
 
 // Waves returns only the travelling-wave edges.
@@ -225,6 +244,7 @@ type Detector struct {
 	lastStep int64
 	last     lastStep // inputs of the latest step, for Explain
 	seq      uint64   // step counter
+	tab      tableState
 }
 
 // New creates a detector with the default zones for cfg's venue.
@@ -565,12 +585,17 @@ func (d *Detector) Step(now int64) Result {
 		}
 	}
 
+	tableZone := d.tableZones(spatial) // nil unless the table demo profile is on (table.go)
+
 	type tally struct {
 		edges  []int     // every edge touching the zone
 		speeds []float64 // m/ms along the travel direction, per wave edge
 		waves  int
-		vx, vy float64
-		lagSum int64
+		pairs  int // of which two-phone pushes (table demo profile)
+		// together: a group moving as one touches the zone (table demo profile)
+		together bool
+		vx, vy   float64
+		lagSum   int64
 		// Phones in the zone by how well their position is known, and the
 		// roughly placed ones that are part of a wave found by motion.
 		exact, rough, roughWave int
@@ -662,13 +687,26 @@ func (d *Detector) Step(now int64) Result {
 			swayA: a.sway, swayB: b.sway, walkA: a.walking, walkB: b.walking, preChain: e.Wave})
 	}
 	d.keepChains(edges, support)
+	var groups []TogetherGroup
+	if tableZone != nil {
+		long := d.longTraces(end)
+		d.tablePairs(edges, recs, long)
+		groups = d.tableTogether(now, edges, recs, long)
+	}
 	d.last = lastStep{pairs: recs, edges: edges, n: n, maxLag: maxLag, minOverlap: minOverlap}
 
 	for i, e := range edges {
 		a, b := d.phones[e.From], d.phones[e.To]
 		var tx, ty, speed float64
-		if e.Wave {
+		if e.Together {
+			for _, zi := range unionIdx(a.zones, b.zones) {
+				tallies[zi].together = true
+			}
+		}
+		if e.Wave && !e.Pair {
 			a.wave, b.wave = true, true
+		}
+		if e.Wave {
 			tx, ty, _ = travel(a, b, e.LagMs)
 			speed = math.Hypot(b.x-a.x, b.y-a.y) / float64(max(1, abs64(e.LagMs)))
 		}
@@ -685,6 +723,9 @@ func (d *Detector) Step(now int64) Result {
 			t.edges = append(t.edges, i)
 			if e.Wave {
 				t.waves++
+				if e.Pair {
+					t.pairs++
+				}
 				t.vx += tx
 				t.vy += ty
 				t.lagSum += abs64(e.LagMs)
@@ -712,7 +753,7 @@ func (d *Detector) Step(now int64) Result {
 		}
 	}
 
-	res := Result{T: now, Edges: edges}
+	res := Result{T: now, Edges: edges, Together: groups}
 	for _, id := range ids {
 		p := d.phones[id]
 		st := protocol.StatusOK
@@ -751,10 +792,34 @@ func (d *Detector) Step(now int64) Result {
 				raw = (raw*float64(t.exact) + roughScore(t.roughWave, t.rough)*float64(t.rough)) / float64(t.exact+t.rough)
 			}
 		}
+		th := zoneThresholds(cfg, z.def.Sens)
+		a := alpha
+		if tableZone != nil && tableZone[i] {
+			// Table demo profile (table.go): faster smoothing and hold; a
+			// push that only two phones felt counts up to yellow, and so
+			// does a group moving as one.
+			a = 1 - math.Exp(-float64(dt)/float64(cfg.Table.SmoothMs))
+			th.Hold = cfg.Table.HoldMs
+			if z.def.Sens == SensHigh {
+				th.Hold /= 2
+			}
+			if t.waves > 0 && t.waves == t.pairs {
+				raw = math.Min(raw, cfg.Table.PairScore)
+			}
+		}
 		z.raw = raw
-		z.score += alpha * (raw - z.score)
+		z.ema += a * (raw - z.ema)
+		z.score = z.ema
+		if tableZone != nil && tableZone[i] {
+			if t.waves > 0 && t.waves == t.pairs {
+				z.score = math.Max(z.score, cfg.Table.PairScore) // a push between two phones: yellow while it is seen
+			}
+			if t.together {
+				z.score = math.Max(z.score, cfg.Table.TogetherScore)
+			}
+		}
 		if z.def.NoPush {
-			z.score = 0
+			z.score, z.ema = 0, 0
 		}
 		if t.waves > 0 {
 			z.direction = dirName(t.vx, t.vy)
@@ -765,7 +830,7 @@ func (d *Detector) Step(now int64) Result {
 			// lag between two such phones is not a per-person lag.
 			z.direction, z.lagMs = dirName(t.mvx, t.mvy), 0
 		}
-		if from, to, ok := z.state.Update(now, z.score, zoneThresholds(cfg, z.def.Sens)); ok {
+		if from, to, ok := z.state.Update(now, z.score, th); ok {
 			if to == protocol.LevelCalm {
 				z.direction, z.lagMs = "", 0
 			}

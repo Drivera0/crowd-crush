@@ -1,0 +1,6 @@
+# Which zone each ESP32 zone light shows, by the last 4 hex digits of its Wi-Fi MAC
+# (the "mac" in /pulse, or `boards status`). Used by scripts/boards.sh flash and
+# scripts/flash-zone-lights.ps1 for a board that has no zone stored yet; a board
+# keeps the zone it learned (in flash) across reflashes.
+7B54=A
+C72C=B

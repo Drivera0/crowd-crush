@@ -221,6 +221,9 @@ func (w *World) routine() bool {
 
 // music reports whether there is music to sway to.
 func (w *World) music() bool {
+	if w.scn != nil {
+		return false // a classroom, an auditorium, a stadium gate: no beat to sway to
+	}
 	switch w.Action {
 	case ActIntermission, ActDisperse, actCorridor:
 		return false
@@ -477,6 +480,10 @@ func (w *World) frame() {
 // behave runs the concert routine and moves groups between purposes.
 func (w *World) behave() {
 	w.enter()
+	if w.scn != nil {
+		w.venueTick()
+		return
+	}
 	w.frame()
 	if w.routine() && w.periodic == 0 {
 		rate := float64(len(w.agents)) * churnPerSec
@@ -625,6 +632,9 @@ func (w *World) intent(a *Agent) (speed, ex, ey float64, h how) {
 	g := w.G
 	cx := (g.BarrierX0 + g.BarrierX1) / 2
 	grp := a.grp
+	if w.scn != nil {
+		return w.venueIntent(a)
+	}
 	if a.hold { // the press is over, but the people behind have not let go yet
 		ex, ey, _ = toward(a, a.gx, a.gy)
 		return a.holdV, ex, ey, howPress
@@ -739,6 +749,7 @@ func (w *World) desire() {
 	// Followers stop pressing once inside the disc they would fill at ~3.5/m².
 	w.packR = math.Sqrt(float64(nFollow) / (attractPack * math.Pi))
 	for i, a := range w.agents {
+		a.idx = i
 		if a.hold {
 			w.release(i, a)
 		}
@@ -759,12 +770,13 @@ func (w *World) desire() {
 				angles = steerAngles // as calibrated against Weidmann
 			}
 			tg := TimeGap
-			if a.grp != nil && a.grp.purpose == pEvac {
+			if a.grp != nil && a.grp.purpose == pEvac || a.p != nil && (a.p.goal == gLeave || a.p.goal == gEnter) {
 				tg = EvacTimeGap
 			}
 			v, dx, dy = w.steer(i, v, ex, ey, angles, tg)
-			// Heading somewhere through a standing crowd: keep edging on.
-			if w.Action != actCorridor && v < squeeze && a.sp > squeeze {
+			// Heading somewhere through a standing crowd: keep edging on
+			// (not along a seat row, where the person ahead is sitting).
+			if w.Action != actCorridor && v < squeeze && a.sp > squeeze && (a.p == nil || a.p.phase == phNav) {
 				v = squeeze
 			}
 		}
@@ -813,7 +825,9 @@ func (w *World) orient(a *Agent, h how) {
 	default:
 		g := w.G
 		fx, fy := clamp(a.X, g.BarrierX0+0.5, g.BarrierX1-0.5), g.BarrierY
-		if a.atPOI >= 0 && a.grp != nil && a.grp.purpose == pAtPOI {
+		if w.scn != nil {
+			fx, fy, _ = w.venueFace(a)
+		} else if a.atPOI >= 0 && a.grp != nil && a.grp.purpose == pAtPOI {
 			p := w.pois[a.atPOI]
 			fx, fy = p.X, p.Y
 		}

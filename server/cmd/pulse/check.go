@@ -68,13 +68,24 @@ func runCheck(audioDir string) int {
 	if !s.Enabled() {
 		report("Sign", "SIGN_URL", errUnset, "")
 	} else {
-		cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		// serial:auto asks each USB port who it is: give it time.
+		wait := 3 * time.Second
+		usb := strings.Contains(strings.ToLower(os.Getenv("SIGN_URL")), "serial:")
+		if usb {
+			wait = 15 * time.Second
+		}
+		cctx, cancel := context.WithTimeout(ctx, wait)
 		err := s.Check(cctx)
 		cancel()
-		if err != nil {
-			err = fmt.Errorf("%v (same Wi-Fi as this laptop? venue Wi-Fi often blocks device-to-device: use a phone hotspot)", err)
+		desc := s.Describe()
+		s.Close()
+		switch {
+		case err != nil && usb:
+			err = fmt.Errorf("%v (plugged in with a data cable? If Pulse is running it holds the ports: use ./bin/pulse -preflight instead)", err)
+		case err != nil:
+			err = fmt.Errorf("%v (same Wi-Fi as this laptop? venue Wi-Fi often blocks device-to-device: use a phone hotspot, or plug the boards in and use serial:auto)", err)
 		}
-		report("Sign", "", err, s.Describe())
+		report("Sign", "", err, desc)
 	}
 
 	// Public URL (only answers while pulse and the tunnel are running)

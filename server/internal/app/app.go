@@ -105,6 +105,12 @@ type nodeMeta struct {
 
 	bcn beaconPos // latest Bluetooth beacon report and fix (beacons.go)
 	loc locMeta   // the position estimator's view of this phone (locate.go)
+
+	// pinned: the server lined this phone up at the demo spot (demo.go).
+	// An exact placement at a table: the position estimator never moves
+	// it, and it keeps its place in the row while it reconnects. Cleared
+	// when the phone places itself (tap, GPS, tower check-in).
+	pinned bool
 }
 
 func (m *nodeMeta) src() string {
@@ -298,6 +304,8 @@ type App struct {
 
 	bcn beaconState // Bluetooth beacon positioning: constants and board links (beacons.go, beaconlinks.go)
 
+	join joinState // the QR link and phones' join reports (join.go); its own lock
+
 	escAfterS int // escalation wait kept while escalation is off (escalation.go)
 }
 
@@ -408,8 +416,8 @@ func (a *App) PhoneHello(id string, x, y float64, ua string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.helloLiveLocked(hub.Now(), id, x, y, ua)
-	if m := a.live.meta[id]; m != nil { // the phone says where it is: no longer "at the tower"
-		m.tower, m.bias = "", gpsBias{}
+	if m := a.live.meta[id]; m != nil { // the phone says where it is: no longer "at the tower" or in the demo row
+		m.tower, m.bias, m.pinned = "", gpsBias{}, false
 	}
 }
 
@@ -439,6 +447,9 @@ func (a *App) PhonePos(id string, x, y float64) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if m := a.live.meta[id]; m != nil {
+		m.pinned = false // the phone placed itself
+	}
 	a.posIn(a.live, hub.Now(), id, x, y)
 }
 
@@ -486,6 +497,7 @@ func (a *App) gpsLocked(now int64, id string, lat, lon, acc float64) {
 	}
 	anchor := geo.Anchor{Lat: a.venue.Lat, Lon: a.venue.Lon, Bearing: a.venue.Bearing}
 	x, y := anchor.ToVenue(lat, lon)
+	m.pinned = false // placed by GPS from now on
 	if a.locGPS(a.live, now, id, m, x, y, acc) {
 		return // the position estimator takes the fix as it is (locate.go)
 	}
@@ -822,10 +834,15 @@ func (a *App) snapshotLocked(now int64) protocol.Snapshot {
 		status[pr.ID] = pr
 	}
 	var rtts []int64
+	var slots map[string]int
+	if p == a.live {
+		slots = a.demoSlotsLocked() // places in the demo row (demo.go)
+	}
 	for id, m := range p.meta {
 		n := protocol.Node{ID: id, X: r2(m.x), Y: r2(m.y), RTT: m.rtt, Offset: m.offset, AgeMs: max(0, pnow-m.lastRecv),
 			UA: m.ua, Acc: m.acc, Src: m.src(), Outside: m.outside,
-			Name: m.name, Color: m.color, Real: m.real, Shake: m.connected && m.shake.active(now), Unplaced: m.unplaced}
+			Name: m.name, Color: m.color, Real: m.real, Shake: m.connected && m.shake.active(now), Unplaced: m.unplaced,
+			Slot: slots[id]}
 		if !m.outside && !m.unplaced {
 			n.Zone = p.det.ZoneOf(m.x, m.y)
 		}
@@ -886,6 +903,7 @@ func (a *App) snapshotLocked(now int64) protocol.Snapshot {
 	st := a.statusLocked(p)
 	s.Status = &st
 	s.Mesh = a.meshFrameLocked(p, s.Nodes, now)
+	tableSnap(p, &s) // table demo profile (table.go)
 	return s
 }
 

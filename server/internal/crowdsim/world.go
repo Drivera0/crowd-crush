@@ -307,6 +307,15 @@ type Agent struct {
 	// The press is over but this person is still leaning forward (release).
 	hold                bool
 	holdV, freeT, holdT float64
+
+	// Furnished venues (venue.go, person.go): behaviour state, whether the
+	// seat holds this person, and the last posture change (standing up,
+	// +1, or sitting down, −1, at transT; −1 = none) for the phone signal.
+	p        *pers
+	seated   bool
+	transT   float64
+	transDir float64
+	idx      int // index in World.agents this tick (for grid lookups)
 }
 
 // Config starts a world.
@@ -314,7 +323,7 @@ type Config struct {
 	W, H          float64
 	People        int
 	Participation float64 // fraction carrying a phone, (0, 1]
-	Scenario      string  // "concert" (the only one for now)
+	Scenario      string  // "concert" (default), "classroom", "auditorium", "gate" (venue.go)
 	Seed          int64
 	StartMs       int64 // server clock at t = 0, for phone timestamps
 	// Layout, when it has walls or exits, replaces the default geometry
@@ -331,8 +340,14 @@ type Config struct {
 	Entry *Entry
 }
 
-// Scenarios lists the start scenarios.
-var Scenarios = []string{"concert"}
+// Scenarios lists the start scenarios' ids.
+var Scenarios = func() []string {
+	ids := make([]string, len(scenarios))
+	for i, s := range scenarios {
+		ids[i] = s.ID
+	}
+	return ids
+}()
 
 // World is the simulation. Not safe for concurrent use.
 type World struct {
@@ -374,6 +389,17 @@ type World struct {
 	entry     *Entry
 	pending   []*group // entry.go: groups still outside, in arrival order
 	pendingAt []float64
+	// Furnished venues (venue.go): the scenario (nil for the concert) and its state.
+	scn *Scenario
+	vs  venueState
+}
+
+// Scenario is the scenario id this world runs.
+func (w *World) Scenario() string {
+	if w.scn == nil {
+		return "concert"
+	}
+	return w.scn.ID
 }
 
 // Realism is the phones' imperfections.
@@ -381,11 +407,12 @@ func (w *World) Realism() Realism { return w.realism }
 
 // New creates a world in the given scenario.
 func New(c Config) (*World, error) {
-	if c.Scenario == "" {
-		c.Scenario = "concert"
+	scn := FindScenario(c.Scenario)
+	if scn == nil {
+		return nil, fmt.Errorf("unknown scenario %q (want one of %v)", c.Scenario, Scenarios)
 	}
-	if c.Scenario != "concert" {
-		return nil, fmt.Errorf("unknown scenario %q (want concert)", c.Scenario)
+	if scn.build != nil {
+		c.W, c.H = scn.W, scn.H
 	}
 	if !(c.W >= 6 && c.H >= 6 && c.W <= 500 && c.H <= 500) {
 		return nil, errors.New("venue must be 6–500 m on each side")
@@ -398,6 +425,21 @@ func New(c Config) (*World, error) {
 	}
 	if err := c.Realism.Validate(); err != nil {
 		return nil, err
+	}
+	if scn.build != nil {
+		// A furnished venue: its own room, furniture and people (venue.go).
+		w := &World{StartMs: c.StartMs, Participation: c.Participation, Action: ActCalm,
+			rng: rand.New(rand.NewSource(c.Seed)), realism: c.Realism, seed: c.Seed, bearing: c.Bearing, scn: scn}
+		if !c.Realism.Ideal() {
+			w.envRng = rand.New(rand.NewSource(mixSeed(c.Seed, -7)))
+		}
+		w.BeatHz = 2
+		w.vs.mode = ActCalm
+		w.truth.Init()
+		scn.build(w, min(c.People, scn.MaxPeople))
+		w.settle()
+		w.measure()
+		return w, nil
 	}
 	w := &World{G: LayoutGeometry(c.W, c.H, c.Layout), StartMs: c.StartMs, Participation: c.Participation,
 		Action: ActCalm, rng: rand.New(rand.NewSource(c.Seed)), Churn: true, Trips: true,
@@ -440,7 +482,7 @@ func (w *World) newAgent(x, y float64) *Agent {
 	a := &Agent{ID: w.nextID, X: x, Y: y, R: 0.20 + 0.06*r.Float64(), M: 55 + 40*r.Float64(),
 		V0: math.Max(0.6, math.Min(2.0, 1.3+0.25*r.NormFloat64()))}
 	w.nextID++
-	a.homeX, a.homeY, a.spotX, a.spotY, a.done, a.atPOI, a.cdir = x, y, x, y, true, -1, 1
+	a.homeX, a.homeY, a.spotX, a.spotY, a.done, a.atPOI, a.cdir, a.transT = x, y, x, y, true, -1, 1, -1
 	a.hd = -math.Pi/2 + 0.6*(r.Float64()-0.5) // roughly toward the stage
 	a.face, a.prevFace = a.hd, a.hd
 	a.wx, a.wy = r.NormFloat64(), r.NormFloat64()
@@ -535,6 +577,15 @@ func (w *World) Spawn(x, y float64, n int) int {
 		a.R = r
 		w.agents = append(w.agents, a)
 		added++
+		if w.scn != nil {
+			w.initPers(a) // standing where they appeared; they join whatever happens next
+			if w.scn.ID == "gate" {
+				a.p.goal, a.p.ready = gEnter, 1
+			} else if w.vs.mode == ActDismiss || w.vs.mode == ActAlarm {
+				a.p.goal, a.p.delay = gLeave, w.lognormal(3, 0.5)
+			}
+			continue
+		}
 		if ms = append(ms, a); len(ms) >= size {
 			w.addGroup(ms)
 			ms, size = nil, w.groupSize()
@@ -581,6 +632,14 @@ func (w *World) Apply(act Action) error {
 			return 0, errors.New("strength must be 0..1")
 		}
 		return *act.Strength, nil
+	}
+	if w.scn != nil {
+		switch act.Type {
+		case ActShove, ActExit, ActSpawn:
+			// the same in every venue
+		default:
+			return w.venueApply(act)
+		}
 	}
 	switch act.Type {
 	case ActCalm, ActDance, ActIntermission, ActStage, ActSurge, ActAttract, ActDisperse:
@@ -669,6 +728,12 @@ func (w *World) Apply(act Action) error {
 		}
 		e.Open = *act.Open
 		w.solid = w.G.solid()
+		if w.scn != nil {
+			w.buildNav() // routes change: everyone re-plans at their next look
+			for _, a := range w.agents {
+				a.p.field, a.p.reeval = nil, w.T
+			}
+		}
 	case ActDisperse:
 		if w.nearestExit(w.G.W/2, w.G.H/2) == nil {
 			return errors.New("every exit is closed: open one first")
@@ -853,7 +918,12 @@ func (w *World) settle() {
 // builds.
 func (w *World) forces(h float64) {
 	for _, a := range w.agents {
-		if a.stand {
+		if a.seated {
+			// Held in the seat: a critically damped spring to the seat (the
+			// chair is fixed to the floor; the body only moves when pressed).
+			sx, sy := a.seatAnchor()
+			a.fx, a.fy = a.M*(seatK*(sx-a.X)-seatDamp*a.VX), a.M*(seatK*(sy-a.Y)-seatDamp*a.VY)
+		} else if a.stand {
 			a.fx, a.fy = -a.M*a.VX/tauStand, -a.M*a.VY/tauStand
 		} else {
 			// Squeezed, people struggle for room (struggle, above).
@@ -884,17 +954,23 @@ func (w *World) forces(h float64) {
 		nx, ny := dx/d, dy/d
 		ov := rij - d
 		f := A * math.Exp(math.Min(ov, 0.4)/B)
+		if a.seated || b.seated {
+			// Someone in a seat is more furniture than crowd to the person
+			// squeezing past or sitting down next to them: little personal
+			// space is kept (contact forces still act in full).
+			f *= seatedSocial
+		}
 		// Someone standing yields in full to a person on the move (they
 		// step aside to let them past); only standers' pushes on each
 		// other go through the dead-band.
-		if a.stand && !b.stand {
+		if a.stand && !b.stand && !a.seated {
 			a.fx += f * nx
 			a.fy += f * ny
 		} else {
 			a.sx += f * nx
 			a.sy += f * ny
 		}
-		if b.stand && !a.stand {
+		if b.stand && !a.stand && !b.seated {
 			b.fx -= f * nx
 			b.fy -= f * ny
 		} else {
@@ -934,36 +1010,19 @@ func (w *World) forces(h float64) {
 	w.resetPins()
 	for _, a := range w.agents {
 		for _, s := range w.solid {
-			cx, cy := closest(s, a.X, a.Y)
-			dx, dy := a.X-cx, a.Y-cy
-			d2 := dx*dx + dy*dy
-			if d2 > (a.R+cutExtra)*(a.R+cutExtra) {
-				continue
-			}
-			d := math.Sqrt(d2)
-			if d < 1e-6 {
-				continue
-			}
-			nx, ny := dx/d, dy/d
-			ov := a.R - d
-			f := A * math.Exp(math.Min(ov, 0.4)/B)
-			a.sx += f * nx
-			a.sy += f * ny
-			if ov > 0 {
-				c := K * ov
-				a.fx += c * nx
-				a.fy += c * ny
-				a.comp += c
-				tx, ty := -ny, nx
-				vt := a.VX*tx + a.VY*ty
-				kap := math.Min(Kappa*ov, 0.5*a.M/h)
-				a.fx -= kap * vt * tx
-				a.fy -= kap * vt * ty
+			w.wallForce(a, s, h)
+		}
+		for _, e := range w.vs.gates {
+			// A turnstile is a wall for everyone but the person it is letting through.
+			if e.Open && e.token != a {
+				w.wallForce(a, Seg{e.X0, e.Y0, e.X1, e.Y1}, h)
 			}
 		}
 		w.pinForce(a, h) // real people standing in the crowd (pinned.go)
 		sx, sy := a.sx, a.sy
-		if a.stand {
+		if a.seated {
+			sx, sy = 0, 0 // a seat is not somewhere you shuffle away from a neighbour
+		} else if a.stand {
 			m := math.Hypot(sx, sy)
 			k := 0.0
 			dead := standDead
@@ -977,6 +1036,45 @@ func (w *World) forces(h float64) {
 		}
 		a.fx += sx
 		a.fy += sy
+	}
+}
+
+// Seats (venue.go): the spring holding a seated body, critically damped
+// (seatDamp = 2·√seatK).
+const (
+	seatK        = 30.0 // 1/s²
+	seatDamp     = 11.0 // 1/s
+	seatedSocial = 0.15 // social repulsion to or from a seated body, × the usual
+)
+
+// wallForce adds wall segment s's social repulsion (into sx, sy) and
+// contact force and friction (into fx, fy, comp) on agent a.
+func (w *World) wallForce(a *Agent, s Seg, h float64) {
+	cx, cy := closest(s, a.X, a.Y)
+	dx, dy := a.X-cx, a.Y-cy
+	d2 := dx*dx + dy*dy
+	if d2 > (a.R+cutExtra)*(a.R+cutExtra) {
+		return
+	}
+	d := math.Sqrt(d2)
+	if d < 1e-6 {
+		return
+	}
+	nx, ny := dx/d, dy/d
+	ov := a.R - d
+	f := A * math.Exp(math.Min(ov, 0.4)/B)
+	a.sx += f * nx
+	a.sy += f * ny
+	if ov > 0 {
+		c := K * ov
+		a.fx += c * nx
+		a.fy += c * ny
+		a.comp += c
+		tx, ty := -ny, nx
+		vt := a.VX*tx + a.VY*ty
+		kap := math.Min(Kappa*ov, 0.5*a.M/h)
+		a.fx -= kap * vt * tx
+		a.fy -= kap * vt * ty
 	}
 }
 
@@ -1000,6 +1098,9 @@ func (w *World) leave() {
 		}
 		if out {
 			a.out = true
+			if p := a.p; p != nil && p.seat != nil && p.seat.occ == a {
+				p.seat.occ = nil
+			}
 			if a.phone != nil {
 				w.events = append(w.events, Event{Kind: EvGone, ID: a.phone.id})
 			}
@@ -1148,6 +1249,9 @@ func (w *World) gapAhead(i int, ex, ey float64) (float64, bool) {
 	a := w.agents[i]
 	best, onc := lookAhead, false
 	check := func(b *Agent) {
+		if b.seated {
+			return // a seated person is furniture to walk past, not someone to queue behind
+		}
 		dx, dy := b.X-a.X, b.Y-a.Y
 		if w.periodic > 0 {
 			dx -= w.periodic * math.Round(dx/w.periodic)
@@ -1198,12 +1302,16 @@ var steerAngles = []float64{0, 0.175, -0.175, 0.35, -0.35}
 func (w *World) steer(i int, speed, ex, ey float64, angles []float64, tg float64) (float64, float64, float64) {
 	bestP, bestV, bx, by := -1.0, 0.0, ex, ey
 	keepRight := false
+	a := w.agents[i]
 	for _, th := range angles {
 		if keepRight && th < 0 {
 			continue
 		}
 		c, s := math.Cos(th), math.Sin(th)
 		dx, dy := ex*c-ey*s, ex*s+ey*c
+		if th != 0 && w.scn != nil && w.vs.nav.blockedAt(a.X+0.7*dx, a.Y+0.7*dy) {
+			continue // not round the jam through a seat row or into a wall
+		}
 		gap, onc := w.gapAhead(i, dx, dy)
 		v := math.Min(speed, gap/tg)
 		if p := v * c; p > bestP+1e-9 {

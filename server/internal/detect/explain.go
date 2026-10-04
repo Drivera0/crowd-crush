@@ -110,6 +110,7 @@ func (d *Detector) Explain(from, to string) (protocol.EdgeExplain, bool) {
 	if !ok {
 		add("Strong correlation", false, "not enough overlapping readings to correlate")
 		out.Checks = append(out.Checks, chainCheck(cfg, pr, e))
+		d.tableChecks(&out, e)
 		return out, true
 	}
 	add("Strong correlation", corr >= cfg.CorrThreshold, "|r| %.2f, need %.2f", corr, cfg.CorrThreshold)
@@ -136,7 +137,23 @@ func (d *Detector) Explain(from, to string) (protocol.EdgeExplain, bool) {
 		add("Not vertical (Mexican-wave veto)", true, "vertical %.2f vs horizontal %.2f m/s²", vr, hr)
 	}
 	out.Checks = append(out.Checks, chainCheck(cfg, pr, e))
+	d.tableChecks(&out, e)
 	return out, true
+}
+
+// tableChecks adds the table demo profile's verdicts on the pair (only
+// while the profile is on and the pair is in a profile zone).
+func (d *Detector) tableChecks(out *protocol.EdgeExplain, e Edge) {
+	if !d.tab.on {
+		return
+	}
+	key := [2]string{e.From, e.To}
+	if w, ok := d.tab.pairWhy[key]; ok {
+		out.Checks = append(out.Checks, protocol.Check{Name: "Two-phone push (table demo)", Pass: w.pass, Detail: w.detail})
+	}
+	if w, ok := d.tab.why[key]; ok {
+		out.Checks = append(out.Checks, protocol.Check{Name: "Moving as one (table demo, yellow at most)", Pass: w.pass, Detail: w.detail})
+	}
 }
 
 func chainCheck(cfg *Config, pr pairRec, e Edge) protocol.Check {
@@ -146,9 +163,9 @@ func chainCheck(cfg *Config, pr pairRec, e Edge) protocol.Check {
 		return protocol.Check{Name: name, Pass: true, Detail: "chain test off"}
 	case !pr.preChain:
 		return protocol.Check{Name: name, Pass: false, Detail: "not a wave edge, so there is no chain to check"}
-	case !e.Wave && pr.motion:
+	case !(e.Wave && !e.Pair) && pr.motion:
 		return protocol.Check{Name: name, Pass: false, Detail: fmt.Sprintf("isolated: no run of %d phones hit one after the other (the lags don't add up)", cfg.MinChain)}
-	case !e.Wave:
+	case !e.Wave || e.Pair:
 		return protocol.Check{Name: name, Pass: false, Detail: fmt.Sprintf("isolated: no run of %d phones travelling the same way", cfg.MinChain)}
 	case pr.motion:
 		return protocol.Check{Name: name, Pass: true, Detail: fmt.Sprintf("part of a run of %d or more phones hit one after the other (the lags add up)", cfg.MinChain)}

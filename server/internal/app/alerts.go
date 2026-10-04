@@ -173,6 +173,7 @@ func (a *App) raiseLocked(source, kind, zone, from, to string, score float64, no
 
 func (a *App) detectTick(now int64) {
 	a.mu.Lock()
+	a.tableSyncLocked() // table demo profile follows the demo spot (table.go)
 	res, cch := a.live.step(now)
 	rch := a.stepRules(a.live, now)
 	a.packedLocked(a.live, now, false)
@@ -244,6 +245,7 @@ func (a *App) detectTick(now int64) {
 	for _, ch := range changes {
 		al, job := a.raiseLocked(source, protocol.KindWave, ch.Zone, ch.From, ch.To, round2(ch.Score), now, isReplay, false,
 			func() brief.Info { return a.waveInfoLocked(active, ch.Zone, protocol.LevelRed, pnow) })
+		al = a.tableCauseLocked(active, al, ch.To) // table demo: two-phone push / moving as one (table.go)
 		add(al, ch.To, job)
 	}
 	for _, ch := range cch {

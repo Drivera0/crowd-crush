@@ -33,6 +33,7 @@ type Sync struct {
 	burstN      int
 
 	lastRTT int64
+	kept    int // slow bursts in a row that kept the older offset (EndBurst)
 }
 
 // Pong records one ping/pong exchange.
@@ -60,10 +61,23 @@ func (s *Sync) EndBurst() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.burstN > 0 {
-		s.offset, s.rtt, s.synced = s.burstOffset, s.burstRTT, true
+		// On a congested mobile link a whole burst can be slow, and an
+		// offset is only good to ± RTT/2: a burst far worse than the one in
+		// use (over twice its RTT + 50 ms) keeps the old offset, for up to
+		// MaxKeptBursts bursts (5 minutes at one burst per 30 s) so a real
+		// clock drift is still followed.
+		if s.synced && s.burstRTT > 2*s.rtt+50 && s.kept < MaxKeptBursts {
+			s.kept++
+		} else {
+			s.offset, s.rtt, s.synced = s.burstOffset, s.burstRTT, true
+			s.kept = 0
+		}
 	}
 	s.burstN = 0
 }
+
+// MaxKeptBursts: how many slow bursts in a row may keep an older, better offset.
+const MaxKeptBursts = 10
 
 // Result returns the current offset and RTT. ok is false until the first pong.
 func (s *Sync) Result() (offset, rtt int64, ok bool) {
