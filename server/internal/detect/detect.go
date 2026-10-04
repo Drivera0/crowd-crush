@@ -13,6 +13,14 @@
 // lag between ~100 ms and ~1.2 s is a wave travelling between them. Lag ≈ 0 is
 // everyone moving together (dancing, jumping), which is not a wave.
 //
+// False-positive guards on those edges:
+//   - vertical veto: if non-rhythmic vertical motion, stronger than the
+//     horizontal, travels between the pair too, it is people standing up in
+//     sequence (a stadium wave), not a push;
+//   - chains: a crowd wave passes person to person to person, so a wave edge
+//     only counts as part of a run of ≥ MinChain phones in one direction
+//     (the other hops only need to support it, at ChainCorr).
+//
 // Per zone: score = net fraction of edges carrying a wave in one direction,
 // smoothed; yellow/red with hold time and hysteresis.
 package detect
@@ -39,6 +47,7 @@ type Sample struct {
 type point struct {
 	t      int64
 	hx, hz float64
+	hy     float64 // band-passed vertical, for the vertical-motion veto
 	valid  bool
 }
 
@@ -52,14 +61,19 @@ type phone struct {
 	init               bool
 	lastValidT         int64
 	lpx, lpz, dcx, dcz float64
+	lpy, dcy           float64
 
 	pts []point
 
 	// per-step scratch
 	h     []float64
+	v     []float64 // band-passed vertical on the same grid
 	valid []bool
 	sway  float64
 	wave  bool
+	// RMS of the horizontal and vertical band-passed motion over the whole
+	// correlation window.
+	hrms, vrms float64
 }
 
 type zone struct {
@@ -240,6 +254,7 @@ func (d *Detector) Add(id string, s Sample) {
 	if !p.init {
 		p.lpx, p.dcx = s.AX, s.AX
 		p.lpz, p.dcz = s.AZ, s.AZ
+		p.lpy, p.dcy = s.AY, s.AY
 		p.lastValidT = s.T
 		p.init = true
 	}
@@ -250,9 +265,11 @@ func (d *Detector) Add(id string, s Sample) {
 	aHP := 1 - math.Exp(-dt*2*math.Pi*cfg.HighPassHz)
 	p.lpx += aLP * (s.AX - p.lpx)
 	p.lpz += aLP * (s.AZ - p.lpz)
+	p.lpy += aLP * (s.AY - p.lpy)
 	p.dcx += aHP * (p.lpx - p.dcx)
 	p.dcz += aHP * (p.lpz - p.dcz)
-	p.append(point{t: s.T, hx: p.lpx - p.dcx, hz: p.lpz - p.dcz, valid: true})
+	p.dcy += aHP * (p.lpy - p.dcy)
+	p.append(point{t: s.T, hx: p.lpx - p.dcx, hz: p.lpz - p.dcz, hy: p.lpy - p.dcy, valid: true})
 }
 
 func (p *phone) append(pt point) {
@@ -271,6 +288,7 @@ func (p *phone) append(pt point) {
 func (p *phone) resample(start, step int64, n int, axis string) {
 	const gapMs = 400
 	p.h = growF(p.h, n)
+	p.v = growF(p.v, n)
 	p.valid = growB(p.valid, n)
 	hx := make([]float64, n)
 	hz := make([]float64, n)
@@ -283,13 +301,14 @@ func (p *phone) resample(start, step int64, n int, axis string) {
 		p.valid[i] = false
 		switch {
 		case j < len(p.pts) && p.pts[j].t == t && p.pts[j].valid:
-			hx[i], hz[i], p.valid[i] = p.pts[j].hx, p.pts[j].hz, true
+			hx[i], hz[i], p.v[i], p.valid[i] = p.pts[j].hx, p.pts[j].hz, p.pts[j].hy, true
 		case j > 0 && j < len(p.pts):
 			a, b := p.pts[j-1], p.pts[j]
 			if a.valid && b.valid && b.t-a.t <= gapMs {
 				f := float64(t-a.t) / float64(b.t-a.t)
 				hx[i] = a.hx + f*(b.hx-a.hx)
 				hz[i] = a.hz + f*(b.hz-a.hz)
+				p.v[i] = a.hy + f*(b.hy-a.hy)
 				p.valid[i] = true
 			}
 		}
@@ -318,6 +337,7 @@ func (p *phone) resample(start, step int64, n int, axis string) {
 	for i := range p.h {
 		if !p.valid[i] {
 			p.h[i] = 0
+			p.v[i] = 0
 		}
 	}
 }
@@ -360,6 +380,7 @@ func (d *Detector) Step(now int64) Result {
 		if cnt >= swayN/2 {
 			p.sway = math.Sqrt(ss / float64(cnt))
 		}
+		p.hrms, p.vrms = rms(p.h, p.valid), rms(p.v, p.valid)
 	}
 
 	// Neighbour pairs: right and down, so each pair is visited once with
@@ -380,15 +401,18 @@ func (d *Detector) Step(now int64) Result {
 	maxLag := int(cfg.MaxLagMs / cfg.StepMs)
 	minOverlap := n - maxLag
 	var edges []Edge
+	var axes []int     // 0 = along a row (+col), 1 = along a column (+row)
+	var support []bool // hop is wave-like enough to extend a chain
 	for _, id := range ids {
 		if !active[id] {
 			continue
 		}
 		a := d.phones[id]
-		for _, dir := range [][2]int{{0, 1}, {1, 0}} {
+		for ax, dir := range [][2]int{{0, 1}, {1, 0}} {
 			for _, bid := range byCell[[2]int{a.row + dir[0], a.col + dir[1]}] {
 				b := d.phones[bid]
 				e := Edge{From: a.id, To: b.id}
+				sup := false
 				canCorr := a.lastT >= a.handlingUntil && b.lastT >= b.handlingUntil &&
 					a.sway >= cfg.EdgeMinSway && b.sway >= cfg.EdgeMinSway
 				if canCorr {
@@ -399,39 +423,50 @@ func (d *Detector) Step(now int64) Result {
 						e.LagMs = int64(math.Round(lag * float64(cfg.StepMs)))
 						e.Corr = corr
 						al := abs64(e.LagMs)
+						waveLag := al >= cfg.MinWaveLagMs && al <= cfg.MaxWaveLagMs
 						// A periodic motion (walking cadence) has several equally good
 						// lags; only a clear single peak says which way it travels.
 						unambiguous := corr-second >= cfg.PeakMargin
-						e.Wave = corr >= cfg.CorrThreshold && al >= cfg.MinWaveLagMs && al <= cfg.MaxWaveLagMs && unambiguous
+						e.Wave = corr >= cfg.CorrThreshold && waveLag && unambiguous
+						sup = cfg.ChainCorr > 0 && corr >= cfg.ChainCorr && waveLag
+						if (e.Wave || sup) && d.vertical(a, b, lag, maxLag, minOverlap) {
+							e.Wave, sup = false, false
+						}
 					}
-				}
-				if e.Wave {
-					a.wave, b.wave = true, true
 				}
 				edges = append(edges, e)
+				axes = append(axes, ax)
+				support = append(support, sup)
+			}
+		}
+	}
+	d.keepChains(edges, axes, support)
 
-				sign := 0
-				if e.Wave {
-					sign = 1
-					if e.LagMs < 0 {
-						sign = -1
-					}
-				}
-				za, zb := d.zoneIdx(a.row, a.col), d.zoneIdx(b.row, b.col)
-				for _, zi := range uniq(za, zb) {
-					t := &tallies[zi]
-					if dir[0] == 0 {
-						t.hTot++
-						t.hNet += sign
-					} else {
-						t.vTot++
-						t.vNet += sign
-					}
-					if e.Wave {
-						t.waves++
-						t.lagSum += abs64(e.LagMs)
-					}
-				}
+	for i, e := range edges {
+		a, b := d.phones[e.From], d.phones[e.To]
+		if e.Wave {
+			a.wave, b.wave = true, true
+		}
+		sign := 0
+		if e.Wave {
+			sign = 1
+			if e.LagMs < 0 {
+				sign = -1
+			}
+		}
+		za, zb := d.zoneIdx(a.row, a.col), d.zoneIdx(b.row, b.col)
+		for _, zi := range uniq(za, zb) {
+			t := &tallies[zi]
+			if axes[i] == 0 {
+				t.hTot++
+				t.hNet += sign
+			} else {
+				t.vTot++
+				t.vNet += sign
+			}
+			if e.Wave {
+				t.waves++
+				t.lagSum += abs64(e.LagMs)
 			}
 		}
 	}
@@ -601,6 +636,162 @@ func xcorr(a, b []float64, va, vb []bool, maxLag, minOverlap int, useAbs bool) (
 		}
 	}
 	return lag, corr, second, true
+}
+
+// vertical reports whether a candidate wave between a and b is really
+// vertical motion travelling down the line (a stadium "Mexican wave", people
+// standing or jumping in sequence) leaking into the horizontal axis through
+// phone tilt and leaning. It is vetoed when the vertical channel
+//   - is stronger than the horizontal one (VerticalRatio),
+//   - is not rhythmic on either phone (jumping or walking to a beat repeats
+//     within a second; standing up and sitting down once does not), and
+//   - travels between the pair by itself: |corr| ≥ CorrThreshold at a
+//     wave-like lag in the same direction as the horizontal one.
+//
+// A genuine push is horizontal. A crowd jumping on the spot while a push
+// travels through it is rhythmic, so it never vetoes the push. The vertical
+// lag is not required to match the horizontal one exactly: tilt and leaning
+// differ per person, which skews the horizontal lag estimate.
+func (d *Detector) vertical(a, b *phone, lag float64, maxLag, minOverlap int) bool {
+	cfg := &d.cfg
+	if cfg.VerticalRatio <= 0 || a.vrms+b.vrms <= cfg.VerticalRatio*(a.hrms+b.hrms) {
+		return false
+	}
+	if rhythm(a.v, a.valid, maxLag, minOverlap) >= cfg.CorrThreshold ||
+		rhythm(b.v, b.valid, maxLag, minOverlap) >= cfg.CorrThreshold {
+		return false
+	}
+	vlag, corr, _, ok := xcorr(a.v, b.v, a.valid, b.valid, maxLag, minOverlap, true)
+	vms := math.Abs(vlag) * float64(cfg.StepMs)
+	return ok && corr >= cfg.CorrThreshold && (vlag < 0) == (lag < 0) &&
+		vms >= float64(cfg.MinWaveLagMs) && vms <= float64(cfg.MaxWaveLagMs)
+}
+
+// rhythm measures how periodic x is: the highest autocorrelation at any lag
+// up to maxLag after it first drops below zero. Near 1 for jumping or
+// walking to a beat, low for a one-off movement.
+func rhythm(x []float64, valid []bool, maxLag, minOverlap int) float64 {
+	best, crossed := 0.0, false
+	for k := 1; k <= maxLag; k++ {
+		c := corrAt(x, x, valid, valid, k, minOverlap)
+		if c < 0 {
+			crossed = true
+		}
+		if crossed && c > best {
+			best = c
+		}
+	}
+	return best
+}
+
+// corrAt is the Pearson correlation of b[i+lag] against a[i].
+func corrAt(a, b []float64, va, vb []bool, lag, minOverlap int) float64 {
+	var sa, sb, saa, sbb, sab float64
+	var m int
+	for i := range a {
+		j := i + lag
+		if j < 0 || j >= len(b) || !va[i] || !vb[j] {
+			continue
+		}
+		x, y := a[i], b[j]
+		sa += x
+		sb += y
+		saa += x * x
+		sbb += y * y
+		sab += x * y
+		m++
+	}
+	if m < minOverlap {
+		return 0
+	}
+	fm := float64(m)
+	den := math.Sqrt((saa - sa*sa/fm) * (sbb - sb*sb/fm))
+	if den <= 1e-12 {
+		return 0
+	}
+	return (sab - sa*sb/fm) / den
+}
+
+// keepChains clears Wave on edges that are not part of a run of at least
+// MinChain phones along one row or column, all travelling the same way. A
+// crowd wave passes from person to person to person; two neighbours bumping
+// into each other only make an isolated edge.
+//
+// Like edge linking with hysteresis, the other hops of a run only need to
+// support the wave (support[i]: |corr| ≥ ChainCorr at a wave-like lag),
+// not pass every test themselves, so one noisy hop doesn't break a real
+// wave. axes[i] is 0 for an edge along a row, 1 along a column.
+func (d *Detector) keepChains(edges []Edge, axes []int, support []bool) {
+	cfg := &d.cfg
+	if cfg.MinChain <= 2 {
+		return
+	}
+	type key struct {
+		id   string
+		axis int
+	}
+	in, out := map[key][]int{}, map[key][]int{}
+	for i, e := range edges {
+		if e.Wave || support[i] {
+			in[key{e.To, axes[i]}] = append(in[key{e.To, axes[i]}], i)
+			out[key{e.From, axes[i]}] = append(out[key{e.From, axes[i]}], i)
+		}
+	}
+	consistent := func(i, j int) bool {
+		return (edges[i].LagMs < 0) == (edges[j].LagMs < 0)
+	}
+	// Longest consistent run of edges ending at / starting from edge i.
+	// Edges only point right or down, so the recursion always terminates.
+	back, fwd := make([]int, len(edges)), make([]int, len(edges))
+	var runBack, runFwd func(i int) int
+	runBack = func(i int) int {
+		if back[i] == 0 {
+			best := 0
+			for _, j := range in[key{edges[i].From, axes[i]}] {
+				if consistent(i, j) {
+					best = max(best, runBack(j))
+				}
+			}
+			back[i] = best + 1
+		}
+		return back[i]
+	}
+	runFwd = func(i int) int {
+		if fwd[i] == 0 {
+			best := 0
+			for _, j := range out[key{edges[i].To, axes[i]}] {
+				if consistent(i, j) {
+					best = max(best, runFwd(j))
+				}
+			}
+			fwd[i] = best + 1
+		}
+		return fwd[i]
+	}
+	var drop []int
+	for i, e := range edges {
+		if e.Wave && runBack(i)+runFwd(i) < cfg.MinChain { // (back+fwd-1) edges = back+fwd phones
+			drop = append(drop, i)
+		}
+	}
+	for _, i := range drop {
+		edges[i].Wave = false
+	}
+}
+
+func rms(x []float64, valid []bool) float64 {
+	var ss float64
+	var n int
+	for i, v := range x {
+		if valid[i] {
+			ss += v * v
+			n++
+		}
+	}
+	if n == 0 {
+		return 0
+	}
+	return math.Sqrt(ss / float64(n))
 }
 
 // sepSteps is how far (in steps) another peak must be to count as separate:
