@@ -80,7 +80,8 @@ func replayMaxLevel(t *testing.T, recs []store.Record) string {
 	worst := protocol.LevelCalm
 	for now := rs.recStart; now <= rs.recEnd+1000; now += 250 {
 		a.feedReplay(rs, now)
-		for _, z := range rs.p.step(now).Zones {
+		res, _ := rs.p.step(now)
+		for _, z := range res.Zones {
 			if levelRank[z.Level] > levelRank[worst] {
 				worst = z.Level
 			}

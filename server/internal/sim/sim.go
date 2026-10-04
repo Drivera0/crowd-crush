@@ -1,7 +1,12 @@
 // Package sim generates fake phone motion for the simulator and for tests.
 //
-// Phones stand on a grid; scenarios that travel (shove, wave) move along the
-// columns of each row with a fixed lag per person.
+// Phones stand in the venue (metres) in a line layout (a rows×cols grid
+// 0.6 m apart, the original demo) or a crowd layout (dense groups plus
+// stragglers, optionally wandering). Scenarios that travel (shove, wave,
+// mexican, walkpast, procession, sway) reach each phone after a delay equal
+// to its position along the travel direction (+x) divided by the walking
+// speed: 0.6 m per 0.25 s, i.e. 250 ms per person on the line. gather walks
+// people into a tight group in front of the stage and back out again.
 //
 // Besides the true positives (shove, wave) there is a set of false-positive
 // scenarios: things real crowds do that look a bit like a travelling wave and
@@ -21,7 +26,7 @@ import (
 var Scenarios = []string{
 	"calm", "walk", "dance", "handle", "shove", "wave",
 	"sway", "sway-slow", "mexican", "walkpast", "procession", "march",
-	"pocket", "bump", "jump-stagger", "wave-jump",
+	"pocket", "bump", "jump-stagger", "wave-jump", "gather",
 }
 
 // Scenario produces deterministic motion for N phones.
@@ -29,13 +34,19 @@ type Scenario struct {
 	Name   string
 	Rows   int
 	Cols   int
+	Layout Layout
 	LagSec float64 // wave lag per person
+	minX   float64 // crowd: x of the first phone along the travel direction
 	phones []*phoneSim
 	cycle  float64 // event-driven scenarios repeat their schedule every cycle seconds
 }
 
 type phoneSim struct {
-	row, col int
+	row, col int     // line layout cell
+	hx, hy   float64 // home position (m)
+	k        float64 // position along the travel direction, in people (0.6 m) from the first
+	mov      *mover  // wandering (crowd layout with Move)
+	g        *gatherPlan
 	rng      *rand.Rand
 	gain     float64 // per-person amplitude variation
 	freq     float64 // walking cadence
@@ -85,8 +96,21 @@ const (
 	epStill         // lying on the floor: no breathing, no sway
 )
 
-// New creates a scenario for n phones on a rows×cols grid (filled row by row).
+// New creates a scenario for n phones in a line layout on a rows×cols grid
+// (filled row by row).
 func New(name string, n, rows, cols int, seed int64) (*Scenario, error) {
+	return NewLayout(name, n, seed, LineLayout(rows, cols))
+}
+
+// NewLayout creates a scenario for n phones placed by lay.
+func NewLayout(name string, n int, seed int64, lay Layout) (*Scenario, error) {
+	lay = lay.withDefaults()
+	rows, cols := lay.Rows, lay.Cols
+	if lay.Kind == LayoutLine && cols <= 0 {
+		rows = max(rows, 1)
+		cols = (n + rows - 1) / rows
+		lay.Rows, lay.Cols = rows, cols
+	}
 	known := false
 	for _, s := range Scenarios {
 		known = known || s == name
@@ -94,15 +118,19 @@ func New(name string, n, rows, cols int, seed int64) (*Scenario, error) {
 	if !known {
 		return nil, fmt.Errorf("unknown scenario %q (want one of %v)", name, Scenarios)
 	}
-	if rows*cols < n {
-		return nil, fmt.Errorf("%d phones don't fit a %dx%d grid", n, rows, cols)
+	switch lay.Kind {
+	case LayoutLine:
+		if rows*cols < n {
+			return nil, fmt.Errorf("%d phones don't fit a %dx%d grid", n, rows, cols)
+		}
+	case LayoutCrowd:
+	default:
+		return nil, fmt.Errorf("unknown layout %q (want line or crowd)", lay.Kind)
 	}
-	s := &Scenario{Name: name, Rows: rows, Cols: cols, LagSec: 0.25}
+	s := &Scenario{Name: name, Rows: rows, Cols: cols, Layout: lay, LagSec: 0.25}
 	master := rand.New(rand.NewSource(seed))
 	for i := 0; i < n; i++ {
 		p := &phoneSim{
-			row:  i / cols,
-			col:  i % cols,
 			rng:  rand.New(rand.NewSource(master.Int63())),
 			gain: 0.85 + 0.3*master.Float64(),
 			freq: 1.6 + 0.5*master.Float64(),
@@ -114,6 +142,9 @@ func New(name string, n, rows, cols int, seed int64) (*Scenario, error) {
 		p.handleEnd = p.handleStart + 1.5 + master.Float64()
 		s.phones = append(s.phones, p)
 	}
+	// Positions use their own generator too, so the line layout's motion
+	// stays bit-for-bit identical to before positions existed.
+	s.place(seed)
 	// Scenario-specific schedules use their own generator so the original
 	// scenarios stay bit-for-bit identical for a given seed.
 	s.setup(rand.New(rand.NewSource(seed ^ 0x5eed5eed)))
@@ -137,12 +168,12 @@ func (s *Scenario) setup(r *rand.Rand) {
 		case "sway":
 			// Swaying to music at 0.5 Hz. People further from the stage
 			// react later (100 ms per person) plus their own 50–200 ms.
-			p.delay = float64(p.col)*0.10 + uniform(r, 0.05, 0.2)
+			p.delay = p.k*0.10 + uniform(r, 0.05, 0.2)
 		case "sway-slow":
 			// A slow ballad, one sway every 5 s (0.2 Hz): half a period
 			// (2.5 s) no longer fits the ±1.5 s lag search, so the mirror
 			// peak that gives 0.5 Hz sway away is out of view.
-			p.delay = float64(p.col)*0.15 + uniform(r, 0.05, 0.2)
+			p.delay = p.k*0.15 + uniform(r, 0.05, 0.2)
 		case "mexican":
 			p.delay = uniform(r, -0.05, 0.05)
 			p.tilt = uniform(r, -0.2, 0.2)
@@ -158,7 +189,7 @@ func (s *Scenario) setup(r *rand.Rand) {
 		// 0.6 m apart), nudging each phone sideways once.
 		s.cycle = 90
 		for _, p := range s.phones {
-			p.jolts = append(p.jolts, s.brush(r, 10+float64(p.col)*0.5+r.NormFloat64()*0.04, uniform(r, 1.5, 2.5)))
+			p.jolts = append(p.jolts, s.brush(r, 10+p.k*0.5+r.NormFloat64()*0.04, uniform(r, 1.5, 2.5)))
 		}
 	case "procession":
 		// A procession walks past alongside the line in the same direction at
@@ -170,7 +201,7 @@ func (s *Scenario) setup(r *rand.Rand) {
 			per := uniform(r, 0.45, 0.55)
 			for _, p := range s.phones {
 				if r.Float64() < 0.5 {
-					p.jolts = append(p.jolts, s.brush(r, t+float64(p.col)*per+r.NormFloat64()*0.04, uniform(r, 0.8, 1.6)))
+					p.jolts = append(p.jolts, s.brush(r, t+p.k*per+r.NormFloat64()*0.04, uniform(r, 0.8, 1.6)))
 				}
 			}
 		}
@@ -182,7 +213,11 @@ func (s *Scenario) setup(r *rand.Rand) {
 			a := s.phones[r.Intn(len(s.phones))]
 			var nb []*phoneSim
 			for _, q := range s.phones {
-				if q.row == a.row && (q.col == a.col-1 || q.col == a.col+1) {
+				if s.Layout.Kind == LayoutLine {
+					if q.row == a.row && (q.col == a.col-1 || q.col == a.col+1) {
+						nb = append(nb, q)
+					}
+				} else if q != a && math.Hypot(q.hx-a.hx, q.hy-a.hy) <= 1.0 {
 					nb = append(nb, q)
 				}
 			}
@@ -243,8 +278,11 @@ func (p *phoneSim) handling(r *rand.Rand, t, d float64) float64 {
 // N is the number of phones.
 func (s *Scenario) N() int { return len(s.phones) }
 
-// Pos returns the grid cell of phone i.
-func (s *Scenario) Pos(i int) (row, col int) { return s.phones[i].row, s.phones[i].col }
+// Cell returns the grid cell of phone i (line layout; 0, 0 in a crowd).
+func (s *Scenario) Cell(i int) (row, col int) { return s.phones[i].row, s.phones[i].col }
+
+// Pos returns phone i's starting position in venue metres.
+func (s *Scenario) Pos(i int) (x, y float64) { return s.PosAt(i, 0) }
 
 // Summary returns what phone i would send for the 100 ms starting at t
 // (seconds, true time): mean acceleration over 6 raw samples and max rotation.
@@ -264,6 +302,7 @@ func (s *Scenario) Summary(i int, t float64) (ax, ay, az, rot float64) {
 // rotation-rate magnitude (deg/s).
 func (s *Scenario) raw(i int, t float64) (ax, ay, az, rot float64) {
 	p := s.phones[i]
+	k := s.kAt(i, t)
 	n := func(sd float64) float64 { return p.rng.NormFloat64() * sd }
 	tw := 2 * math.Pi * t
 
@@ -298,14 +337,14 @@ func (s *Scenario) raw(i int, t float64) (ax, ay, az, rot float64) {
 			rot = 250 + math.Abs(n(80))
 		}
 	case "shove":
-		ax += p.gain * 2.0 * push(t-8-float64(p.col)*s.LagSec)
-		rot += 40 * math.Abs(push(t-8-float64(p.col)*s.LagSec))
+		ax += p.gain * 2.0 * push(t-8-k*s.LagSec)
+		rot += 40 * math.Abs(push(t-8-k*s.LagSec))
 	case "wave", "wave-jump":
 		// A sideways push every 2.5 s travelling down the line, growing
 		// from barely noticeable to violent over 60 s.
 		const period = 2.5
 		amp := 0.3 + 2.2*math.Min(1, t/60)
-		local := t - float64(p.col)*s.LagSec
+		local := t - k*s.LagSec
 		var x float64
 		for k := math.Floor(local / period); k >= 0 && k > math.Floor(local/period)-3; k-- {
 			x += push(local - k*period)
@@ -343,7 +382,7 @@ func (s *Scenario) raw(i int, t float64) (ax, ay, az, rot float64) {
 		if t < 3 {
 			break
 		}
-		tau := math.Mod(t-3-float64(p.col)*s.LagSec-p.delay, period)
+		tau := math.Mod(t-3-k*s.LagSec-p.delay, period)
 		if tau < 0 {
 			tau += period
 		}
@@ -363,6 +402,15 @@ func (s *Scenario) raw(i int, t float64) (ax, ay, az, rot float64) {
 		jx, jy, jz := p.jump(t)
 		ax, ay, az = ax+jx, ay+jy, az+jz
 		rot += 40 + math.Abs(n(15))
+
+	case "gather":
+		// Walking while moving (to the stage or away), standing otherwise.
+		if p.g != nil && p.g.walking(t) {
+			ay += 2.0 * p.gain * math.Sin(p.freq*tw+p.ph[2])
+			ax += 0.35 * p.gain * math.Sin(p.freq/2*tw+p.ph[3])
+			az += 0.3 * p.gain * math.Sin(p.freq*tw+p.ph[0])
+			rot += 25 + math.Abs(n(10))
+		}
 
 	case "march":
 		// The line itself walks off in the same direction with nearly the

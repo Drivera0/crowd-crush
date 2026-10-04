@@ -10,11 +10,13 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -24,6 +26,7 @@ import (
 	"github.com/Drivera0/crowd-crush/server/internal/app"
 	"github.com/Drivera0/crowd-crush/server/internal/brief"
 	"github.com/Drivera0/crowd-crush/server/internal/detect"
+	"github.com/Drivera0/crowd-crush/server/internal/protocol"
 	"github.com/Drivera0/crowd-crush/server/internal/sign"
 	"github.com/Drivera0/crowd-crush/server/internal/store"
 	"github.com/Drivera0/crowd-crush/server/internal/voice"
@@ -36,10 +39,14 @@ func main() {
 	recDir := flag.String("recordings", "recordings", "where labelled runs and fallback recordings go")
 	audioDir := flag.String("audio", "audio", "where generated mp3s go")
 	cfgPath := flag.String("config", "", "detector config JSON (defaults built in)")
-	rows := flag.Int("rows", 0, "grid rows (overrides config)")
-	cols := flag.Int("cols", 0, "grid cols (overrides config)")
-	zoneCols := flag.Int("zone-cols", 0, "grid cols per zone (overrides config)")
-	zoneRows := flag.Int("zone-rows", 0, "grid rows per zone (overrides config)")
+	dataDir := flag.String("data", "data", "where staff-drawn areas and the venue anchor are saved")
+	venueW := flag.Float64("venue-w", envFloat("VENUE_W", 0), "venue width in metres (overrides config; env VENUE_W)")
+	venueH := flag.Float64("venue-h", envFloat("VENUE_H", 0), "venue height in metres (overrides config; env VENUE_H)")
+	venueLat := flag.Float64("venue-lat", envFloat("VENUE_LAT", math.NaN()), "latitude of the venue map's top-left corner (env VENUE_LAT)")
+	venueLon := flag.Float64("venue-lon", envFloat("VENUE_LON", math.NaN()), "longitude of the venue map's top-left corner (env VENUE_LON)")
+	venueBearing := flag.Float64("venue-bearing", envFloat("VENUE_BEARING", 0), "compass bearing of the map's up, degrees clockwise from north (env VENUE_BEARING)")
+	zoneCols := flag.Int("zone-cols", 0, "default zones across the venue (overrides config)")
+	zoneRows := flag.Int("zone-rows", 0, "default zones down the venue (overrides config)")
 	check := flag.Bool("check", false, "test the services configured in .env and exit")
 	dumpConfig := flag.Bool("dump-config", false, "print the detector config as JSON and exit")
 	publicURL := flag.String("public-url", os.Getenv("PUBLIC_URL"), "URL phones should open (for the QR code); default: the dashboard's own host")
@@ -52,13 +59,17 @@ func main() {
 			log.Fatalf("config: %v", err)
 		}
 	}
-	for _, o := range []struct {
-		v   int
-		dst *int
-	}{{*rows, &cfg.Rows}, {*cols, &cfg.Cols}, {*zoneCols, &cfg.ZoneCols}, {*zoneRows, &cfg.ZoneRows}} {
-		if o.v > 0 {
-			*o.dst = o.v
-		}
+	if *zoneCols > 0 {
+		cfg.ZoneCols = *zoneCols
+	}
+	if *zoneRows > 0 {
+		cfg.ZoneRows = *zoneRows
+	}
+	if *venueW > 0 {
+		cfg.VenueW = *venueW
+	}
+	if *venueH > 0 {
+		cfg.VenueH = *venueH
 	}
 	if err := cfg.Validate(); err != nil {
 		log.Fatalf("config: %v", err)
@@ -89,7 +100,14 @@ func main() {
 		log.Printf("signs: %s", s.Describe())
 	}
 
-	a := app.New(app.Options{Detect: cfg, RecordingsDir: *recDir, Sink: sink, Tiger: tiger, Brief: b, Voice: v, Sign: s})
+	// Initial venue; data/venue.json (saved by PUT /api/venue) wins.
+	venue := protocol.Venue{W: cfg.VenueW, H: cfg.VenueH}
+	if !math.IsNaN(*venueLat) && !math.IsNaN(*venueLon) {
+		venue.Lat, venue.Lon, venue.Bearing, venue.Geo = *venueLat, *venueLon, *venueBearing, true
+	}
+	a := app.New(app.Options{Detect: cfg, RecordingsDir: *recDir, DataDir: *dataDir, Venue: venue,
+		Sink: sink, Tiger: tiger, Brief: b, Voice: v, Sign: s})
+	cfg = a.Config()
 	go a.Run(ctx)
 
 	mux := http.NewServeMux()
@@ -128,8 +146,8 @@ func main() {
 		defer cancel()
 		srv.Shutdown(sctx)
 	}()
-	log.Printf("pulse on %s — phones: http://localhost%s/  dashboard: http://localhost%s/dash/  (grid %dx%d, zones %dx%d)",
-		*addr, port(*addr), port(*addr), cfg.Rows, cfg.Cols, cfg.ZoneRows, cfg.ZoneCols)
+	log.Printf("pulse on %s — phones: http://localhost%s/  dashboard: http://localhost%s/dash/  (venue %gx%g m, geo-anchor %v, %d area(s))",
+		*addr, port(*addr), port(*addr), cfg.VenueW, cfg.VenueH, a.Venue().Geo, len(a.Areas()))
 	for _, ip := range lanIPs() {
 		log.Printf("  on the LAN: http://%s%s/ (phones need HTTPS for motion: use the tunnel)", ip, port(*addr))
 	}
@@ -185,6 +203,13 @@ func logService(name string, ok bool, why string) {
 	} else {
 		log.Printf("%s: %s", name, why)
 	}
+}
+
+func envFloat(k string, def float64) float64 {
+	if v, err := strconv.ParseFloat(strings.TrimSpace(os.Getenv(k)), 64); err == nil {
+		return v
+	}
+	return def
 }
 
 func envOr(k, def string) string {

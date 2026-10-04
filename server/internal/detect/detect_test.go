@@ -36,20 +36,30 @@ func runScenarioFlip(t *testing.T, name string, n int, dur float64, clockErrMs i
 	return runScenarioCfg(t, name, n, dur, clockErrMs, flipOdd, 42, DefaultConfig())
 }
 
-// runScenarioCfg runs one scenario with a given simulator seed and config.
+// runScenarioCfg runs one scenario in the line layout with a given
+// simulator seed and config.
 func runScenarioCfg(t *testing.T, name string, n int, dur float64, clockErrMs int64, flipOdd bool, seed int64, cfg Config) outcome {
 	t.Helper()
-	sc, err := sim.New(name, n, 1, n, seed)
+	return runScenarioLayout(t, name, n, dur, clockErrMs, flipOdd, seed, cfg, sim.LineLayout(1, n))
+}
+
+// runScenarioLayout runs one scenario with phones placed by lay. Moving
+// phones report their position every 500 ms, like the phone page does.
+func runScenarioLayout(t *testing.T, name string, n int, dur float64, clockErrMs int64, flipOdd bool, seed int64, cfg Config, lay sim.Layout) outcome {
+	t.Helper()
+	sc, err := sim.NewLayout(name, n, seed, lay)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.Rows, cfg.Cols = 1, n
 	d := New(cfg)
+	if lay.Kind == sim.LayoutLine {
+		d.SetZones(lineZones(cfg, lay.Cols))
+	}
 	rng := rand.New(rand.NewSource(7))
 	errs := make([]int64, n)
 	for i := 0; i < n; i++ {
-		r, c := sc.Pos(i)
-		d.SetPhone(fmt.Sprint(i), r, c)
+		x, y := sc.Pos(i)
+		d.SetPhone(fmt.Sprint(i), x, y)
 		if clockErrMs > 0 {
 			errs[i] = rng.Int63n(2*clockErrMs+1) - clockErrMs
 		}
@@ -58,7 +68,14 @@ func runScenarioCfg(t *testing.T, name string, n int, dur float64, clockErrMs in
 	evs := sc.Generate(t0, dur)
 	out := outcome{maxLevel: protocol.LevelCalm, redAt: -1, yellowAt: -1, directions: map[string]int{}}
 	j := 0
+	moves := sc.Moves()
 	for now := int64(t0); now <= t0+int64(dur*1000); now += 250 {
+		if moves && (now-t0)%500 == 0 {
+			for i := 0; i < n; i++ {
+				x, y := sc.PosAt(i, float64(now-t0)/1000)
+				d.SetPhone(fmt.Sprint(i), x, y)
+			}
+		}
 		for j < len(evs) && evs[j].T <= now {
 			e := evs[j]
 			ax := e.AX
@@ -168,8 +185,8 @@ func TestScenarios(t *testing.T) {
 				}
 				if tt.wantMaxLevel == "red" {
 					for d := range o.directions {
-						if d != "+col" {
-							t.Errorf("wave direction %q, want +col", d)
+						if d != "+x" {
+							t.Errorf("wave direction %q, want +x", d)
 						}
 					}
 				}
@@ -285,8 +302,11 @@ func TestXcorrFindsLag(t *testing.T) {
 func TestStaleAndZones(t *testing.T) {
 	cfg := DefaultConfig()
 	d := New(cfg)
-	if got := d.ZoneOf(0, 5); got != "B" {
-		t.Fatalf("zone of col 5 = %s", got)
+	if got := d.ZoneOf(13, 5); got != "B" {
+		t.Fatalf("zone of x=13 = %s", got)
+	}
+	if got := d.ZoneOf(cfg.VenueW, cfg.VenueH); got != "B" {
+		t.Fatalf("zone of the bottom-right corner = %q", got)
 	}
 	d.SetPhone("a", 0, 0)
 	d.Add("a", Sample{T: 1000})
@@ -297,4 +317,23 @@ func TestStaleAndZones(t *testing.T) {
 	if ZoneName(0) != "A" || ZoneName(25) != "Z" || ZoneName(26) != "AA" {
 		t.Fatal("ZoneName")
 	}
+}
+
+// lineZones splits a line of cols phones into zones of 4 phones each, the
+// way the grid detector did, so the line scenarios keep their outcomes.
+func lineZones(cfg Config, cols int) []ZoneDef {
+	var out []ZoneDef
+	for c0, i := 0, 0; c0 < cols; c0, i = c0+4, i+1 {
+		x0, _ := cfg.LegacyPos(0, c0)
+		x0 -= cfg.LegacySpacing / 2
+		x1 := x0 + 4*cfg.LegacySpacing
+		if c0 == 0 {
+			x0 = 0
+		}
+		if c0+4 >= cols {
+			x1 = cfg.VenueW
+		}
+		out = append(out, ZoneDef{ID: ZoneName(i), Name: "Zone " + ZoneName(i), Poly: Rect(x0, 0, x1, cfg.VenueH)})
+	}
+	return out
 }

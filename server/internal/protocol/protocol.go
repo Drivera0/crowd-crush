@@ -7,6 +7,8 @@ import "encoding/json"
 // Message types.
 const (
 	TypeHello    = "hello"
+	TypePos      = "pos"
+	TypeGPS      = "gps"
 	TypePong     = "pong"
 	TypeMotion   = "m"
 	TypePing     = "ping"
@@ -45,14 +47,53 @@ func PeekType(b []byte) (string, error) {
 	return e.Type, err
 }
 
-// ---- Phone → server ----
+// Alert kinds.
+const (
+	KindWave    = "wave"
+	KindDensity = "density"
+)
 
+// Position sources.
+const (
+	SrcManual = "manual"
+	SrcGPS    = "gps"
+)
+
+// ---- Phone → server ----
+//
+// Positions are venue metres: origin at the top-left of the venue map, x to
+// the right, y down.
+
+// Hello starts a phone session. X/Y place the phone (pointers, so 0 is a
+// position, not "absent"). Without them, legacy phones and recordings give
+// a grid Row/Col, or the phone sends Lat/Lon/Acc (converted to metres on
+// arrival and never stored).
 type Hello struct {
-	Type string `json:"type"`
-	ID   string `json:"id"`
-	Row  int    `json:"row"`
-	Col  int    `json:"col"`
-	UA   string `json:"ua,omitempty"`
+	Type string   `json:"type"`
+	ID   string   `json:"id"`
+	X    *float64 `json:"x,omitempty"`
+	Y    *float64 `json:"y,omitempty"`
+	Row  int      `json:"row,omitempty"`
+	Col  int      `json:"col,omitempty"`
+	Lat  *float64 `json:"lat,omitempty"`
+	Lon  *float64 `json:"lon,omitempty"`
+	Acc  float64  `json:"acc,omitempty"`
+	UA   string   `json:"ua,omitempty"`
+}
+
+// Pos moves a phone placed by hand (or a simulated phone that walked).
+type Pos struct {
+	Type string  `json:"type"`
+	X    float64 `json:"x"`
+	Y    float64 `json:"y"`
+}
+
+// GPS is a Geolocation API fix; Acc is the accuracy radius in metres.
+type GPS struct {
+	Type string  `json:"type"`
+	Lat  float64 `json:"lat"`
+	Lon  float64 `json:"lon"`
+	Acc  float64 `json:"acc"`
 }
 
 // Pong replies to Ping. T1 is the phone's clock when it answered.
@@ -84,31 +125,77 @@ type Ping struct {
 type PhoneState struct {
 	Type string `json:"type"`
 	Node string `json:"node"` // "ok" | "handling" (or any node status)
-	Zone string `json:"zone"` // calm | yellow | red
+	Zone string `json:"zone"` // level of the worst zone containing the phone: calm | yellow | red
 }
 
 // ---- Server → dashboard ----
 
 type Node struct {
-	ID     string  `json:"id"`
-	Row    int     `json:"row"`
-	Col    int     `json:"col"`
-	Status string  `json:"status"`
-	Sway   float64 `json:"sway"`
-	RTT    int64   `json:"rtt"`
-	Offset int64   `json:"offset"`
-	AgeMs  int64   `json:"age"`
-	UA     string  `json:"ua,omitempty"`
+	ID      string  `json:"id"`
+	X       float64 `json:"x"`
+	Y       float64 `json:"y"`
+	Status  string  `json:"status"`
+	Sway    float64 `json:"sway"`
+	RTT     int64   `json:"rtt"`
+	Offset  int64   `json:"offset"`
+	AgeMs   int64   `json:"age"`
+	UA      string  `json:"ua,omitempty"`
+	Zone    string  `json:"zone"`    // first zone containing the phone, "" if none
+	Acc     float64 `json:"acc"`     // GPS accuracy (m); 0 = placed by hand
+	Src     string  `json:"src"`     // gps | manual
+	Outside bool    `json:"outside"` // GPS put it outside the venue (clamped; counts toward nothing)
 }
 
+// Point is [x, y] in venue metres.
+type Point [2]float64
+
 type Zone struct {
-	ID    string  `json:"id"`
-	Level string  `json:"level"`
-	Score float64 `json:"score"`
-	Row0  int     `json:"row0"`
-	Col0  int     `json:"col0"`
-	Row1  int     `json:"row1"` // inclusive
-	Col1  int     `json:"col1"` // inclusive
+	ID     string  `json:"id"`
+	Name   string  `json:"name"`
+	Level  string  `json:"level"`
+	Score  float64 `json:"score"`
+	Poly   []Point `json:"poly"`
+	Custom bool    `json:"custom"`
+	Sens   string  `json:"sens"` // normal | high
+}
+
+// Area is a staff-drawn watch area (GET/PUT /api/areas).
+type Area struct {
+	ID   string  `json:"id"`
+	Name string  `json:"name"`
+	Sens string  `json:"sens"` // normal | high
+	Poly []Point `json:"poly"`
+}
+
+// Cluster is a group of phones standing close together.
+type Cluster struct {
+	ID      string  `json:"id"`
+	X       float64 `json:"x"`
+	Y       float64 `json:"y"`
+	R       float64 `json:"r"`
+	Count   int     `json:"count"`   // phones
+	Density float64 `json:"density"` // phones per m²
+	People  int     `json:"people"`  // estimated head count (count / participation)
+	Trend   string  `json:"trend"`   // forming | steady | dispersing
+	Level   string  `json:"level"`   // calm | yellow | red, from the estimated density
+}
+
+// Venue is the venue's size and geo-anchor (GET/PUT /api/venue). Lat/Lon
+// is the map's top-left corner; Bearing is degrees clockwise from north of
+// the map's up. Geo is false when no anchor is set.
+type Venue struct {
+	W       float64 `json:"w"`
+	H       float64 `json:"h"`
+	Lat     float64 `json:"lat"`
+	Lon     float64 `json:"lon"`
+	Bearing float64 `json:"bearing"`
+	Geo     bool    `json:"geo"`
+}
+
+// VenueSize is the snapshot's venue field.
+type VenueSize struct {
+	W float64 `json:"w"`
+	H float64 `json:"h"`
 }
 
 type Wave struct {
@@ -130,19 +217,21 @@ type Snapshot struct {
 	Mode   string `json:"mode"`             // live | replay
 	Replay string `json:"replay,omitempty"` // name of the recording being replayed
 	// Progress of the replay, 0..1.
-	Progress  float64 `json:"progress,omitempty"`
-	Recording string  `json:"recording,omitempty"` // label of the run being recorded
-	Rows      int     `json:"rows"`
-	Cols      int     `json:"cols"`
-	Nodes     []Node  `json:"nodes"`
-	Zones     []Zone  `json:"zones"`
-	Waves     []Wave  `json:"waves"`
-	Stats     Stats   `json:"stats"`
+	Progress  float64     `json:"progress,omitempty"`
+	Recording string      `json:"recording,omitempty"` // label of the run being recorded
+	Venue     VenueSize   `json:"venue"`
+	Nodes     []Node      `json:"nodes"`
+	Zones     []Zone      `json:"zones"`
+	Waves     []Wave      `json:"waves"` // direction of travel
+	Links     [][2]string `json:"links"` // every neighbour pair the detector compares
+	Clusters  []Cluster   `json:"clusters"`
+	Stats     Stats       `json:"stats"`
 }
 
 type Alert struct {
 	Type     string  `json:"type"`
 	T        int64   `json:"t"`
+	Kind     string  `json:"kind,omitempty"` // wave (default) | density
 	Zone     string  `json:"zone"`
 	Level    string  `json:"level"`
 	Score    float64 `json:"score"`
@@ -157,13 +246,15 @@ type Alerts struct {
 	Alerts []Alert `json:"alerts"`
 }
 
-// Config is served at GET /api/config so the phone page can draw the grid
-// and the dashboard can draw the zone thresholds.
+// Config is served at GET /api/config so the phone page can draw the
+// venue and the dashboard can draw the zone thresholds.
 type Config struct {
-	Rows   int     `json:"rows"`
-	Cols   int     `json:"cols"`
-	Yellow float64 `json:"yellow"`
-	Red    float64 `json:"red"`
+	VenueW          float64 `json:"venueW"`
+	VenueH          float64 `json:"venueH"`
+	Geo             bool    `json:"geo"`
+	Yellow          float64 `json:"yellow"`
+	Red             float64 `json:"red"`
+	NeighbourRadius float64 `json:"neighbourRadius"`
 }
 
 // Sample is one 100 ms motion summary as the server received it.
@@ -178,8 +269,11 @@ type Sample struct {
 // NodeDetail is GET /api/node/{id}: everything the server keeps about one phone.
 type NodeDetail struct {
 	ID        string   `json:"id"`
-	Row       int      `json:"row"`
-	Col       int      `json:"col"`
+	X         float64  `json:"x"`
+	Y         float64  `json:"y"`
+	Acc       float64  `json:"acc"`
+	Src       string   `json:"src"`
+	Outside   bool     `json:"outside"`
 	UA        string   `json:"ua"`
 	Zone      string   `json:"zone"`
 	Connected bool     `json:"connected"`

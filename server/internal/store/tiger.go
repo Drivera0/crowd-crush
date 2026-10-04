@@ -18,8 +18,7 @@ type Reading struct {
 	Time    time.Time // clock-corrected
 	PhoneID string
 	Zone    string
-	Row     int
-	Col     int
+	X, Y    float64 // venue metres
 	AX      float64
 	AY      float64
 	AZ      float64
@@ -84,7 +83,7 @@ func NewJSONLSink(dir string) (*JSONLSink, error) {
 }
 
 func (s *JSONLSink) Reading(r Reading) {
-	s.w.Write(Record{K: KindM, T: r.Time.UnixMilli(), CT: r.Time.UnixMilli(), ID: r.PhoneID, Row: r.Row, Col: r.Col, AX: r.AX, AY: r.AY, AZ: r.AZ, Rot: r.Rot})
+	s.w.Write(Record{K: KindM, T: r.Time.UnixMilli(), CT: r.Time.UnixMilli(), ID: r.PhoneID, X: F(r.X), Y: F(r.Y), AX: r.AX, AY: r.AY, AZ: r.AZ, Rot: r.Rot})
 }
 
 func (s *JSONLSink) Alert(a AlertRow) {
@@ -164,6 +163,9 @@ func (t *Tiger) migrate(ctx context.Context) error {
 			start_time TIMESTAMPTZ NOT NULL,
 			end_time   TIMESTAMPTZ NOT NULL)`,
 		`CREATE INDEX IF NOT EXISTS readings_time_idx ON readings (time DESC)`,
+		// Venue metres (free positions); NULL on rows from the row/col days.
+		`ALTER TABLE readings ADD COLUMN IF NOT EXISTS x REAL`,
+		`ALTER TABLE readings ADD COLUMN IF NOT EXISTS y REAL`,
 	}
 	for _, q := range must {
 		if _, err := t.pool.Exec(ctx, q); err != nil {
@@ -237,10 +239,10 @@ func (t *Tiger) flush() {
 	defer cancel()
 	if len(batch) > 0 {
 		_, err := t.pool.CopyFrom(ctx, pgx.Identifier{"readings"},
-			[]string{"time", "phone_id", "zone", "row", "col", "ax", "ay", "az", "rot"},
+			[]string{"time", "phone_id", "zone", "x", "y", "ax", "ay", "az", "rot"},
 			pgx.CopyFromSlice(len(batch), func(i int) ([]any, error) {
 				r := batch[i]
-				return []any{r.Time, r.PhoneID, r.Zone, r.Row, r.Col, r.AX, r.AY, r.AZ, r.Rot}, nil
+				return []any{r.Time, r.PhoneID, r.Zone, float32(r.X), float32(r.Y), r.AX, r.AY, r.AZ, r.Rot}, nil
 			}))
 		if err != nil {
 			log.Printf("store: COPY %d readings failed, writing to fallback: %v", len(batch), err)
@@ -304,24 +306,40 @@ func (t *Tiger) LoadRun(ctx context.Context, label string) ([]Record, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := t.pool.Query(ctx, `SELECT time, phone_id, row, col, ax, ay, az, rot FROM readings
+	rows, err := t.pool.Query(ctx, `SELECT time, phone_id, row, col, x, y, ax, ay, az, rot FROM readings
 		WHERE time BETWEEN $1 AND $2 ORDER BY time`, run.Start, run.End)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	recs := []Record{{K: KindMeta, T: run.Start.UnixMilli(), Label: run.Label}}
-	seen := map[string][2]int{}
+	// A hello the first time each phone appears, a pos whenever it moves.
+	// Rows from before free positions have no x/y: their hello carries
+	// row/col and the replay maps it (legacy layout).
+	type where struct {
+		row, col int
+		x, y     *float32
+	}
+	same := func(a, b *float32) bool { return (a == nil) == (b == nil) && (a == nil || *a == *b) }
+	seen := map[string]where{}
 	for rows.Next() {
 		var ts time.Time
 		var r Record
-		if err := rows.Scan(&ts, &r.ID, &r.Row, &r.Col, &r.AX, &r.AY, &r.AZ, &r.Rot); err != nil {
+		var w where
+		if err := rows.Scan(&ts, &r.ID, &w.row, &w.col, &w.x, &w.y, &r.AX, &r.AY, &r.AZ, &r.Rot); err != nil {
 			return nil, err
 		}
-		pos := [2]int{r.Row, r.Col}
-		if p, ok := seen[r.ID]; !ok || p != pos {
-			seen[r.ID] = pos
-			recs = append(recs, Record{K: KindHello, T: ts.UnixMilli(), ID: r.ID, Row: r.Row, Col: r.Col})
+		p, ok := seen[r.ID]
+		if !ok || p.row != w.row || p.col != w.col || !same(p.x, w.x) || !same(p.y, w.y) {
+			seen[r.ID] = w
+			pr := Record{K: KindHello, T: ts.UnixMilli(), ID: r.ID, Row: w.row, Col: w.col}
+			if ok {
+				pr.K = KindPos
+			}
+			if w.x != nil && w.y != nil {
+				pr.X, pr.Y = F(float64(*w.x)), F(float64(*w.y))
+			}
+			recs = append(recs, pr)
 		}
 		r.K, r.T, r.CT = KindM, ts.UnixMilli(), ts.UnixMilli()
 		recs = append(recs, r)

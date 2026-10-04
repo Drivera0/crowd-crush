@@ -32,7 +32,16 @@ const (
 
 // Handler receives phone events. Calls for one phone are sequential.
 type Handler interface {
-	PhoneHello(id string, row, col int, ua string)
+	// PhoneHello places a phone (venue metres) when it joins or re-sends hello.
+	PhoneHello(id string, x, y float64, ua string)
+	// PhonePos moves a phone placed by hand (or a walking simulated phone).
+	PhonePos(id string, x, y float64)
+	// PhoneGPS delivers a raw fix. The handler converts it to venue metres
+	// and must never store or log lat/lon.
+	PhoneGPS(id string, lat, lon, acc float64)
+	// LegacyPos maps an old grid cell (hello with row/col and no x/y) to
+	// venue metres.
+	LegacyPos(row, col int) (x, y float64)
 	PhoneSync(id string, offset, rtt int64)
 	// PhoneMotion gets a reading with T already clock-corrected.
 	PhoneMotion(id string, m protocol.Motion, recv int64)
@@ -196,7 +205,7 @@ func (hb *Hub) ServePhone(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	hb.h.PhoneHello(hello.ID, hello.Row, hello.Col, hello.UA)
+	hb.hello(hello, hello.UA)
 	go pc.writer(ctx)
 	go hb.syncLoop(ctx, pc)
 
@@ -241,9 +250,34 @@ func (hb *Hub) ServePhone(w http.ResponseWriter, r *http.Request) {
 			// Phone moved to a new spot without reconnecting.
 			var h protocol.Hello
 			if json.Unmarshal(b, &h) == nil && h.ID == pc.id {
-				hb.h.PhoneHello(h.ID, h.Row, h.Col, hello.UA)
+				hb.hello(h, hello.UA)
+			}
+		case protocol.TypePos:
+			var p protocol.Pos
+			if json.Unmarshal(b, &p) == nil {
+				hb.h.PhonePos(pc.id, p.X, p.Y)
+			}
+		case protocol.TypeGPS:
+			var g protocol.GPS
+			if json.Unmarshal(b, &g) == nil {
+				hb.h.PhoneGPS(pc.id, g.Lat, g.Lon, g.Acc)
 			}
 		}
+	}
+}
+
+// hello places the phone from x/y, else its legacy row/col, then hands
+// over a GPS fix if the hello carried one.
+func (hb *Hub) hello(h protocol.Hello, ua string) {
+	var x, y float64
+	if h.X != nil && h.Y != nil {
+		x, y = *h.X, *h.Y
+	} else {
+		x, y = hb.h.LegacyPos(h.Row, h.Col)
+	}
+	hb.h.PhoneHello(h.ID, x, y, ua)
+	if h.Lat != nil && h.Lon != nil {
+		hb.h.PhoneGPS(h.ID, *h.Lat, *h.Lon, h.Acc)
 	}
 }
 

@@ -1,6 +1,11 @@
 // Package app is the pipeline between the hub and everything else: it feeds
 // readings to the detector, turns level changes into alerts (briefing, voice,
 // sign, storage), records runs, replays them, and builds dashboard snapshots.
+//
+// Phones are free points in the venue, in metres (origin top-left of the
+// venue map, x right, y down). They are placed by hand (hello x/y, pos) or
+// by GPS, converted to metres on arrival with the venue's geo-anchor; raw
+// coordinates are never stored, logged or sent to the dashboard.
 package app
 
 import (
@@ -14,7 +19,9 @@ import (
 	"time"
 
 	"github.com/Drivera0/crowd-crush/server/internal/brief"
+	"github.com/Drivera0/crowd-crush/server/internal/crowd"
 	"github.com/Drivera0/crowd-crush/server/internal/detect"
+	"github.com/Drivera0/crowd-crush/server/internal/geo"
 	"github.com/Drivera0/crowd-crush/server/internal/hub"
 	"github.com/Drivera0/crowd-crush/server/internal/protocol"
 	"github.com/Drivera0/crowd-crush/server/internal/sign"
@@ -37,15 +44,25 @@ const (
 type Options struct {
 	Detect        detect.Config
 	RecordingsDir string
-	Sink          store.Sink   // continuous storage; nil = discard
-	Tiger         *store.Tiger // for labelled runs + DB replay; may be nil
-	Brief         *brief.Client
-	Voice         *voice.Client
-	Sign          *sign.Client
+	// DataDir holds areas.json and venue.json (staff-drawn areas and the
+	// venue's size and geo-anchor). Empty = nothing is persisted.
+	DataDir string
+	// Venue is the initial venue (size and anchor) when DataDir has no
+	// venue.json; zero W/H take the detector config's venue size.
+	Venue protocol.Venue
+	Sink  store.Sink   // continuous storage; nil = discard
+	Tiger *store.Tiger // for labelled runs + DB replay; may be nil
+	Brief *brief.Client
+	Voice *voice.Client
+	Sign  *sign.Client
 }
 
 type nodeMeta struct {
-	row, col  int
+	x, y      float64
+	acc       float64 // GPS accuracy (m); 0 = placed by hand
+	outside   bool    // GPS fix outside the venue
+	gps       geo.Smoother
+	gpsWarned bool // told the log once that GPS is ignored (no anchor)
 	ua        string
 	synced    bool
 	rtt       int64
@@ -56,6 +73,13 @@ type nodeMeta struct {
 	joinedAt  int64
 	msgs      int64
 	tele      []protocol.Sample // last teleKeep samples, for the dashboard's node panel
+}
+
+func (m *nodeMeta) src() string {
+	if m.acc > 0 {
+		return protocol.SrcGPS
+	}
+	return protocol.SrcManual
 }
 
 const teleKeep = 300 // 30 s at 10 Hz
@@ -86,18 +110,34 @@ type histPoint struct {
 // Live phones have one; a replay gets its own.
 type pipeline struct {
 	det      *detect.Detector
+	crowd    *crowd.Tracker
 	meta     map[string]*nodeMeta
 	last     detect.Result
+	clusters []crowd.Cluster
 	hist     map[string][]histPoint
 	lastHist int64
 }
 
 func newPipeline(cfg detect.Config) *pipeline {
-	return &pipeline{det: detect.New(cfg), meta: map[string]*nodeMeta{}, hist: map[string][]histPoint{}}
+	return &pipeline{det: detect.New(cfg), crowd: crowd.NewTracker(crowd.ConfigFrom(cfg)),
+		meta: map[string]*nodeMeta{}, hist: map[string][]histPoint{}}
 }
 
-func (p *pipeline) step(now int64) detect.Result {
+func (p *pipeline) cfg() detect.Config { return p.det.Config() }
+
+// step runs the detector and the crowd clusters.
+func (p *pipeline) step(now int64) (detect.Result, []crowd.Change) {
 	p.last = p.det.Step(now)
+	var pts []crowd.Point
+	for _, pr := range p.last.Phones {
+		m := p.meta[pr.ID]
+		if pr.Status == protocol.StatusStale || pr.Outside || (m != nil && !m.connected) {
+			continue
+		}
+		pts = append(pts, crowd.Point{ID: pr.ID, X: pr.X, Y: pr.Y})
+	}
+	var ch []crowd.Change
+	p.clusters, ch = p.crowd.Update(now, pts)
 	if now-p.lastHist >= 1000 {
 		p.lastHist = now
 		for _, z := range p.last.Zones {
@@ -108,7 +148,13 @@ func (p *pipeline) step(now int64) detect.Result {
 			p.hist[z.ID] = h
 		}
 	}
-	return p.last
+	return p.last, ch
+}
+
+// place moves a phone in this pipeline.
+func (p *pipeline) place(id string, m *nodeMeta) {
+	p.det.SetPhone(id, m.x, m.y)
+	p.det.SetOutside(id, m.outside)
 }
 
 type replayState struct {
@@ -138,6 +184,8 @@ type App struct {
 	Hub *hub.Hub
 
 	mu        sync.Mutex
+	venue     protocol.Venue
+	areas     []protocol.Area
 	live      *pipeline
 	replay    *replayState
 	rec       *recordingState
@@ -149,7 +197,8 @@ type App struct {
 	signHold  int64 // test alert keeps the sign red until this time
 }
 
-// New creates the app and its hub.
+// New creates the app and its hub, loading saved areas and venue from
+// DataDir.
 func New(opt Options) *App {
 	if opt.Sink == nil {
 		opt.Sink = store.Discard{}
@@ -165,37 +214,142 @@ func New(opt Options) *App {
 	}
 	a := &App{
 		opt:       opt,
-		live:      newPipeline(opt.Detect),
 		lastBrief: map[string]int64{},
 		sentState: map[string]protocol.PhoneState{},
 		sentAt:    map[string]int64{},
 	}
+	v := opt.Venue
+	if v.W <= 0 || v.H <= 0 {
+		v.W, v.H = opt.Detect.VenueW, opt.Detect.VenueH
+	}
+	if saved, ok := a.loadVenue(); ok {
+		v = saved
+	}
+	if err := validVenue(&v); err != nil {
+		log.Printf("venue: %v; using %gx%g m without a geo-anchor", err, opt.Detect.VenueW, opt.Detect.VenueH)
+		v = protocol.Venue{W: opt.Detect.VenueW, H: opt.Detect.VenueH}
+	}
+	a.venue = v
+	a.areas = a.loadAreas()
+	a.live = newPipeline(a.liveConfig())
+	a.applyZones(a.live)
 	a.Hub = hub.New(a)
 	return a
 }
 
+// liveConfig is the detector config with the current venue size.
+func (a *App) liveConfig() detect.Config {
+	cfg := a.opt.Detect
+	cfg.VenueW, cfg.VenueH = a.venue.W, a.venue.H
+	return cfg
+}
+
 // Config is the live detector configuration.
-func (a *App) Config() detect.Config { return a.opt.Detect }
+func (a *App) Config() detect.Config {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.liveConfig()
+}
+
+// zoneDefs are the zones for a venue: the default split when no areas are
+// drawn, else the areas plus "rest" (phones in no area).
+func zoneDefs(cfg detect.Config, areas []protocol.Area) []detect.ZoneDef {
+	if len(areas) == 0 {
+		return detect.DefaultZones(cfg)
+	}
+	var out []detect.ZoneDef
+	for _, ar := range areas {
+		poly := make([][2]float64, len(ar.Poly))
+		for i, pt := range ar.Poly {
+			x, y := cfg.Clamp(pt[0], pt[1])
+			poly[i] = [2]float64{x, y}
+		}
+		out = append(out, detect.ZoneDef{ID: ar.ID, Name: ar.Name, Poly: poly, Custom: true, Sens: ar.Sens})
+	}
+	return append(out, detect.ZoneDef{ID: detect.RestZone, Name: "Rest of venue", Sens: detect.SensNormal,
+		Poly: detect.Rect(0, 0, cfg.VenueW, cfg.VenueH), Rest: true})
+}
+
+// applyZones gives a pipeline the current areas. Caller holds mu (or owns p).
+func (a *App) applyZones(p *pipeline) {
+	p.det.SetZones(zoneDefs(p.cfg(), a.areas))
+}
 
 // ---- hub.Handler ----
 
-func (a *App) PhoneHello(id string, row, col int, ua string) {
-	cfg := a.opt.Detect
-	row = clamp(row, 0, cfg.Rows-1)
-	col = clamp(col, 0, cfg.Cols-1)
+// LegacyPos maps an old grid cell to venue metres.
+func (a *App) LegacyPos(row, col int) (x, y float64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.liveConfig().LegacyPos(row, col)
+}
+
+func (a *App) PhoneHello(id string, x, y float64, ua string) {
+	now := hub.Now()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	x, y = a.liveConfig().Clamp(x, y)
+	m := a.live.meta[id]
+	if m == nil {
+		m = &nodeMeta{joinedAt: now}
+		a.live.meta[id] = m
+		log.Printf("phone %s joined at %.1f, %.1f m (%s)", short(id), x, y, ua)
+	}
+	m.x, m.y, m.acc, m.outside = x, y, 0, false
+	m.gps.Reset()
+	m.ua, m.connected, m.goneAt = ua, true, 0
+	m.lastRecv = now
+	a.live.place(id, m)
+	a.record(store.Record{K: store.KindHello, T: now, ID: id, X: store.F(r2(x)), Y: store.F(r2(y)), UA: ua})
+}
+
+func (a *App) PhonePos(id string, x, y float64) {
+	if math.IsNaN(x) || math.IsNaN(y) || math.IsInf(x, 0) || math.IsInf(y, 0) {
+		return
+	}
 	now := hub.Now()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	m := a.live.meta[id]
 	if m == nil {
-		m = &nodeMeta{joinedAt: now}
-		a.live.meta[id] = m
-		log.Printf("phone %s joined at row %d col %d (%s)", short(id), row, col, ua)
+		return
 	}
-	m.row, m.col, m.ua, m.connected, m.goneAt = row, col, ua, true, 0
-	m.lastRecv = now
-	a.live.det.SetPhone(id, row, col)
-	a.record(store.Record{K: store.KindHello, T: now, ID: id, Row: row, Col: col, UA: ua})
+	x, y = a.liveConfig().Clamp(x, y)
+	m.x, m.y, m.acc, m.outside = x, y, 0, false
+	m.gps.Reset()
+	a.live.place(id, m)
+	a.record(store.Record{K: store.KindPos, T: now, ID: id, X: store.F(r2(x)), Y: store.F(r2(y))})
+}
+
+// PhoneGPS converts a fix to venue metres. lat/lon are used here and
+// dropped: never logged, stored or forwarded.
+func (a *App) PhoneGPS(id string, lat, lon, acc float64) {
+	now := hub.Now()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	m := a.live.meta[id]
+	if m == nil {
+		return
+	}
+	if !a.venue.Geo {
+		if !m.gpsWarned {
+			m.gpsWarned = true
+			log.Printf("phone %s sent GPS but the venue has no geo-anchor (PUT /api/venue); ignoring it, place it by hand", short(id))
+		}
+		return
+	}
+	cfg := a.liveConfig()
+	if !(acc > 0 && acc <= cfg.GPSMaxAcc) || !(lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180) {
+		return // too inaccurate (or nonsense): keep the last good position
+	}
+	anchor := geo.Anchor{Lat: a.venue.Lat, Lon: a.venue.Lon, Bearing: a.venue.Bearing}
+	x, y := anchor.ToVenue(lat, lon)
+	x, y = m.gps.Add(x, y, acc)
+	m.outside = x < 0 || y < 0 || x > cfg.VenueW || y > cfg.VenueH
+	m.x, m.y = cfg.Clamp(x, y)
+	m.acc = math.Max(0.1, math.Round(m.gps.Acc*10)/10)
+	a.live.place(id, m)
+	a.record(store.Record{K: store.KindPos, T: now, ID: id, X: store.F(r2(m.x)), Y: store.F(r2(m.y)), Acc: m.acc, Out: m.outside})
 }
 
 func (a *App) PhoneSync(id string, offset, rtt int64) {
@@ -220,10 +374,13 @@ func (a *App) PhoneMotion(id string, mo protocol.Motion, recv int64) {
 	m.addSample(protocol.Sample{T: mo.T, AX: mo.AX, AY: mo.AY, AZ: mo.AZ, Rot: mo.Rot})
 	a.live.det.Add(id, detect.Sample{T: mo.T, AX: mo.AX, AY: mo.AY, AZ: mo.AZ, Rot: mo.Rot})
 	a.record(store.Record{K: store.KindM, T: recv, ID: id, CT: mo.T, AX: mo.AX, AY: mo.AY, AZ: mo.AZ, Rot: mo.Rot})
-	zone := a.live.det.ZoneOf(m.row, m.col)
-	row, col := m.row, m.col
+	zone := ""
+	if !m.outside {
+		zone = a.live.det.ZoneOf(m.x, m.y)
+	}
+	x, y := m.x, m.y
 	a.mu.Unlock()
-	a.opt.Sink.Reading(store.Reading{Time: time.UnixMilli(mo.T), PhoneID: id, Zone: zone, Row: row, Col: col,
+	a.opt.Sink.Reading(store.Reading{Time: time.UnixMilli(mo.T), PhoneID: id, Zone: zone, X: r2(x), Y: r2(y),
 		AX: mo.AX, AY: mo.AY, AZ: mo.AZ, Rot: mo.Rot})
 }
 
@@ -306,8 +463,8 @@ func (a *App) Run(ctx context.Context) {
 	}
 }
 
-type pendingChange struct {
-	ch     detect.Change
+type pendingAlert struct {
+	al     protocol.Alert
 	info   brief.Info
 	brief  bool
 	replay bool
@@ -315,7 +472,7 @@ type pendingChange struct {
 
 func (a *App) detectTick(now int64) {
 	a.mu.Lock()
-	res := a.live.step(now)
+	res, cch := a.live.step(now)
 	for id, m := range a.live.meta {
 		if !m.connected && now-m.goneAt > ForgetAfterMs {
 			delete(a.live.meta, id)
@@ -327,45 +484,89 @@ func (a *App) detectTick(now int64) {
 	if r := a.replay; r != nil {
 		pnow = r.now(now)
 		a.feedReplay(r, pnow)
-		changes = r.p.step(pnow).Changes
+		var rres detect.Result
+		rres, cch = r.p.step(pnow)
+		changes = rres.Changes
 		active, isReplay = r.p, true
 		if pnow > r.recEnd+3000 {
 			log.Printf("replay %s finished, back to live", r.name)
 			a.replay = nil
 		}
 	}
-	var pend []pendingChange
+	var pend []pendingAlert
 	for _, ch := range changes {
-		pc := pendingChange{ch: ch, replay: isReplay}
+		pa := pendingAlert{replay: isReplay, al: protocol.Alert{Type: protocol.TypeAlert, T: now, Kind: protocol.KindWave,
+			Zone: ch.Zone, Level: ch.To, Score: round2(ch.Score)}}
 		if ch.To == protocol.LevelRed && ch.From == protocol.LevelYellow && now-a.lastBrief[ch.Zone] >= BriefCooldown {
 			a.lastBrief[ch.Zone] = now
-			pc.brief = true
-			pc.info = briefInfo(active, ch.Zone, protocol.LevelRed, pnow)
+			pa.brief = true
+			pa.info = briefInfo(active, ch.Zone, protocol.LevelRed, pnow)
 		}
-		pend = append(pend, pc)
+		pend = append(pend, pa)
 	}
-	signLevel, signZone := worstZone(active.last)
-	zoneLevels := map[string]string{}
-	for _, z := range active.last.Zones {
-		zoneLevels[z.ID] = z.Level
+	for _, ch := range cch {
+		c := ch.Cluster
+		zone := active.det.ZoneOf(c.X, c.Y)
+		pa := pendingAlert{replay: isReplay, al: protocol.Alert{Type: protocol.TypeAlert, T: now, Kind: protocol.KindDensity,
+			Zone: zone, Level: ch.To, Score: round2(c.Est)}}
+		if ch.To == protocol.LevelRed && ch.From == protocol.LevelYellow && now-a.lastBrief[zone] >= BriefCooldown {
+			a.lastBrief[zone] = now
+			pa.brief = true
+			pa.info = densityInfo(active, c, zone)
+		}
+		pend = append(pend, pa)
 	}
+	zoneLevels, signLevel, signZone := alertLevels(active)
 	hold := now < a.signHold
 	a.mu.Unlock()
 
-	for _, pc := range pend {
-		log.Printf("zone %s: %s → %s (score %.2f)%s", pc.ch.Zone, pc.ch.From, pc.ch.To, pc.ch.Score, map[bool]string{true: " [replay]"}[pc.replay])
-		al := protocol.Alert{Type: protocol.TypeAlert, T: now, Zone: pc.ch.Zone, Level: pc.ch.To, Score: round2(pc.ch.Score)}
-		a.pushAlert(al)
-		if !pc.replay {
-			a.opt.Sink.Alert(store.AlertRow{Time: time.UnixMilli(now), Zone: al.Zone, Level: al.Level, Score: al.Score})
+	for _, pa := range pend {
+		log.Printf("%s %s: %s (score %.2f)%s", pa.al.Kind, pa.al.Zone, pa.al.Level, pa.al.Score, map[bool]string{true: " [replay]"}[pa.replay])
+		a.pushAlert(pa.al)
+		if !pa.replay {
+			a.opt.Sink.Alert(store.AlertRow{Time: time.UnixMilli(now), Zone: pa.al.Zone, Level: pa.al.Level, Score: pa.al.Score})
 		}
-		if pc.brief {
-			go a.briefAndSpeak(pc.info, false, pc.replay)
+		if pa.brief {
+			go a.briefAndSpeak(pa.info, false, pa.replay)
 		}
 	}
 	if !hold {
 		a.opt.Sign.Update(zoneLevels, signLevel, signZone)
 	}
+}
+
+// alertLevels merges zone levels with the density levels of the clusters
+// in them (a red cluster makes its zone red on the sign), and picks the
+// worst zone.
+func alertLevels(p *pipeline) (zoneLevels map[string]string, level, zone string) {
+	zoneLevels = map[string]string{}
+	score := map[string]float64{}
+	for _, z := range p.last.Zones {
+		zoneLevels[z.ID], score[z.ID] = z.Level, z.Score
+	}
+	for _, c := range p.clusters {
+		id := p.det.ZoneOf(c.X, c.Y)
+		if id != "" && levelRank[c.Level] > levelRank[zoneLevels[id]] {
+			zoneLevels[id] = c.Level
+		}
+	}
+	level = protocol.LevelCalm
+	best := -1.0
+	ids := make([]string, 0, len(zoneLevels))
+	for id := range zoneLevels {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		l := zoneLevels[id]
+		if levelRank[l] > levelRank[level] || (l == level && score[id] > best) {
+			level, zone, best = l, id, score[id]
+		}
+	}
+	if level == protocol.LevelCalm {
+		zone = ""
+	}
+	return zoneLevels, level, zone
 }
 
 func (a *App) pushAlert(al protocol.Alert) {
@@ -392,12 +593,20 @@ func (a *App) briefAndSpeak(info brief.Info, test, replay bool) {
 			log.Printf("voice: %v", err)
 		}
 		url = ""
-		if info.Zone == "B" {
+		if info.Zone == "B" && info.Kind != protocol.KindDensity {
 			url = a.opt.Voice.FallbackURL() // "Zone B, crowd waves building."
 		}
 	}
-	al := protocol.Alert{Type: protocol.TypeAlert, T: hub.Now(), Zone: info.Zone, Level: info.Level,
-		Score: lastScore(info), Brief: text, AudioURL: url, Test: test}
+	kind := info.Kind
+	if kind == "" {
+		kind = protocol.KindWave
+	}
+	score := lastScore(info)
+	if kind == protocol.KindDensity {
+		score = round2(info.Density)
+	}
+	al := protocol.Alert{Type: protocol.TypeAlert, T: hub.Now(), Kind: kind, Zone: info.Zone, Level: info.Level,
+		Score: score, Brief: text, AudioURL: url, Test: test}
 	log.Printf("brief zone %s: %s", info.Zone, text)
 	a.pushAlert(al)
 	if !test && !replay {
@@ -427,12 +636,12 @@ func (a *App) TestAlert() string {
 	}
 	info := briefInfo(p, zone, protocol.LevelRed, a.pnowLocked(now))
 	if info.Direction == "" {
-		info.Direction, info.LagMs = "+col", 250
+		info.Direction, info.LagMs = "+x", 250
 	}
 	a.signHold = now + 8000
 	a.mu.Unlock()
 
-	a.pushAlert(protocol.Alert{Type: protocol.TypeAlert, T: now, Zone: zone, Level: protocol.LevelRed, Score: lastScore(info), Test: true})
+	a.pushAlert(protocol.Alert{Type: protocol.TypeAlert, T: now, Kind: protocol.KindWave, Zone: zone, Level: protocol.LevelRed, Score: lastScore(info), Test: true})
 	a.opt.Sign.Force(protocol.LevelRed, zone)
 	go a.briefAndSpeak(info, true, false)
 	return zone
@@ -452,8 +661,21 @@ func (a *App) pnowLocked(now int64) int64 {
 	return now
 }
 
+// inZone reports whether a phone result is in a zone.
+func inZone(p *pipeline, ph detect.PhoneResult, zone string) bool {
+	if ph.Outside {
+		return false
+	}
+	for _, z := range p.det.ZonesOf(ph.X, ph.Y) {
+		if z == zone {
+			return true
+		}
+	}
+	return false
+}
+
 func briefInfo(p *pipeline, zone, level string, now int64) brief.Info {
-	in := brief.Info{Zone: zone, Level: level}
+	in := brief.Info{Kind: protocol.KindWave, Zone: zone, Where: zoneName(p, zone), Level: level}
 	if z, ok := p.last.Zone(zone); ok {
 		in.Direction, in.LagMs = z.Direction, z.LagMs
 	}
@@ -466,12 +688,32 @@ func briefInfo(p *pipeline, zone, level string, now int64) brief.Info {
 		in.Scores = append(in.Scores, round2(h[i].score))
 	}
 	for _, ph := range p.last.Phones {
-		if p.det.ZoneOf(ph.Row, ph.Col) != zone || ph.Status == protocol.StatusStale {
+		if ph.Status == protocol.StatusStale || !inZone(p, ph, zone) {
 			continue
 		}
 		in.Phones++
 		if ph.Status == protocol.StatusSwaying || ph.Status == protocol.StatusWave {
 			in.Swaying++
+		}
+	}
+	return in
+}
+
+// zoneName is the zone's name for people ("Zone A", a drawn area's name).
+func zoneName(p *pipeline, zone string) string {
+	if z, ok := p.last.Zone(zone); ok && z.Name != "" {
+		return z.Name
+	}
+	return ""
+}
+
+// densityInfo describes a cluster that packed past the danger density.
+func densityInfo(p *pipeline, c crowd.Cluster, zone string) brief.Info {
+	in := brief.Info{Kind: protocol.KindDensity, Zone: zone, Where: zoneName(p, zone), Level: c.Level, Density: round2(c.Est),
+		People: c.People, AreaM2: math.Round(c.Area()*10) / 10, Trend: c.Trend, X: math.Round(c.X), Y: math.Round(c.Y)}
+	for _, ph := range p.last.Phones {
+		if ph.Status != protocol.StatusStale && inZone(p, ph, zone) {
+			in.Phones++
 		}
 	}
 	return in
@@ -486,28 +728,16 @@ func lastScore(in brief.Info) float64 {
 
 var levelRank = map[string]int{protocol.LevelCalm: 0, protocol.LevelYellow: 1, protocol.LevelRed: 2}
 
-func worstZone(r detect.Result) (level, zone string) {
-	level = protocol.LevelCalm
-	best := -1.0
-	for _, z := range r.Zones {
-		if levelRank[z.Level] > levelRank[level] || (z.Level == level && z.Score > best) {
-			level, zone, best = z.Level, z.ID, z.Score
-		}
-	}
-	if level == protocol.LevelCalm {
-		zone = ""
-	}
-	return level, zone
-}
-
 // ---- snapshots ----
 
 func (a *App) snapshotLocked(now int64) protocol.Snapshot {
 	p := a.active()
-	cfg := p.det.Config()
+	cfg := p.cfg()
 	pnow := a.pnowLocked(now)
-	s := protocol.Snapshot{Type: protocol.TypeSnapshot, T: now, Mode: "live", Rows: cfg.Rows, Cols: cfg.Cols,
-		Nodes: []protocol.Node{}, Zones: []protocol.Zone{}, Waves: []protocol.Wave{}}
+	s := protocol.Snapshot{Type: protocol.TypeSnapshot, T: now, Mode: "live",
+		Venue: protocol.VenueSize{W: cfg.VenueW, H: cfg.VenueH},
+		Nodes: []protocol.Node{}, Zones: []protocol.Zone{}, Waves: []protocol.Wave{},
+		Links: [][2]string{}, Clusters: []protocol.Cluster{}}
 	if a.replay != nil {
 		s.Mode, s.Replay = "replay", a.replay.name
 		if d := a.replay.recEnd - a.replay.recStart; d > 0 {
@@ -523,7 +753,11 @@ func (a *App) snapshotLocked(now int64) protocol.Snapshot {
 	}
 	var rtts []int64
 	for id, m := range p.meta {
-		n := protocol.Node{ID: id, Row: m.row, Col: m.col, RTT: m.rtt, Offset: m.offset, AgeMs: max(0, pnow-m.lastRecv), UA: m.ua}
+		n := protocol.Node{ID: id, X: r2(m.x), Y: r2(m.y), RTT: m.rtt, Offset: m.offset, AgeMs: max(0, pnow-m.lastRecv),
+			UA: m.ua, Acc: m.acc, Src: m.src(), Outside: m.outside}
+		if !m.outside {
+			n.Zone = p.det.ZoneOf(m.x, m.y)
+		}
 		pr, ok := status[id]
 		switch {
 		case !m.connected:
@@ -544,36 +778,40 @@ func (a *App) snapshotLocked(now int64) protocol.Snapshot {
 		}
 		s.Nodes = append(s.Nodes, n)
 	}
-	sort.Slice(s.Nodes, func(i, j int) bool {
-		if s.Nodes[i].Row != s.Nodes[j].Row {
-			return s.Nodes[i].Row < s.Nodes[j].Row
-		}
-		if s.Nodes[i].Col != s.Nodes[j].Col {
-			return s.Nodes[i].Col < s.Nodes[j].Col
-		}
-		return s.Nodes[i].ID < s.Nodes[j].ID
-	})
+	sort.Slice(s.Nodes, func(i, j int) bool { return s.Nodes[i].ID < s.Nodes[j].ID })
 	if len(rtts) > 0 {
 		sort.Slice(rtts, func(i, j int) bool { return rtts[i] < rtts[j] })
 		s.Stats.MedianRTT = rtts[len(rtts)/2]
 	}
 	s.Stats.MsgPerSec = math.Round(a.msgRate)
 	for _, z := range p.last.Zones {
-		s.Zones = append(s.Zones, protocol.Zone{ID: z.ID, Level: z.Level, Score: round2(z.Score),
-			Row0: z.Row0, Col0: z.Col0, Row1: z.Row1, Col1: z.Col1})
+		poly := make([]protocol.Point, len(z.Poly))
+		for i, pt := range z.Poly {
+			poly[i] = protocol.Point{r2(pt[0]), r2(pt[1])}
+		}
+		s.Zones = append(s.Zones, protocol.Zone{ID: z.ID, Name: z.Name, Level: z.Level, Score: round2(z.Score),
+			Poly: poly, Custom: z.Custom, Sens: z.Sens})
 	}
-	for _, e := range p.last.Waves() {
+	for _, e := range p.last.Edges {
+		s.Links = append(s.Links, [2]string{e.From, e.To})
+		if !e.Wave {
+			continue
+		}
 		w := protocol.Wave{From: e.From, To: e.To, LagMs: e.LagMs, Corr: round2(e.Corr)}
 		if w.LagMs < 0 { // always report in the direction of travel
 			w.From, w.To, w.LagMs = w.To, w.From, -w.LagMs
 		}
 		s.Waves = append(s.Waves, w)
 	}
+	for _, c := range p.clusters {
+		s.Clusters = append(s.Clusters, protocol.Cluster{ID: c.ID, X: r2(c.X), Y: r2(c.Y), R: r2(c.R), Count: c.Count,
+			Density: round2(c.Density), People: c.People, Trend: c.Trend, Level: c.Level})
+	}
 	return s
 }
 
 // phoneStates sends colour feedback to phones when it changes (and every few
-// seconds as a heartbeat).
+// seconds as a heartbeat). zone = level of the worst zone containing the phone.
 func (a *App) phoneStates(now int64) {
 	type out struct {
 		id string
@@ -594,7 +832,15 @@ func (a *App) phoneStates(now int64) {
 		if !m.synced {
 			node = protocol.StatusConnecting
 		}
-		st := protocol.PhoneState{Type: protocol.TypeState, Node: node, Zone: zoneLevel[a.live.det.ZoneOf(m.row, m.col)]}
+		level := protocol.LevelCalm
+		if !m.outside {
+			for _, z := range a.live.det.ZonesOf(m.x, m.y) {
+				if levelRank[zoneLevel[z]] > levelRank[level] {
+					level = zoneLevel[z]
+				}
+			}
+		}
+		st := protocol.PhoneState{Type: protocol.TypeState, Node: node, Zone: level}
 		if st != a.sentState[pr.ID] || now-a.sentAt[pr.ID] > 3000 {
 			a.sentState[pr.ID], a.sentAt[pr.ID] = st, now
 			send = append(send, out{pr.ID, st})
@@ -606,11 +852,10 @@ func (a *App) phoneStates(now int64) {
 	}
 }
 
-func clamp(v, lo, hi int) int {
-	return max(lo, min(v, hi))
-}
-
 func round2(v float64) float64 { return math.Round(v*100) / 100 }
+
+// r2 rounds a position to the centimetre.
+func r2(v float64) float64 { return round2(v) }
 
 func short(id string) string {
 	if len(id) > 8 {

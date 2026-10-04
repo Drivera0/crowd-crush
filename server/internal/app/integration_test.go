@@ -40,7 +40,8 @@ func TestEndToEnd(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer ws.CloseNow()
-		hello, _ := json.Marshal(protocol.Hello{Type: "hello", ID: fmt.Sprintf("p%d", i), Row: 0, Col: i, UA: "test"})
+		x, y := float64(3+i), 7.5
+		hello, _ := json.Marshal(protocol.Hello{Type: "hello", ID: fmt.Sprintf("p%d", i), X: &x, Y: &y, UA: "test"})
 		ws.Write(ctx, websocket.MessageText, hello)
 		off := offsets[i]
 		go func() { // answer pings
@@ -91,7 +92,7 @@ func TestEndToEnd(t *testing.T) {
 		ok := 0
 		for _, nd := range last.Nodes {
 			// Offsets are recovered within the (local) RTT.
-			want := offsets[nd.Col]
+			want := offsets[int(nd.X)-3]
 			if nd.Status == protocol.StatusOK && nd.Offset > want-20 && nd.Offset < want+20 {
 				ok++
 			}
