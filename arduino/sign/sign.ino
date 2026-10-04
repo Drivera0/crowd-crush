@@ -159,12 +159,18 @@ void serveClient() {
   client.stop();
 }
 
+// renderBitmap is a macro that takes the frame's address, so it can't be
+// handed a ?: expression directly; route frames through a named parameter.
+void show(uint8_t frame[8][12]) {
+  matrix.renderBitmap(frame, 8, 12);
+}
+
 void render() {
   unsigned long t = millis();
   switch (level) {
     case CALM:
       // Heartbeat: a short blink every 1.5 s.
-      matrix.renderBitmap(((t % 1500) < 120) ? heart : blank, 8, 12);
+      show(((t % 1500) < 120) ? heart : blank);
       digitalWrite(ALARM_PIN, LOW);
       break;
     case YELLOW:
@@ -174,7 +180,7 @@ void render() {
     case RED: {
       // Arrow flashes, then STOP, repeating every 1.2 s.
       unsigned long p = t % 1200;
-      if (p < 600) matrix.renderBitmap(((p / 150) % 2) ? blank : arrow, 8, 12);
+      if (p < 600) show(((p / 150) % 2) ? blank : arrow);
       else matrix.renderBitmap(stop_, 8, 12);
       digitalWrite(ALARM_PIN, ((t / 250) % 2) ? HIGH : LOW);
       break;
