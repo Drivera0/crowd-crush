@@ -70,9 +70,14 @@ Record real runs early with **Record run** and a label that says what happened (
 2. **Band-pass** x (left/right with the phone upright on the chest) to 0.15–1.5 Hz: sway is slow.
 3. **Sway** = RMS over 5 s; above 0.25 m/s² → *swaying*.
 
-Per pair of grid neighbours, cross-correlate the last 6 s at lags ±1.5 s. A **wave edge** needs |correlation| ≥ 0.6 at a lag of 120–1200 ms, and that peak must be *unambiguous*: periodic motion like walking has several equally good lags, so the best peak must beat any other by 0.2. Lag ≈ 0 means moving together (dancing) and is never a wave.
+Per pair of grid neighbours, cross-correlate the last 6 s at lags ±1.5 s. A **wave edge** needs |correlation| ≥ 0.6 at a lag of 120–1200 ms, and that peak must be *unambiguous*: periodic motion like walking or swaying to music has several equally good lags, so the best peak must beat any other by 0.2. Lag ≈ 0 means moving together (dancing) and is never a wave.
 
-Per zone: score = net fraction of edges carrying a wave in one direction, smoothed (8 s). Yellow above 0.3 for 2 s, red above 0.6 for 2 s, clearing 0.1 lower (hysteresis).
+Two guards keep look-alikes out:
+
+- **Vertical veto** (`verticalRatio`): a push is horizontal. If the phones' vertical (y) motion is stronger than the horizontal, isn't rhythmic (its autocorrelation doesn't come back above 0.6 within 1.5 s, unlike jumping or walking to a beat), and travels between the pair by itself (|corr| ≥ 0.6 at a 120–1200 ms lag, same direction), it's people standing up in sequence: a stadium Mexican wave whose lean and tilt leak into x. A crowd jumping on the spot while a push goes through is rhythmic, so it never vetoes the push.
+- **Chains** (`minChain`, `chainCorr`): a crowd wave passes person to person to person. A wave edge only counts if it's part of a run of ≥ 3 phones along a row or column travelling the same way. The other hops only need to *support* it (|corr| ≥ 0.4 at a wave-like lag, same direction), like hysteresis in edge linking, so one noisy hop doesn't break a real wave. Two neighbours bumping into each other make an isolated edge and are dropped.
+
+Per zone: score = net fraction of edges carrying a wave in one direction, smoothed (8 s). Yellow above 0.3 for 2 s, red above 0.6 for 2 s, clearing 0.1 lower (hysteresis). Red already needs persistence: a single travelling event shows in the 6 s correlation window for at most ~6 s, which takes the 8 s-smoothed score to ~0.5 at most, so one shove or one person squeezing past can reach yellow but never red.
 
 Every threshold lives in one struct: `./bin/pulse -dump-config > detect.json`, edit, `./bin/pulse -config detect.json`.
 
@@ -81,9 +86,19 @@ Every threshold lives in one struct: `./bin/pulse -dump-config > detect.json`, e
 | `calm`, `walk`, `handle` | calm; handling nodes blue |
 | `dance` | nodes swaying, no wave edges, calm |
 | `shove` (one push) | yellow at most, decays back to calm |
-| `wave` (growing push every 2.5 s, 250 ms/person) | red in ~25 s, direction left → right |
+| `wave` (growing push every 2.5 s, 250 ms/person) | red in ~25 s (23–26 s over 20 crowds), direction left → right |
+| `wave-jump` (the same wave while everyone jumps to a beat) | red, slower: ~50 s (39–84 s over 20 crowds) |
+| `sway` (whole crowd sways to music at 0.5 Hz, 100 ms/person lag gradient + 50–200 ms each) | calm: periodic, lag ambiguous |
+| `sway-slow` (0.2 Hz ballad sway, ±19 cm) | calm: small, and the few edges don't chain |
+| `mexican` (stand up + arms up, 250 ms/person, every 8 s) | calm: vertical veto (red in 8/20 crowds without it) |
+| `walkpast` (one person squeezes along the line, one nudge per phone) | brief yellow, decays to calm; a single travelling jolt is a shove |
+| `procession` (people walk past alongside, lightly brushing about half the phones) | calm (yellow allowed; 4/20 crowds went yellow without chains) |
+| `march` (the line walks off together, near-identical cadence) | calm: periodic |
+| `pocket` (phones pocketed, jostled, dropped, picked up; some slower than the handling threshold) | calm |
+| `bump` (random neighbour pairs bump, 30–300 ms apart) | calm, no wave edges: isolated pairs don't chain |
+| `jump-stagger` (jumping to a 2 Hz beat, 0–300 ms reaction delays) | calm: periodic and vertical |
 
-Also tested: ±25 ms clock-sync error, and every other phone held upside down.
+Also tested: ±25 ms clock-sync error, every other phone held upside down, and the false-positive scenarios over 8 different random crowds each. `PULSE_SWEEP=1 go test ./server/internal/detect -run Sweep -v` prints outcomes over 20 crowds per scenario, and `PULSE_CFG='{"minChain":0}'` overrides config fields for comparisons.
 
 ## Layout
 
