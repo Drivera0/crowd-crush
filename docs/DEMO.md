@@ -29,7 +29,7 @@ At home first, once: everything in TABLE-DEMO.md's "Before leaving home", `./bin
 | 9 | **Simulation** → **Saved runs**: pick the best run, **▶ Play** to the end, stop. Leave it selected. | It's your fallback. |
 | 10 | **Reset** (below). Live page, full screen (⛶), QR showing. | Ready. |
 
-If the phone row straddles the middle of the map, the push can light both zones and both lights. That's fine; mention it if asked ("the row is across two zones").
+**Set up table demo** keeps the whole row inside one zone, so a push lights zone light A. Zone light B shows the empty zone B; use it for a drill on zone B.
 
 ## The run (clicks only)
 
@@ -122,7 +122,7 @@ Drop one rung the moment the current one stalls for more than 10 s. Don't debug 
 
 ## Devpost video: 3-minute shot list
 
-Record before the freeze. Screen capture at 1080p plus phone footage. Keep a local copy for rung 5.
+The word-for-word script, recording setup and the plan to demo day are in [VIDEO.md](VIDEO.md). Record before the freeze. Screen capture at 1080p plus phone footage. Keep a local copy for rung 5.
 
 | # | Time | Shot | Voice-over |
 |---|---|---|---|
