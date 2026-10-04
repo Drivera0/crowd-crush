@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+    <meta name="theme-color" content="#0b0f14" />
+    <meta name="darkreader-lock" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <title>Pulse</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23111'/%3E%3Ccircle cx='16' cy='16' r='2.6' fill='%23fff'/%3E%3Cg fill='none' stroke='%23fff' stroke-width='1.8'%3E%3Ccircle cx='16' cy='16' r='6.5'/%3E%3Ccircle cx='16' cy='16' r='11' stroke-opacity='.45'/%3E%3C/g%3E%3C/svg%3E" />
+  </head>
+  <body>
+    <main id="app">
+      <!-- 1. Join -->
+      <section id="join" class="screen">
+        <h1>Pulse</h1>
+        <p class="lead">Early warning for crowd crushes, using the phones already in the crowd.</p>
+        <button id="joinBtn" class="big">Join</button>
+        <p class="fine">
+          Shares motion numbers and where you are in the venue. GPS is turned into a spot on the venue map and
+          never stored. No name, contacts, audio or photos.
+        </p>
+        <p id="joinErr" class="err" hidden></p>
+      </section>
+
+      <!-- 2. Locating -->
+      <section id="locate" class="screen" hidden>
+        <div class="spinner"></div>
+        <h2>Finding you…</h2>
+        <p id="locateMsg" class="lead">Allow location access so the crowd map knows where you are.</p>
+        <button id="skipGps" class="small">Tap my spot on the map instead</button>
+      </section>
+
+      <!-- 3. Place yourself on the venue map -->
+      <section id="place" class="screen" hidden>
+        <h2>Where are you?</h2>
+        <p id="placeHint" class="fine">Tap where you're standing. Drag to adjust.</p>
+        <div id="venue" class="venue" role="application" aria-label="Venue map">
+          <span class="stage">STAGE</span>
+          <span id="me" class="me" hidden></span>
+        </div>
+        <button id="placeDone" class="big" disabled>That's me</button>
+        <button id="tryGps" class="small" hidden>Use GPS instead</button>
+      </section>
+
+      <!-- 4. Streaming -->
+      <section id="live" class="screen" hidden>
+        <div class="top">
+          <span id="dot" class="dot"></span>
+          <span id="conn">Connecting…</span>
+          <span id="where" class="spot"></span>
+        </div>
+        <div class="centre">
+          <div id="icon" class="icon">📱</div>
+          <h2 id="headline">Hold your phone flat against your chest</h2>
+          <p id="sub" class="lead">Screen facing out, top of the phone up.</p>
+        </div>
+        <!-- Shown over everything when the server says this person should move. -->
+        <div id="guide" class="guide" hidden>
+          <p class="guide-kicker">Crowd danger near you</p>
+          <h2 class="guide-title">Move this way</h2>
+          <div class="arrow-wrap"><svg id="arrow" class="arrow" viewBox="0 0 100 100" aria-hidden="true"><path d="M50 6 L84 50 H62 V94 H38 V50 H16 Z" /></svg></div>
+          <p id="guideTo" class="guide-to"></p>
+          <canvas id="miniMap" class="mini-map" width="240" height="160" aria-label="Where you are and which way to go"></canvas>
+          <p id="guideNote" class="guide-note"></p>
+          <p class="guide-tip">Move diagonally, not against the push. Keep your arms up in front of your chest.</p>
+        </div>
+        <div class="bottom">
+          <p id="stats" class="fine"></p>
+          <p id="warn" class="err" hidden></p>
+          <p id="screenTip" class="fine" hidden></p>
+          <button id="moveBtn" class="small">I moved: place me again</button>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>

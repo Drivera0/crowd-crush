@@ -1,0 +1,19 @@
+{
+  "name": "pulse-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev:phone": "vite --config phone/vite.config.ts",
+    "dev:dash": "vite --config dashboard/vite.config.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit && vite build --config phone/vite.config.ts && vite build --config dashboard/vite.config.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.6"
+  },
+  "dependencies": {
+    "motion": "^14.0.0"
+  }
+}
