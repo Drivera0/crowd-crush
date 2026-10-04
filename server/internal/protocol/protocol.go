@@ -199,6 +199,10 @@ type Node struct {
 	Color string `json:"color,omitempty"`
 	Shake bool   `json:"shake,omitempty"` // being shaken right now ("that's me")
 	Real  bool   `json:"real,omitempty"`  // mode "sim": a real phone standing in the simulated crowd
+	// Unplaced: connected, but with no position yet (no x/y, no accepted
+	// GPS fix, not lined up at the demo spot). x, y are 0 and mean nothing;
+	// like an outside phone it counts toward no zone, cluster or neighbour.
+	Unplaced bool `json:"unplaced,omitempty"`
 }
 
 // Point is [x, y] in venue metres.
@@ -254,7 +258,10 @@ type Notify struct {
 // Hardware is GET /api/hardware: one entry per sign or zone light in SIGN_URL,
 // checked every few seconds.
 type Hardware struct {
-	Name     string   `json:"name"` // "Sign", "Zone light A"
+	Name string `json:"name"` // "Sign", "Zone light A", "This laptop"
+	// Key names the entry in PUT /api/hardware/{key}/pos and in a check-in
+	// link (?at=<key>): "laptop", "sign" or a zone-light letter.
+	Key      string   `json:"key,omitempty"`
 	Kind     string   `json:"kind"` // sign | zone-light (as the board reports it)
 	URL      string   `json:"url"`
 	Zone     string   `json:"zone,omitempty"` // light letter; "" = follows the worst zone

@@ -838,3 +838,27 @@ button.danger-btn { background: var(--wave); border-color: var(--wave); color: #
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
 }
+
+/* ---- the judge demo: demo spot, named phones, "why did it fire?" ---- */
+.demo-card summary { cursor: pointer; list-style: none; display: flex; align-items: baseline; gap: 10px; }
+.demo-card summary::-webkit-details-marker { display: none; }
+.demo-card summary h3 { margin: 0; font-size: 14px; font-weight: 600; }
+.demo-card summary::after { content: '▾'; margin-left: auto; color: var(--muted); transition: transform 150ms; }
+.demo-card[open] summary::after { transform: rotate(180deg); }
+.demo-card[open] summary { margin-bottom: 12px; }
+.demo-check { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; }
+.demo-check input { margin-top: 3px; width: 16px; height: 16px; accent-color: var(--primary); flex: none; }
+.demo-check b { display: block; font-weight: 600; }
+.demo-check small { display: block; color: var(--muted); font-size: 12.5px; }
+.demo-tip { margin: 10px 0 0; }
+.demo-card .ops-block h4 { margin: 12px 0 4px; }
+.who { display: inline-flex; align-items: center; gap: 5px; font-family: inherit; font-weight: 600; }
+.who i { width: 9px; height: 9px; border-radius: 50%; background: var(--c, var(--muted)); flex: none; }
+.tt-head b.who { font-family: inherit; }
+.ac-why { background: none; border: 0; padding: 0; margin-left: auto; color: var(--muted); font-size: 12.5px; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+.ac-why:hover { color: var(--fg); }
+.ac-btns { align-items: center; flex-wrap: wrap; }
+.locating { font-weight: 600; color: var(--fg); }
+.locating::before { content: ''; display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; border: 1.5px dashed var(--muted); vertical-align: -1px; animation: spin 2.4s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.hw-checkin { display: flex; align-items: center; gap: 8px; margin-top: 6px; flex-wrap: wrap; }

@@ -1,0 +1,109 @@
+/* The judge demo on the phone: name, shake flash, drill label, privacy receipt. */
+
+.iam {
+  margin: 0;
+  font-size: 20px;
+  color: var(--muted);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+.iam[hidden] { display: none; }
+.iam b {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 22px;
+  border-radius: 999px;
+  background: #0b0f14;
+  border: 3px solid var(--me, #38bdf8);
+  color: #fff;
+  font-size: clamp(30px, 9vw, 44px);
+  font-weight: 800;
+  letter-spacing: -0.5px;
+  line-height: 1.1;
+}
+.iam b::before {
+  content: '';
+  width: 0.5em;
+  height: 0.5em;
+  border-radius: 50%;
+  background: var(--me, #38bdf8);
+  flex: none;
+}
+.iam small { font-size: 13px; }
+
+/* While the phone's state comes from the simulation. */
+.drill-tag {
+  margin: 0;
+  padding: 8px 14px;
+  border-radius: 10px;
+  background: #fff;
+  color: #111;
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: 0.2px;
+  width: 100%;
+  max-width: 28em;
+}
+.drill-tag[hidden] { display: none; }
+
+/* Shake acknowledged: rings in the phone's colour over the whole screen. */
+.shake-fx {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+.shake-fx[hidden] { display: none; }
+.shake-fx i {
+  position: absolute;
+  width: 40vmin;
+  height: 40vmin;
+  border-radius: 50%;
+  border: 6px solid var(--me, #38bdf8);
+  opacity: 0;
+}
+.shake-fx.go i { animation: shake-ring 1.1s ease-out forwards; }
+.shake-fx.go i:nth-child(2) { animation-delay: 0.18s; }
+.shake-fx.go i:nth-child(3) { animation-delay: 0.36s; }
+.shake-fx span {
+  position: relative;
+  padding: 10px 18px;
+  border-radius: 999px;
+  background: var(--me, #38bdf8);
+  color: #fff;
+  font-size: 18px;
+  font-weight: 800;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+  opacity: 0;
+}
+.shake-fx.go span { animation: shake-note 1.3s ease-out forwards; }
+@keyframes shake-ring {
+  0% { transform: scale(0.3); opacity: 0.95; }
+  100% { transform: scale(3.2); opacity: 0; }
+}
+@keyframes shake-note {
+  0%, 75% { opacity: 1; transform: scale(1); }
+  100% { opacity: 0; transform: scale(0.96); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .shake-fx.go i { animation-duration: 0.01s; }
+}
+
+/* Privacy receipt. */
+#receipt { justify-content: flex-start; text-align: left; align-items: stretch; gap: 12px; max-width: 34em; margin: 0 auto; }
+#receipt h2 { font-size: 24px; }
+#receipt h3 { margin: 10px 0 0; font-size: 13px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--muted); }
+.rc-list { margin: 0; display: grid; grid-template-columns: 1fr; gap: 2px; }
+.rc-list dt { font-size: 13px; color: var(--muted); margin-top: 8px; }
+.rc-list dd { margin: 0; font-size: 17px; font-weight: 600; }
+.rc-list small, .rc-plain small { display: block; font-size: 13px; font-weight: 400; color: var(--muted); }
+.rc-plain { margin: 0; padding-left: 18px; font-size: 15px; display: flex; flex-direction: column; gap: 6px; }
+.rc-never { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; font-size: 15px; }
+.rc-never li::before { content: '✕  '; color: var(--red); font-weight: 700; }
+#receipt .big { align-self: center; font-size: 20px; padding: 14px 40px; }

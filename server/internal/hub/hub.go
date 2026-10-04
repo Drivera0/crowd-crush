@@ -34,6 +34,15 @@ const (
 type Handler interface {
 	// PhoneHello places a phone (venue metres) when it joins or re-sends hello.
 	PhoneHello(id string, x, y float64, ua string)
+	// PhoneHelloAuto is a hello that carried no position at all (no x/y,
+	// no row/col): a GPS phone before its first fix, or any phone while
+	// the demo spot lines them up. The handler places it or keeps it
+	// unplaced; it must not be put on a default spot.
+	PhoneHelloAuto(id, ua string)
+	// PhoneHelloAt is a hello with at=<tower key>: the phone joined through
+	// a tower's QR code and is placed next to that tower. False = unknown
+	// or unplaced tower: the hub places the phone the normal way.
+	PhoneHelloAt(id, at, ua string) bool
 	// PhonePos moves a phone placed by hand (or a walking simulated phone).
 	PhonePos(id string, x, y float64)
 	// PhoneGPS delivers a raw fix. The handler converts it to venue metres
@@ -174,7 +183,7 @@ func (hb *Hub) ServePhone(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	var hello protocol.Hello
+	var hello helloMsg
 	if json.Unmarshal(b, &hello) != nil || hello.Type != protocol.TypeHello || hello.ID == "" || len(hello.ID) > 64 {
 		ws.Close(websocket.StatusPolicyViolation, "expected hello")
 		return
@@ -248,7 +257,7 @@ func (hb *Hub) ServePhone(w http.ResponseWriter, r *http.Request) {
 			hb.h.PhoneMotion(pc.id, m, now)
 		case protocol.TypeHello:
 			// Phone moved to a new spot without reconnecting.
-			var h protocol.Hello
+			var h helloMsg
 			if json.Unmarshal(b, &h) == nil && h.ID == pc.id {
 				hb.hello(h, hello.UA)
 			}
@@ -266,16 +275,40 @@ func (hb *Hub) ServePhone(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// hello places the phone from x/y, else its legacy row/col, then hands
-// over a GPS fix if the hello carried one.
-func (hb *Hub) hello(h protocol.Hello, ua string) {
-	var x, y float64
-	if h.X != nil && h.Y != nil {
-		x, y = *h.X, *h.Y
-	} else {
-		x, y = hb.h.LegacyPos(h.Row, h.Col)
+// helloMsg is a hello as received: the legacy grid cell as pointers, so a
+// phone that sent row/col (an old phone page: cell 0, 0 included) can be
+// told from one that sent no position at all.
+type helloMsg struct {
+	protocol.Hello
+	RowP *int `json:"row"`
+	ColP *int `json:"col"`
+	// At: the key of the tower whose QR code the phone joined through.
+	At string `json:"at"`
+}
+
+// hello places the phone from x/y, else its legacy row/col; a hello with
+// neither is handed over unplaced (it must not sit on a default cell,
+// where a few of them would read as a crowd). Then a GPS fix, if the hello
+// carried one.
+func (hb *Hub) hello(h helloMsg, ua string) {
+	switch {
+	case h.At != "" && len(h.At) <= 16 && hb.h.PhoneHelloAt(h.ID, h.At, ua):
+		// placed next to the tower
+	case h.X != nil && h.Y != nil:
+		hb.h.PhoneHello(h.ID, *h.X, *h.Y, ua)
+	case h.RowP != nil || h.ColP != nil:
+		row, col := 0, 0
+		if h.RowP != nil {
+			row = *h.RowP
+		}
+		if h.ColP != nil {
+			col = *h.ColP
+		}
+		x, y := hb.h.LegacyPos(row, col)
+		hb.h.PhoneHello(h.ID, x, y, ua)
+	default:
+		hb.h.PhoneHelloAuto(h.ID, ua)
 	}
-	hb.h.PhoneHello(h.ID, x, y, ua)
 	if h.Lat != nil && h.Lon != nil {
 		hb.h.PhoneGPS(h.ID, *h.Lat, *h.Lon, h.Acc)
 	}
