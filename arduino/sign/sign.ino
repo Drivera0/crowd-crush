@@ -58,6 +58,10 @@ enum Route { NOT_FOUND, LEVEL, PULSE };
 Level level = CALM;
 char zone[8] = "";
 unsigned long lastChange = 0;
+// Last time the server talked to the sign (HTTP request or USB command).
+unsigned long lastContact = 0;
+const unsigned long CONTACT_FRESH_MS = 20000;
+bool inTouch() { return lastContact && millis() - lastContact < CONTACT_FRESH_MS; }
 
 // 8 rows x 12 cols frames.
 uint8_t blank[8][12] = {0};
@@ -104,6 +108,18 @@ uint8_t stop_[8][12] = {
   {1,1,1,0,1,0,1,0,1,1,1,1},
   {0,0,1,0,1,0,1,0,1,1,0,0},
   {1,1,1,0,1,0,1,1,1,1,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0},
+};
+
+// Two dots: the calm heartbeat while the server is in touch with the sign.
+uint8_t linked[8][12] = {
+  {0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,1,1,0,0,0,0,1,1,0,0},
+  {0,0,1,1,0,0,0,0,1,1,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0},
   {0,0,0,0,0,0,0,0,0,0,0,0},
 };
 
@@ -260,6 +276,7 @@ int serialLen = 0;
 
 void handleSerialLine(char* s) {
   while (*s == ' ') s++;
+  if (s[0] == 'S' || s[0] == 'L') lastContact = millis();
   if (s[0] == 'S' && (s[1] == 0 || s[1] == ' ')) {
     char body[160];
     statusJSON(body, sizeof body);
@@ -310,6 +327,7 @@ void serveClient() {
       line += c;
     }
   }
+  if (route != NOT_FOUND) lastContact = millis();
   if (route == PULSE) {
     char body[160];
     statusJSON(body, sizeof body);
@@ -347,7 +365,11 @@ void render() {
     case CALM:
       // Heartbeat: a short blink every 1.5 s. USB-only: "USB" instead, with
       // the same blink (the frames alternate).
-      if (usbOnly()) show(((t % 1500) < 120) ? blank : usb);
+      // In touch with the server: a double flash of two dots every 1.5 s.
+      if (inTouch()) {
+        unsigned long lp = t % 1500;
+        show((lp < 120 || (lp >= 260 && lp < 380)) ? linked : blank);
+      } else if (usbOnly()) show(((t % 1500) < 120) ? blank : usb);
       else if (!wifiUp) show(bang);  // still trying Wi-Fi (first 15 s)
       else show(((t % 1500) < 120) ? heart : blank);
       digitalWrite(ALARM_PIN, LOW);
