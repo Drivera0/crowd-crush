@@ -1111,7 +1111,7 @@ async function loadHardware() {
       const host = h.url.replace(/^https?:\/\//, '');
       const status = h.online
         ? `${bars(h.rssi)}${h.uptime ? `<span class="muted">up ${ago2(h.uptime * 1000)}</span>` : ''}`
-        : `<span class="off-text">offline${h.lastSeen ? ` · seen ${ago2(Date.now() - h.lastSeen)} ago` : ''}</span>`;
+        : `<span class="off-text">offline${h.seenAgo != null ? ` · last answered ${ago2(h.seenAgo * 1000)} ago` : ' · not answering'}</span>`;
       const lvl = h.online && h.level ? `<span class="st ${h.level === 'red' ? 'wave' : h.level === 'yellow' ? 'swaying' : 'ok'}">${esc(h.level)}</span>` : '';
       const ble = h.ble
         ? `<div class="hw-ble">📶 Bluetooth: <b>${h.ble.devices}</b> devices nearby · ${h.ble.near} close</div>`
