@@ -136,7 +136,7 @@ export interface Cluster {
   count: number;
   /** Estimated people (count ÷ participation). */
   people?: number;
-  /** Estimated people per m². */
+  /** Phones per m² averaged over the cluster disc (reads thin for big clusters; show `est`). */
   density: number;
   level?: Level;
   trend: 'forming' | 'steady' | 'dispersing';
@@ -327,7 +327,7 @@ export interface AlertRules {
   densityHoldS?: number;
   /** Push (travelling wave) detection for this area. Default on. */
   push?: boolean;
-  /** Alert when more phones than this are inside (capacity); 0/absent = off. */
+  /** Alert when more people than this are inside (capacity, estimated as phones ÷ participation); 0/absent = off. */
   maxPhones?: number;
   /** Text staff hear and see instead of the generic briefing. */
   message?: string;

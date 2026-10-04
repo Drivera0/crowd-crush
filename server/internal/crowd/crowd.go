@@ -6,10 +6,12 @@
 // Density is phones per m² of the cluster's disc (centre = centroid,
 // radius = farthest member + 0.5 m, area at least 1 m²). Not everyone has
 // the page open, so people = phones / Participation and the level uses the
-// estimated density = max(disc density, peak local density) ÷ Participation,
-// where the peak local density is the phones within LocalR (1.5 m) of a
-// member ÷ that disc's area, at the 90th percentile of the members: a
-// large crowd with a packed front reads as packed, not as its thin average.
+// estimated density Est = max(disc density, peak local density) ÷
+// Participation, where the peak local density (LocalPeakAmong) is the
+// phones within LocalR (1.5 m) of a member ÷ that disc's area at the
+// cluster's densest well-supported spot: a large crowd with a packed front
+// reads as packed, not as its thin average. Est is the one density number:
+// cluster levels, early warning, area density rules and briefings use it.
 package crowd
 
 import (
@@ -105,8 +107,8 @@ type Cluster struct {
 	R       float64 // m
 	Count   int     // phones
 	Density float64 // phones per m²
-	Peak    float64 // phones per m² within LocalR of a member, 90th percentile over members
-	PeakX   float64 // where that member stands
+	Peak    float64 // phones per m² within LocalR of a member at the densest spot (LocalPeakAmong)
+	PeakX   float64 // where that member stands (the cluster's densest spot)
 	PeakY   float64
 	People  int     // estimated head count (Count / Participation)
 	Est     float64 // estimated people per m²
@@ -133,7 +135,8 @@ type Change struct {
 	From    string
 	To      string
 	// Early: the density projection (not the density itself) raised the
-	// cluster to yellow.
+	// cluster to yellow, or (From = To = yellow) a cluster already yellow
+	// is now projected to reach Danger soon. Once per yellow stretch.
 	Early bool
 }
 
@@ -151,6 +154,8 @@ type track struct {
 	hist       []sample
 	state      detect.LevelState
 	earlySince int64 // when the projection started holding (0 = not)
+	// earlyRaised: an early warning was reported in this yellow stretch.
+	earlyRaised bool
 }
 
 // Tracker follows clusters over time. Not safe for concurrent use.
@@ -278,9 +283,19 @@ func (t *Tracker) Update(now int64, pts []Point) ([]Cluster, []Change) {
 			if tr.state.Level == protocol.LevelCalm && now-tr.earlySince >= EarlyHoldMs {
 				tr.state.Level, tr.state.Since = protocol.LevelYellow, now
 				from, to, changed, early = protocol.LevelCalm, protocol.LevelYellow, true, true
+				tr.earlyRaised = true
+			} else if !changed && !tr.earlyRaised && tr.state.Level == protocol.LevelYellow && now-tr.earlySince >= EarlyHoldMs {
+				// Already yellow (a packed but steady crowd) and now
+				// projected to be dangerous soon: report it as an early
+				// warning (yellow → yellow, Early), once per yellow stretch.
+				from, to, changed, early = protocol.LevelYellow, protocol.LevelYellow, true, true
+				tr.earlyRaised = true
 			}
 		} else {
 			tr.earlySince = 0
+		}
+		if tr.state.Level != protocol.LevelYellow {
+			tr.earlyRaised = false
 		}
 		f.Level = tr.state.Level
 		tr.c = f
@@ -417,6 +432,8 @@ func slope(h []sample, from int64) float64 {
 }
 
 // describe turns a group of points into a cluster (no ID, trend or level).
+// Local densities count every phone (not only the cluster's members) as a
+// neighbour.
 func describe(pts []Point, idx []int, participation float64) Cluster {
 	var c Cluster
 	for _, i := range idx {
@@ -443,7 +460,7 @@ func describe(pts []Point, idx []int, participation float64) Cluster {
 	for k, i := range idx {
 		sub[k] = pts[i]
 	}
-	c.Peak, c.PeakX, c.PeakY = LocalPeak(sub)
+	c.Peak, c.PeakX, c.PeakY = LocalPeakAmong(pts, sub)
 	if participation <= 0 {
 		participation = 1
 	}
@@ -453,12 +470,34 @@ func describe(pts []Point, idx []int, participation float64) Cluster {
 	return c
 }
 
-// LocalPeak is the peak local density of a set of phones: for each one,
-// the phones within LocalR (itself included) ÷ that disc's area, taken at
-// the PeakQuantile of the set, and where that phone stands. Phones per m²;
-// divide by participation for people per m². Zero for no points.
-func LocalPeak(pts []Point) (peak, x, y float64) {
-	if len(pts) == 0 {
+// PeakAgree: the densest spot's reading must be backed by its neighbours.
+// A local count of k phones counts as the peak only when at least
+// k / PeakAgree phones have k or more within LocalR (one phone that happens
+// to stand in a lucky spot can't make a crowd read packed), so for a packed
+// patch a few metres across the peak is its real density, however much
+// thinner crowd surrounds it.
+const PeakAgree = 5
+
+// LocalPeak is LocalPeakAmong(pts, pts).
+func LocalPeak(pts []Point) (peak, x, y float64) { return LocalPeakAmong(pts, pts) }
+
+// LocalPeakAmong is the peak local density around the phones in centres,
+// counting every phone in all as a neighbour (so a centre near the edge of
+// an area or cluster still sees the crowd just past it): for each centre,
+// the phones within LocalR (itself included) ÷ that disc's area (7.07 m²).
+// The peak is the larger of
+//   - the PeakQuantile of the centres' local densities (robust for small
+//     groups), and
+//   - the densest local count k that at least k / PeakAgree centres reach
+//     (a packed patch inside a much larger, thinner crowd: the quantile alone
+//     would read the thin crowd once the patch is under 10 % of the phones),
+//
+// and (x, y) is where it is: the densest centre when the second wins, else
+// the quantile's centre. Phones per m²; divide by participation for people
+// per m². Zero for no centres. This is the one density estimate behind
+// cluster levels, early warning, area density rules and briefings.
+func LocalPeakAmong(all, centres []Point) (peak, x, y float64) {
+	if len(centres) == 0 {
 		return 0, 0, 0
 	}
 	r2 := LocalR * LocalR
@@ -466,20 +505,33 @@ func LocalPeak(pts []Point) (peak, x, y float64) {
 		k    int
 		x, y float64
 	}
-	loc := make([]local, 0, len(pts))
-	for _, p := range pts {
+	loc := make([]local, 0, len(centres))
+	for _, p := range centres {
 		k := 0
-		for _, q := range pts {
+		for _, q := range all {
 			dx, dy := p.X-q.X, p.Y-q.Y
 			if dx*dx+dy*dy <= r2 {
 				k++
 			}
 		}
-		loc = append(loc, local{k, p.X, p.Y})
+		loc = append(loc, local{max(k, 1), p.X, p.Y})
 	}
 	sort.SliceStable(loc, func(a, b int) bool { return loc[a].k < loc[b].k })
 	q := loc[min(len(loc)-1, int(PeakQuantile*float64(len(loc))))]
-	return float64(q.k) / (math.Pi * r2), q.x, q.y
+	best, bx, by := q.k, q.x, q.y
+	// Agreed peak: walking down from the densest, the i-th densest centre
+	// backs a count of at most PeakAgree × i.
+	top := loc[len(loc)-1]
+	for i := 1; i <= len(loc); i++ {
+		k := loc[len(loc)-i].k
+		if v := min(k, PeakAgree*i); v > best {
+			best, bx, by = v, top.x, top.y
+		}
+		if PeakAgree*i >= k {
+			break // further down, k only shrinks
+		}
+	}
+	return float64(best) / (math.Pi * r2), bx, by
 }
 
 // DBSCAN groups points that have at least minPts points (themselves

@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Drivera0/crowd-crush/server/internal/brief"
 	"github.com/Drivera0/crowd-crush/server/internal/detect"
@@ -36,7 +38,7 @@ import (
 // EscalateAfter after it went red is re-broadcast with escalated:true, its
 // briefing is spoken again ("Still unacknowledged. …", or the same audio
 // if a new clip can't be made) and the sign and its light are forced red
-// for 8 s. Once per incident.
+// for 8 s. Once per incident. Test alerts (drills) never escalate.
 
 // DefaultEscalateAfter is Options.EscalateAfter's default.
 const DefaultEscalateAfter = 60 * time.Second
@@ -134,8 +136,10 @@ func (a *App) raiseLocked(source, kind, zone, from, to string, score float64, no
 			}
 			if to == protocol.LevelRed {
 				al.Early = false
-			} else if early && al.Level == protocol.LevelYellow {
-				al.Early = true
+			} else if early && al.Level == protocol.LevelYellow && !al.Early {
+				// A yellow incident now projected to turn dangerous soon:
+				// it becomes an early warning, timed from now.
+				al.Early, al.T = true, now
 			}
 			if to == protocol.LevelRed && inc.redAt == 0 {
 				inc.redAt = now
@@ -222,19 +226,33 @@ func (a *App) detectTick(now int64) {
 	}
 	for _, ch := range changes {
 		al, job := a.raiseLocked(source, protocol.KindWave, ch.Zone, ch.From, ch.To, round2(ch.Score), now, isReplay, false,
-			func() brief.Info { return briefInfo(active, ch.Zone, protocol.LevelRed, pnow) })
+			func() brief.Info { return a.waveInfoLocked(active, ch.Zone, protocol.LevelRed, pnow) })
 		add(al, ch.To, job)
 	}
 	for _, ch := range cch {
 		c := ch.Cluster
-		zone := active.det.ZoneOf(c.X, c.Y)
+		// Attributed to the drawn area holding the cluster's densest spot
+		// (else that spot's zone), not to wherever its centroid falls.
+		zone := active.hotspotZone(c.PeakX, c.PeakY)
 		al, job := a.raiseLocked(source, protocol.KindDensity, zone, ch.From, ch.To, round2(c.Est), now, isReplay, ch.Early,
-			func() brief.Info { return densityInfo(active, c, zone) })
+			func() brief.Info {
+				in := densityInfo(active, c, zone)
+				in.Exit = a.nearestExit(active, c.PeakX, c.PeakY)
+				return in
+			})
 		add(al, ch.To, job)
 	}
 	for _, ch := range rch {
 		al, job := a.raiseLocked(source, protocol.KindRule, ch.zone, ch.from, ch.to, ruleScore(ch), now, isReplay, false,
-			func() brief.Info { return ruleInfo(active, ch) })
+			func() brief.Info {
+				in := ruleInfo(active, ch)
+				if ch.st.phones > 0 {
+					in.Exit = a.nearestExit(active, ch.st.peakX, ch.st.peakY)
+				} else if x, y, ok := zoneSpot(active, ch.zone); ok {
+					in.Exit = a.nearestExit(active, x, y)
+				}
+				return in
+			})
 		add(al, ch.to, job)
 	}
 	zoneLevels, signLevel, signZone := a.alertLevels(active)
@@ -270,7 +288,7 @@ func (a *App) alertLevels(p *pipeline) (zoneLevels map[string]string, level, zon
 		zoneLevels[z.ID], score[z.ID] = p.zoneLevel(z), z.Score
 	}
 	for _, c := range p.clusters {
-		id := p.det.ZoneOf(c.X, c.Y)
+		id := p.hotspotZone(c.PeakX, c.PeakY)
 		if id != "" && levelRank[c.Level] > levelRank[zoneLevels[id]] {
 			zoneLevels[id] = c.Level
 		}
@@ -295,6 +313,16 @@ func (a *App) alertLevels(p *pipeline) (zoneLevels map[string]string, level, zon
 		zone = ""
 	}
 	return zoneLevels, level, zone
+}
+
+// waveInfoLocked is briefInfo plus the open exit nearest the push. Caller
+// holds mu.
+func (a *App) waveInfoLocked(p *pipeline, zone, level string, now int64) brief.Info {
+	in := briefInfo(p, zone, level, now)
+	if x, y, ok := zoneSpot(p, zone); ok {
+		in.Exit = a.nearestExit(p, x, y)
+	}
+	return in
 }
 
 // briefAndSpeak runs Gemini then ElevenLabs and updates the alert with the
@@ -343,8 +371,8 @@ func (a *App) briefAndSpeak(j *briefJob) {
 
 // TestAlert runs the whole alert chain (briefing, voice, sign) for the zone
 // with the highest score, without touching detector state. It is a new
-// incident (test:true) that can be acknowledged, resolved and escalated
-// like a real one.
+// incident (test:true) that can be acknowledged and resolved like a real
+// one, but never escalates and stays out of the history given to Gemini.
 func (a *App) TestAlert() string {
 	now := hub.Now()
 	a.mu.Lock()
@@ -363,7 +391,7 @@ func (a *App) TestAlert() string {
 			zone = p.last.Zones[0].ID
 		}
 	}
-	info := briefInfo(p, zone, protocol.LevelRed, a.pnowLocked(now))
+	info := a.waveInfoLocked(p, zone, protocol.LevelRed, a.pnowLocked(now))
 	if info.Direction == "" {
 		info.Direction, info.LagMs = "+x", 250
 	}
@@ -385,13 +413,36 @@ func (a *App) TestAlert() string {
 // ErrNoAlert: no alert with that ID (or it has dropped out of the log).
 var ErrNoAlert = errors.New("no such alert")
 
-// AckAlert marks an alert acknowledged and tells every dashboard.
-func (a *App) AckAlert(id string) (protocol.Alert, error) {
+// Audit trail limits (characters).
+const (
+	MaxAuditBy   = 60
+	MaxAuditNote = 280
+)
+
+// ErrAudit: by or note too long.
+var ErrAudit = fmt.Errorf("by must be at most %d characters and note at most %d", MaxAuditBy, MaxAuditNote)
+
+// cleanAudit collapses whitespace and checks the lengths.
+func cleanAudit(by, note string) (string, string, error) {
+	by, note = strings.Join(strings.Fields(by), " "), strings.TrimSpace(note)
+	if utf8.RuneCountInString(by) > MaxAuditBy || utf8.RuneCountInString(note) > MaxAuditNote {
+		return "", "", ErrAudit
+	}
+	return by, note, nil
+}
+
+// AckAlert marks an alert acknowledged (by whom, optional) and tells every
+// dashboard.
+func (a *App) AckAlert(id, by string) (protocol.Alert, error) {
+	by, _, err := cleanAudit(by, "")
+	if err != nil {
+		return protocol.Alert{}, err
+	}
 	now := hub.Now()
 	a.mu.Lock()
 	al, ok := a.updateAlertLocked(id, func(al *protocol.Alert, _ *incident) {
 		if al.Status == protocol.StatusOpen {
-			al.Status, al.AckAt = protocol.StatusAck, now
+			al.Status, al.AckAt, al.AckBy = protocol.StatusAck, now, by
 		}
 	})
 	a.mu.Unlock()
@@ -403,13 +454,24 @@ func (a *App) AckAlert(id string) (protocol.Alert, error) {
 }
 
 // ResolveAlert closes an alert's card. Detector levels are untouched; the
-// next level change in that zone opens a new incident.
-func (a *App) ResolveAlert(id string) (protocol.Alert, error) {
+// next level change in that zone opens a new incident. by (who) and note
+// (the outcome, ≤ 280 chars) are optional; a note given for an alert
+// already resolved replaces its note.
+func (a *App) ResolveAlert(id, by, note string) (protocol.Alert, error) {
+	by, note, err := cleanAudit(by, note)
+	if err != nil {
+		return protocol.Alert{}, err
+	}
 	now := hub.Now()
 	a.mu.Lock()
 	al, ok := a.updateAlertLocked(id, func(al *protocol.Alert, inc *incident) {
 		if al.Status != protocol.StatusResolved {
-			al.Status, al.ResolvedAt = protocol.StatusResolved, now
+			al.Status, al.ResolvedAt, al.ResolvedBy, al.Note = protocol.StatusResolved, now, by, note
+		} else if note != "" {
+			al.Note = note
+			if by != "" {
+				al.ResolvedBy = by
+			}
 		}
 		if inc.key != "" && a.openInc[inc.key] == id {
 			delete(a.openInc, inc.key)
@@ -423,6 +485,30 @@ func (a *App) ResolveAlert(id string) (protocol.Alert, error) {
 	return al, nil
 }
 
+// ClearAlerts tidies the timeline: resolved alerts (calm notices included)
+// and test alerts leave the log; open and acknowledged real incidents stay.
+// Every dashboard gets the new log as an alerts message, which is also
+// returned.
+func (a *App) ClearAlerts() protocol.Alerts {
+	a.mu.Lock()
+	keep := []protocol.Alert{}
+	for _, al := range a.alerts {
+		if al.Test || al.Status == protocol.StatusResolved {
+			if inc := a.incidents[al.ID]; inc != nil && inc.key != "" && a.openInc[inc.key] == al.ID {
+				delete(a.openInc, inc.key)
+			}
+			delete(a.incidents, al.ID)
+			continue
+		}
+		keep = append(keep, al)
+	}
+	a.alerts = keep
+	out := protocol.Alerts{Type: protocol.TypeAlerts, Alerts: append([]protocol.Alert{}, keep...)}
+	a.mu.Unlock()
+	a.Hub.BroadcastJSON(out)
+	return out
+}
+
 // escalate re-announces red incidents nobody acknowledged in time.
 func (a *App) escalate(now int64) {
 	after := a.opt.EscalateAfter.Milliseconds()
@@ -433,7 +519,7 @@ func (a *App) escalate(now int64) {
 	a.mu.Lock()
 	for _, al := range a.alerts {
 		inc := a.incidents[al.ID]
-		if inc == nil || al.Status != protocol.StatusOpen || al.Level != protocol.LevelRed || al.Escalated ||
+		if inc == nil || al.Test || al.Status != protocol.StatusOpen || al.Level != protocol.LevelRed || al.Escalated ||
 			inc.escalating || inc.redAt == 0 || now-inc.redAt < after {
 			continue
 		}

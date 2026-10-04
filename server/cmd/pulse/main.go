@@ -107,7 +107,8 @@ func main() {
 		venue.Lat, venue.Lon, venue.Bearing, venue.Geo = *venueLat, *venueLon, *venueBearing, true
 	}
 	a := app.New(app.Options{Detect: cfg, RecordingsDir: *recDir, DataDir: *dataDir, Venue: venue,
-		Sink: sink, Tiger: tiger, Brief: b, Voice: v, Sign: s, EscalateAfter: escalateOpt(*escalate)})
+		Sink: sink, Tiger: tiger, Brief: b, Voice: v, Sign: s, EscalateAfter: escalateOpt(*escalate),
+		PublicURL: *publicURL})
 	cfg = a.Config()
 	go a.Run(ctx)
 

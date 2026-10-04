@@ -115,21 +115,56 @@ func (a *App) Routes(mux *http.ServeMux) {
 			writeJSON(w, s)
 		}
 	})
-	mux.HandleFunc("POST /api/alerts/{id}/ack", func(w http.ResponseWriter, r *http.Request) {
-		al, err := a.AckAlert(r.PathValue("id"))
-		if err != nil {
+	// Ack and resolve take an optional body: {"by"} and {"by", "note"}.
+	// An empty body works as before.
+	auditBody := func(w http.ResponseWriter, r *http.Request) (by, note string, ok bool) {
+		var req struct {
+			By   string `json:"by"`
+			Note string `json:"note"`
+		}
+		err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<14)).Decode(&req)
+		if err != nil && !errors.Is(err, io.EOF) {
+			httpError(w, errors.New(`want an empty body or {"by": "…", "note": "…"}`), http.StatusBadRequest)
+			return "", "", false
+		}
+		return req.By, req.Note, true
+	}
+	alertErr := func(w http.ResponseWriter, err error) {
+		if errors.Is(err, ErrNoAlert) {
 			httpError(w, err, http.StatusNotFound)
+			return
+		}
+		httpError(w, err, http.StatusBadRequest)
+	}
+	mux.HandleFunc("POST /api/alerts/{id}/ack", func(w http.ResponseWriter, r *http.Request) {
+		by, _, ok := auditBody(w, r)
+		if !ok {
+			return
+		}
+		al, err := a.AckAlert(r.PathValue("id"), by)
+		if err != nil {
+			alertErr(w, err)
 			return
 		}
 		writeJSON(w, al)
 	})
 	mux.HandleFunc("POST /api/alerts/{id}/resolve", func(w http.ResponseWriter, r *http.Request) {
-		al, err := a.ResolveAlert(r.PathValue("id"))
+		by, note, ok := auditBody(w, r)
+		if !ok {
+			return
+		}
+		al, err := a.ResolveAlert(r.PathValue("id"), by, note)
 		if err != nil {
-			httpError(w, err, http.StatusNotFound)
+			alertErr(w, err)
 			return
 		}
 		writeJSON(w, al)
+	})
+	mux.HandleFunc("POST /api/alerts/clear", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, a.ClearAlerts())
+	})
+	mux.HandleFunc("GET /api/join", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, JoinURL(a.opt.PublicURL, r))
 	})
 	mux.HandleFunc("GET /api/hardware", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, a.Hardware())
@@ -325,43 +360,95 @@ func (a *App) Routes(mux *http.ServeMux) {
 	})
 }
 
-// History summarises the last 10 minutes for the "ask" box: alert log plus
-// each zone's peak score and level per minute.
+// History summarises the situation for the "ask" box: the live situation
+// first (overall status, active incidents), then the last 10 minutes of
+// real alerts and each zone's peak score and level per minute. Places are
+// named, never given as ids. Drills (test alerts) are left out, only
+// counted, so the answer never mistakes one for an incident.
 func (a *App) History() string {
 	now := hub.Now()
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	p := a.active()
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "Now: %s. Mode: %s.\n", time.UnixMilli(now).Format("15:04:05"), a.modeLocked())
-	sb.WriteString("Alerts (oldest first):\n")
-	n := 0
-	for _, al := range a.alerts {
-		if now-al.T > 10*60_000 {
-			continue
+	mode := a.modeLocked()
+	switch mode {
+	case "sim":
+		mode = "sim (a crowd simulation on screen, not real phones)"
+	case "replay":
+		mode = "replay (a recorded run on screen, not the live crowd)"
+	}
+	fmt.Fprintf(&sb, "Now: %s. Mode: %s.\n", time.UnixMilli(now).Format("15:04:05"), mode)
+	st := a.statusLocked(p)
+	if st.Level == protocol.LevelCalm {
+		fmt.Fprintf(&sb, "Current situation: calm everywhere (crowd risk %.2f of 1).\n", st.Score)
+	} else {
+		what := map[string]string{protocol.StatusKindWave: "crowd waves (pushes) travelling through the crowd",
+			protocol.StatusKindDensity: "people packed too tightly", protocol.StatusKindRule: "a staff area rule broken",
+			protocol.StatusKindEarly: "crowding building fast (early warning)"}[st.Kind]
+		fmt.Fprintf(&sb, "Current situation: %s at %s: %s (crowd risk %.2f of 1)", strings.ToUpper(st.Level), st.Where, what, st.Score)
+		if st.Density > 0 {
+			fmt.Fprintf(&sb, ", about %.1f people per square metre at the worst spot", st.Density)
 		}
-		n++
-		fmt.Fprintf(&sb, "- %s zone %s → %s (score %.2f)", time.UnixMilli(al.T).Format("15:04:05"), al.Zone, al.Level, al.Score)
-		if al.Test {
-			sb.WriteString(" [test]")
+		sb.WriteString(".\n")
+	}
+	line := func(al protocol.Alert) {
+		kind := al.Kind
+		if kind == "" {
+			kind = protocol.KindWave
 		}
-		if al.Status != "" && al.Status != protocol.StatusOpen && al.Level != protocol.LevelCalm {
+		fmt.Fprintf(&sb, "- %s %s: %s %s (score %.2f)", time.UnixMilli(al.T).Format("15:04:05"), a.placeLocked(p, al.Zone), kind, al.Level, al.Score)
+		if al.Early {
+			sb.WriteString(" [early warning]")
+		}
+		if al.Status != "" && al.Level != protocol.LevelCalm {
 			fmt.Fprintf(&sb, " [%s]", al.Status)
 		}
 		if al.Escalated {
 			sb.WriteString(" [escalated]")
+		}
+		if al.Note != "" {
+			fmt.Fprintf(&sb, " [outcome: %q]", al.Note)
 		}
 		if al.Brief != "" {
 			fmt.Fprintf(&sb, ": %q", al.Brief)
 		}
 		sb.WriteString("\n")
 	}
+	sb.WriteString("Active incidents (not resolved yet):\n")
+	n := 0
+	for _, al := range a.alerts {
+		if !al.Test && al.Status != protocol.StatusResolved && al.Level != protocol.LevelCalm {
+			n++
+			line(al)
+		}
+	}
 	if n == 0 {
 		sb.WriteString("- none\n")
 	}
-	p := a.active()
-	sb.WriteString("Zone peak score per minute (oldest first, 0..1):\n")
+	sb.WriteString("Real alerts in the last 10 minutes (oldest first):\n")
+	n, drills := 0, 0
+	for _, al := range a.alerts {
+		if now-al.T > 10*60_000 {
+			continue
+		}
+		if al.Test {
+			drills++
+			continue
+		}
+		n++
+		line(al)
+	}
+	if n == 0 {
+		sb.WriteString("- none\n")
+	}
+	if drills > 0 {
+		fmt.Fprintf(&sb, "Drills: %d test alert(s) in the last 10 minutes; these were tests of the alert chain, not incidents.\n", drills)
+	}
+	sb.WriteString("Each zone's level now and its peak push-wave score per minute (oldest first, 0..1):\n")
+	zoneLevels, _, _ := a.alertLevels(p) // detector, rules and the clusters in each zone
 	for _, z := range p.last.Zones {
-		fmt.Fprintf(&sb, "- zone %s now %s:", z.ID, z.Level)
+		fmt.Fprintf(&sb, "- %s now %s:", zoneLabel(p, z.ID), zoneLevels[z.ID])
 		h := p.hist[z.ID]
 		for i := 0; i < len(h); i += 60 {
 			peak, lvl := 0.0, "calm"
@@ -383,6 +470,27 @@ func (a *App) History() string {
 	}
 	fmt.Fprintf(&sb, "Phones connected: %d.\n", phones)
 	return sb.String()
+}
+
+// placeLocked names an alert's zone for people: the zone's name in pipeline
+// p, else the saved area's name, else a description (never the id of a
+// drawn area). Caller holds mu.
+func (a *App) placeLocked(p *pipeline, zone string) string {
+	if _, ok := p.last.Zone(zone); ok {
+		return zoneLabel(p, zone)
+	}
+	for _, ar := range a.areas {
+		if ar.ID == zone && ar.Name != "" {
+			return ar.Name
+		}
+	}
+	if zone == "" {
+		return "somewhere in the venue"
+	}
+	if len(zone) <= 2 { // a default zone letter
+		return "Zone " + zone
+	}
+	return "an area that has since been removed"
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

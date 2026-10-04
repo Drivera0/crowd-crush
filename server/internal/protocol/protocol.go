@@ -215,7 +215,9 @@ type AlertRules struct {
 	DensityHoldS int     `json:"densityHoldS,omitempty"` // 0 = 5 s
 	// Push: travelling-wave detection for this area. nil = on.
 	Push *bool `json:"push,omitempty"`
-	// MaxPhones: red when more phones than this are inside for over 3 s. 0 = off.
+	// MaxPhones is a capacity in PEOPLE (the name is kept for compatibility):
+	// red when the estimated people inside (phones ÷ participation) stay
+	// above it for over 3 s. 0 = off.
 	MaxPhones int `json:"maxPhones,omitempty"`
 	// Message replaces the generic briefing's action (≤ 140 chars).
 	Message string  `json:"message,omitempty"`
@@ -281,7 +283,12 @@ type Cluster struct {
 	Density float64 `json:"density"` // phones per m²
 	People  int     `json:"people"`  // estimated head count (count / participation)
 	Trend   string  `json:"trend"`   // forming | steady | dispersing
-	Level   string  `json:"level"`   // calm | yellow | red, from the estimated density
+	Level   string  `json:"level"`   // calm | yellow | red, from Est
+	// Est: estimated people per m² at the cluster's densest spot (peak local
+	// density ÷ participation, or the disc density if higher). The one
+	// density number: cluster levels, early warning, area rules and
+	// briefings all use it.
+	Est float64 `json:"est"`
 	// Rate: how fast the estimated density is changing (people/m² per minute).
 	Rate float64 `json:"rate,omitempty"`
 	// ETA: projected seconds until the danger density at that rate (early
@@ -396,6 +403,33 @@ type Snapshot struct {
 	Clusters  []Cluster   `json:"clusters"`
 	Stats     Stats       `json:"stats"`
 	Sim       *SimFrame   `json:"sim,omitempty"` // mode "sim" only
+	// Status is the one overall status the console shows: the worst of the
+	// zones (wave detector), area rules and clusters.
+	Status *Status `json:"status,omitempty"`
+}
+
+// Status kinds: what makes the worst place the worst.
+const (
+	StatusKindWave    = "wave"
+	StatusKindDensity = "density"
+	StatusKindRule    = "rule"
+	StatusKindEarly   = "early"
+)
+
+// Status is the snapshot's overall status. Score is the single crowd-risk
+// number, 0..1, banded by level: calm < 0.5 ≤ yellow < 0.8 ≤ red. Zone is
+// the worst place's zone id and Where its name for people (a drawn area's
+// name when the hotspot is inside one, else the zone's name; never an id);
+// Zone, Where and Kind are empty when calm. Density is the estimated
+// people/m² at the worst spot when density is the reason (density, early,
+// a density rule).
+type Status struct {
+	Level   string  `json:"level"`
+	Score   float64 `json:"score"`
+	Zone    string  `json:"zone,omitempty"`
+	Where   string  `json:"where,omitempty"`
+	Kind    string  `json:"kind,omitempty"` // wave | density | rule | early
+	Density float64 `json:"density,omitempty"`
 }
 
 // Alert is one incident. Later messages with the same ID update it (level
@@ -421,7 +455,20 @@ type Alert struct {
 	AckAt    int64   `json:"ackAt,omitempty"`
 	// ResolvedAt is when staff closed it (server ms).
 	ResolvedAt int64 `json:"resolvedAt,omitempty"`
-	Escalated  bool  `json:"escalated,omitempty"` // red and unacknowledged past the escalation delay
+	// Audit trail: who acknowledged / resolved it (free text from the
+	// console) and the outcome note given on resolve (≤ 280 chars).
+	AckBy      string `json:"ackBy,omitempty"`
+	ResolvedBy string `json:"resolvedBy,omitempty"`
+	Note       string `json:"note,omitempty"`
+	Escalated  bool   `json:"escalated,omitempty"` // red and unacknowledged past the escalation delay
+}
+
+// JoinInfo is GET /api/join: the URL phones should open (the QR code) and
+// how far it reaches: public (PUBLIC_URL set, or a public hostname), lan
+// (a private IP) or local (localhost / loopback).
+type JoinInfo struct {
+	URL       string `json:"url"`
+	Reachable string `json:"reachable"` // public | lan | local
 }
 
 // Alerts is sent to a dashboard when it connects: the recent alert log.

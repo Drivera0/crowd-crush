@@ -109,7 +109,13 @@ func (a *App) StopSim() error {
 	return nil
 }
 
-// SimAction runs a director action on the running simulation.
+// SimAction runs a director action on the running simulation
+// (POST /api/sim/action). Behaviours: calm (the concert routine: standing,
+// some swaying, trips to the bar/toilets/merch, people arriving and
+// leaving), stage, surge, attract, disperse, dance (everyone sways to one
+// beat with their own delay: the false-positive test) and intermission
+// (the music stops, many groups head for the POIs at once and come back).
+// Events: shove, exit, spawn. See crowdsim.World.Apply for the fields.
 func (a *App) SimAction(act crowdsim.Action) error {
 	a.mu.Lock()
 	s := a.sim
@@ -119,7 +125,13 @@ func (a *App) SimAction(act crowdsim.Action) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.w.Apply(act)
+	if err := s.w.Apply(act); err != nil {
+		return err
+	}
+	if act.Type == crowdsim.ActDance || act.Type == crowdsim.ActIntermission {
+		log.Printf("sim: %s at %.1f s", act.Type, s.w.T)
+	}
+	return nil
 }
 
 // SimStatus is GET /api/sim.

@@ -325,7 +325,7 @@ func TestCapacityRule(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if al.Action != "Open gate 3 and hold the queue" || !strings.Contains(al.Headline, "Gate") || !strings.Contains(al.Headline, "5 phones") ||
+	if al.Action != "Open gate 3 and hold the queue" || !strings.Contains(al.Headline, "Gate") || !strings.Contains(al.Headline, "5 people") ||
 		al.Brief != al.Headline+" "+al.Action || al.AudioURL != "" {
 		t.Fatalf("rule briefing %+v", al)
 	}
