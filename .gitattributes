@@ -1,0 +1,8 @@
+# Keep LF line endings in the repo whichever OS edits the files (the repo is
+# worked on from Windows, WSL and macOS).
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.mp3 binary
+*.bin binary
