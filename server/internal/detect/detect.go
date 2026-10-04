@@ -592,8 +592,10 @@ func (d *Detector) Step(now int64) Result {
 		speeds []float64 // m/ms along the travel direction, per wave edge
 		waves  int
 		pairs  int // of which two-phone pushes (table demo profile)
-		// together: a group moving as one touches the zone (table demo profile)
-		together bool
+		// together: a group moving as one touches the zone (table demo
+		// profile), held since togetherSince (its longest streak's start)
+		together      bool
+		togetherSince int64
 		vx, vy   float64
 		lagSum   int64
 		// Phones in the zone by how well their position is known, and the
@@ -645,8 +647,9 @@ func (d *Detector) Step(now int64) Result {
 		e := Edge{From: a.id, To: b.id, Motion: pi >= nExact}
 		sup := false
 		dark := a.blind || b.blind
+		minSway := cfg.edgeMinSway(a.table && b.table)
 		canCorr := a.lastT >= a.handlingUntil && b.lastT >= b.handlingUntil &&
-			a.sway >= cfg.EdgeMinSway && b.sway >= cfg.EdgeMinSway &&
+			a.sway >= minSway && b.sway >= minSway &&
 			!a.walking && !b.walking
 		if canCorr {
 			// |corr|: a phone held upside down, or iOS vs Android sign conventions,
@@ -684,7 +687,7 @@ func (d *Detector) Step(now int64) Result {
 		unseen = append(unseen, dark)
 		support = append(support, sup)
 		recs = append(recs, pairRec{motion: e.Motion, a: a, b: b, handA: a.lastT < a.handlingUntil, handB: b.lastT < b.handlingUntil,
-			swayA: a.sway, swayB: b.sway, walkA: a.walking, walkB: b.walking, preChain: e.Wave})
+			swayA: a.sway, swayB: b.sway, minSway: minSway, walkA: a.walking, walkB: b.walking, preChain: e.Wave})
 	}
 	d.keepChains(edges, support)
 	var groups []TogetherGroup
@@ -699,8 +702,16 @@ func (d *Detector) Step(now int64) Result {
 		a, b := d.phones[e.From], d.phones[e.To]
 		var tx, ty, speed float64
 		if e.Together {
+			since := now
+			if st := d.tab.tog[[2]string{e.From, e.To}]; st != nil && st.since > 0 {
+				since = st.since
+			}
 			for _, zi := range unionIdx(a.zones, b.zones) {
-				tallies[zi].together = true
+				t := &tallies[zi]
+				if !t.together || since < t.togetherSince {
+					t.togetherSince = since
+				}
+				t.together = true
 			}
 		}
 		if e.Wave && !e.Pair {
@@ -764,7 +775,7 @@ func (d *Detector) Step(now int64) Result {
 			st = protocol.StatusHandling
 		case p.wave:
 			st = protocol.StatusWave
-		case p.sway > cfg.SwayThreshold && !p.walking:
+		case p.sway > cfg.swayThreshold(p.table) && !p.walking:
 			st = protocol.StatusSwaying
 		}
 		res.Phones = append(res.Phones, PhoneResult{ID: id, X: p.x, Y: p.y, Acc: p.acc, Outside: p.outside, Status: st, Sway: p.sway, LastT: p.lastT})
@@ -816,6 +827,10 @@ func (d *Detector) Step(now int64) Result {
 			}
 			if t.together {
 				z.score = math.Max(z.score, cfg.Table.TogetherScore)
+				// Still moving as one long after it was first seen: red.
+				if r := cfg.Table.TogetherRedMs; r > 0 && now-t.togetherSince >= cfg.Table.TogetherHoldMs+r {
+					z.score = math.Max(z.score, cfg.RedScore+cfg.Margin)
+				}
 			}
 		}
 		if z.def.NoPush {

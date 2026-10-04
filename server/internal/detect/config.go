@@ -160,17 +160,49 @@ type TableConfig struct {
 	TogetherHoldMs      int64   `json:"togetherHoldMs"`
 	TogetherJitterMs    int64   `json:"togetherJitterMs"`
 	TogetherScore       float64 `json:"togetherScore"`
+	// TogetherRedMs: a group still moving as one this long after it was
+	// first held turns its zone red: people swaying in sync without a beat
+	// for that long are being moved by the crowd, not dancing. 0 = never
+	// (yellow at most).
+	TogetherRedMs int64 `json:"togetherRedMs"`
+	// Judges at a table move gently: a phone counts as swaying above
+	// SwayThreshold, and a pair is compared once both move at least
+	// EdgeMinSway (instead of the crowd's swayThreshold / edgeMinSway).
+	// 0 = the crowd's value. EdgeMinSway stays at the crowd's by default:
+	// at 0.08-0.12 the "gentle" pushes go red, but so do 9-12 of 84 runs of
+	// a line swaying or dancing to music (sway-slow, sway, dance, march).
+	SwayThreshold float64 `json:"swayThreshold"`
+	EdgeMinSway   float64 `json:"edgeMinSway"`
+}
+
+// swayThreshold is the "swaying" threshold for a phone, table is whether it
+// runs the table demo profile this step.
+func (c *Config) swayThreshold(table bool) float64 {
+	if table && c.Table.SwayThreshold > 0 {
+		return c.Table.SwayThreshold
+	}
+	return c.SwayThreshold
+}
+
+// edgeMinSway is the movement both phones of a pair need before they are
+// compared; table: both run the table demo profile.
+func (c *Config) edgeMinSway(table bool) float64 {
+	if table && c.Table.EdgeMinSway > 0 {
+		return c.Table.EdgeMinSway
+	}
+	return c.EdgeMinSway
 }
 
 // DefaultTableConfig is the table demo profile, tuned on the table-demo
 // cases (sim/table.go; numbers in docs/TABLE-DEMO.md).
 func DefaultTableConfig() TableConfig {
 	return TableConfig{
-		MaxPhones: 5, SmoothMs: 7000, HoldMs: 500,
+		MaxPhones: 8, SmoothMs: 7000, HoldMs: 500,
+		SwayThreshold: 0.15,
 		PairScore:    0.45,
 		TogetherCorr: 0.7, TogetherMaxLagMs: 300, TogetherWindowMs: 15000,
 		TogetherRhythm: 0.5, TogetherRhythmLagMs: 5000,
-		TogetherHoldMs: 8000, TogetherJitterMs: 120, TogetherScore: 0.45,
+		TogetherHoldMs: 8000, TogetherJitterMs: 120, TogetherScore: 0.45, TogetherRedMs: 6000,
 	}
 }
 
@@ -287,6 +319,10 @@ func (c Config) Validate() error {
 		switch {
 		case t.SmoothMs <= 0 || t.HoldMs < 0:
 			return fmt.Errorf("table: smoothMs > 0 and holdMs ≥ 0")
+		case t.TogetherRedMs < 0:
+			return fmt.Errorf("table: togetherRedMs must be ≥ 0 (0 = moving as one stays yellow)")
+		case t.SwayThreshold < 0 || t.EdgeMinSway < 0:
+			return fmt.Errorf("table: swayThreshold and edgeMinSway must be ≥ 0 (0 = the crowd's value)")
 		case !(t.PairScore >= 0 && t.PairScore < c.RedScore) || !(t.TogetherScore >= 0 && t.TogetherScore < c.RedScore):
 			return fmt.Errorf("table: pairScore and togetherScore must be ≥ 0 and below redScore (they are yellow at most)")
 		case t.TogetherScore > 0 && (!(t.TogetherCorr > 0 && t.TogetherCorr <= 1) || t.TogetherMaxLagMs < 0 ||

@@ -23,6 +23,7 @@ type pairRec struct {
 	a, b         *phone
 	handA, handB bool
 	swayA, swayB float64
+	minSway      float64 // what each needed (lower for a table demo pair)
 	walkA, walkB bool
 	preChain     bool // passed every per-pair test (before the chain test)
 	motion       bool // found by motion (a position only roughly known)
@@ -76,8 +77,8 @@ func (d *Detector) Explain(from, to string) (protocol.EdgeExplain, bool) {
 	add := func(name string, pass bool, detail string, args ...any) {
 		out.Checks = append(out.Checks, protocol.Check{Name: name, Pass: pass, Detail: fmt.Sprintf(detail, args...)})
 	}
-	add("Both phones moving", pr.swayA >= cfg.EdgeMinSway && pr.swayB >= cfg.EdgeMinSway,
-		"sway %.2f and %.2f m/s², need %.2f", pr.swayA, pr.swayB, cfg.EdgeMinSway)
+	add("Both phones moving", pr.swayA >= pr.minSway && pr.swayB >= pr.minSway,
+		"sway %.2f and %.2f m/s², need %.2f", pr.swayA, pr.swayB, pr.minSway)
 	if pr.motion {
 		add("Neighbours by motion", true, "positions known to ±%.0f m and ±%.0f m: compared because they move together, not because of where the map puts them", a.acc, b.acc)
 	}
