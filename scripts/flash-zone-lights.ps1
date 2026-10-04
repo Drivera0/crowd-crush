@@ -1,4 +1,5 @@
 # Flash the Pulse zone lights (ESP32 DevKit V1, one per zone) from Windows and add them to SIGN_URL.
+# Each board is then told its zone (GET /level?v=calm&zone=X) so its Bluetooth beacon reads PULSE-X.
 #
 #   pwsh scripts/flash-zone-lights.ps1                 # every ESP32 plugged in → zones A, B, … in port order
 #   pwsh scripts/flash-zone-lights.ps1 -Zones B,A      # pick which zone each board (in port order) shows
@@ -94,6 +95,10 @@ for ($i = 0; $i -lt $Ports.Count; $i++) {
   if ($url) {
     Write-Host "  $p → zone $($Zones[$i]) at $url"
     $found[$Zones[$i]] = $url
+    # Tell it its zone right away so its Bluetooth beacon says PULSE-<zone> (the board keeps it in flash).
+    # It was just reset, so it's calm anyway; the server sends the live level on its next update.
+    try { Invoke-WebRequest "$url/level?v=calm&zone=$($Zones[$i])" -TimeoutSec 5 -UseBasicParsing | Out-Null }
+    catch { Write-Host "  (couldn't set zone on $url yet; the server will on its next update)" }
   } else {
     Write-Host "  ${p}: no address within $TimeoutSec s (check Wi-Fi name/password, 2.4 GHz)."
   }

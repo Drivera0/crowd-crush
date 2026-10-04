@@ -5,6 +5,13 @@
 // calm   = slow heartbeat dot
 // yellow = steady "!"
 // red    = flashing arrow, alternating with "STOP"
+//   GET /pulse → status JSON for the dashboard / server discovery:
+//   {"kind":"sign","level":"calm","zone":"B","rssi":-58,"uptime":123}
+//   (rssi = Wi-Fi signal in dBm, uptime in seconds)
+//
+// No Bluetooth beacon here: the R4's Wi-Fi and Bluetooth share one radio
+// module and ArduinoBLE can't run alongside WiFiS3, so the sign doesn't show
+// up in the zone lights' "peers"; the dashboard places it from Wi-Fi only.
 //
 // Copy arduino_secrets.h.example to arduino_secrets.h and fill in your Wi-Fi.
 // The IP is printed on the Serial Monitor (115200 baud); set
@@ -21,6 +28,7 @@ ArduinoLEDMatrix matrix;
 WiFiServer server(80);
 
 enum Level { CALM, YELLOW, RED };
+enum Route { NOT_FOUND, LEVEL, PULSE };
 Level level = CALM;
 char zone[8] = "";
 unsigned long lastChange = 0;
@@ -95,11 +103,14 @@ void setup() {
   connectWiFi();
 }
 
-// Parses "GET /level?v=red&zone=B HTTP/1.1".
-bool handleRequestLine(const String& line) {
-  if (!line.startsWith("GET /level")) return false;
+const char* levelName() { return level == RED ? "red" : level == YELLOW ? "yellow" : "calm"; }
+
+// Parses "GET /level?v=red&zone=B HTTP/1.1" or "GET /pulse HTTP/1.1".
+Route handleRequestLine(const String& line) {
+  if (line.startsWith("GET /pulse ") || line.startsWith("GET /pulse?")) return PULSE;
+  if (!line.startsWith("GET /level")) return NOT_FOUND;
   int v = line.indexOf("v=");
-  if (v < 0) return false;
+  if (v < 0) return NOT_FOUND;
   String rest = line.substring(v + 2);
   if (rest.startsWith("red")) level = RED;
   else if (rest.startsWith("yellow")) level = YELLOW;
@@ -120,7 +131,7 @@ bool handleRequestLine(const String& line) {
   Serial.print(level);
   Serial.print(" zone ");
   Serial.println(zone);
-  return true;
+  return LEVEL;
 }
 
 void serveClient() {
@@ -128,14 +139,14 @@ void serveClient() {
   if (!client) return;
   String line = "";
   unsigned long start = millis();
-  bool ok = false;
+  Route route = NOT_FOUND;
   bool firstLine = true;
   while (client.connected() && millis() - start < 500) {
     if (!client.available()) continue;
     char c = client.read();
     if (c == '\n') {
       if (firstLine) {
-        ok = handleRequestLine(line);
+        route = handleRequestLine(line);
         firstLine = false;
       }
       if (line.length() <= 1) break; // blank line: end of headers
@@ -144,7 +155,23 @@ void serveClient() {
       line += c;
     }
   }
-  if (ok) {
+  if (route == PULSE) {
+    // zone holds only what came after "zone=" up to a space or '&'; strip quotes/backslashes for JSON.
+    char z[8];
+    int j = 0;
+    for (int i = 0; zone[i] && j < 7; i++)
+      if (zone[i] != '"' && zone[i] != '\\') z[j++] = zone[i];
+    z[j] = 0;
+    char body[128];
+    snprintf(body, sizeof body, "{\"kind\":\"sign\",\"level\":\"%s\",\"zone\":\"%s\",\"rssi\":%d,\"uptime\":%lu}",
+             levelName(), z, (int)WiFi.RSSI(), millis() / 1000);
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-Type: application/json");
+    client.println("Access-Control-Allow-Origin: *");
+    client.println("Connection: close");
+    client.println();
+    client.println(body);
+  } else if (route == LEVEL) {
     client.println("HTTP/1.1 200 OK");
     client.println("Content-Type: text/plain");
     client.println("Connection: close");
