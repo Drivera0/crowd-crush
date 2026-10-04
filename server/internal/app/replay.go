@@ -167,7 +167,7 @@ func (a *App) feedReplay(r *replayState, pnow int64) {
 				ct = rec.T
 			}
 			m.addSample(protocol.Sample{T: ct, AX: rec.AX, AY: rec.AY, AZ: rec.AZ, Rot: rec.Rot})
-			p.det.Add(rec.ID, detect.Sample{T: ct, AX: rec.AX, AY: rec.AY, AZ: rec.AZ, Rot: rec.Rot})
+			p.det.Add(rec.ID, detect.Sample{T: ct, AX: rec.AX, AY: rec.AY, AZ: rec.AZ, Rot: rec.Rot, G: detect.Gravity(rec.G)})
 		case store.KindBye:
 			if m := p.meta[rec.ID]; m != nil {
 				m.connected, m.goneAt = false, rec.T

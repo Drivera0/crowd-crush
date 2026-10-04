@@ -9,10 +9,22 @@
 // compared if either side keeps the other.
 //
 // Pipeline per phone (clock-corrected timestamps, ~10 Hz):
-//  1. handling filter: high rotation → ignore readings until 1 s of quiet
-//  2. band-pass x and z (sway is ~0.2–1 Hz)
-//  3. project onto the horizontal axis (x, z or the dominant direction)
+//  0. levelling: a phone that sends its gravity vector has every sample
+//     split into vertical (along gravity) and a 2-D horizontal vector, so
+//     it can be carried at any tilt (level.go). A phone that never sends
+//     one is taken to be upright: x, z horizontal, y vertical.
+//  1. handling filter: high rotation, or gravity swinging round in the
+//     device frame → ignore readings until 1 s of quiet
+//  2. band-pass the two horizontal components and the vertical (sway is
+//     ~0.2–1 Hz)
+//  3. project onto one horizontal axis: x (or z, or the dominant direction)
+//     for an upright phone; always the dominant horizontal direction over
+//     the correlation window for a levelled phone, whose own horizontal
+//     axes point any way round
 //  4. sway score = RMS over the last 5 s
+//  5. walking gate (levelled phones): rhythmic vertical bounce together
+//     with rhythmic horizontal motion is a phone in a trouser pocket
+//     swinging with the leg, not sway
 //
 // Per neighbour pair: cross-correlate the last ~6 s; a strong correlation at a
 // lag between ~100 ms and ~1.2 s is a wave travelling between them. Lag ≈ 0 is
@@ -50,6 +62,10 @@ type Sample struct {
 	AY  float64
 	AZ  float64
 	Rot float64
+	// G is the gravity direction in the device frame (see Gravity). The
+	// zero value means "not sent with this sample": the phone's last value
+	// stays in force, and a phone that never sent one is taken as upright.
+	G [3]float64
 }
 
 type point struct {
@@ -72,15 +88,22 @@ type phone struct {
 	lpx, lpz, dcx, dcz float64
 	lpy, dcy           float64
 
+	lev level // gravity and the levelled frame, for a phone that sends g
+
 	pts []point
 
 	// per-step scratch
-	h     []float64
-	v     []float64 // band-passed vertical on the same grid
-	valid []bool
-	sway  float64
-	wave  bool
-	zones []int
+	h      []float64
+	v      []float64 // band-passed vertical on the same grid
+	sx, sz []float64 // the two horizontal components before projection
+	valid  []bool
+	sway   float64
+	wave   bool
+	// walking: a levelled phone whose vertical and horizontal motion are
+	// both rhythmic (leg swing in a pocket); it joins no pair.
+	walking   bool
+	walkUntil int64
+	zones     []int
 	// RMS of the horizontal and vertical band-passed motion over the whole
 	// correlation window.
 	hrms, vrms float64
@@ -294,6 +317,15 @@ func (d *Detector) Add(id string, s Sample) {
 	if s.Rot > cfg.HandlingRot {
 		p.handlingUntil = s.T + cfg.HandlingSettleMs
 	}
+	if g, ok := unit(s.G); ok && p.lev.set(g, s.T, cfg) {
+		// Gravity swung round in the device frame: the phone was turned
+		// over or pulled out of a pocket.
+		p.handlingUntil = s.T + cfg.HandlingSettleMs
+	}
+	ax, ay, az := s.AX, s.AY, s.AZ
+	if p.lev.on {
+		ax, ay, az = p.lev.split(ax, ay, az)
+	}
 	if s.T < p.handlingUntil {
 		p.init = false // restart the filters once the phone settles
 		p.append(point{t: s.T})
@@ -301,9 +333,9 @@ func (d *Detector) Add(id string, s Sample) {
 	}
 
 	if !p.init {
-		p.lpx, p.dcx = s.AX, s.AX
-		p.lpz, p.dcz = s.AZ, s.AZ
-		p.lpy, p.dcy = s.AY, s.AY
+		p.lpx, p.dcx = ax, ax
+		p.lpz, p.dcz = az, az
+		p.lpy, p.dcy = ay, ay
 		p.lastValidT = s.T
 		p.init = true
 	}
@@ -312,9 +344,9 @@ func (d *Detector) Add(id string, s Sample) {
 	p.lastValidT = s.T
 	aLP := 1 - math.Exp(-dt*2*math.Pi*cfg.LowPassHz)
 	aHP := 1 - math.Exp(-dt*2*math.Pi*cfg.HighPassHz)
-	p.lpx += aLP * (s.AX - p.lpx)
-	p.lpz += aLP * (s.AZ - p.lpz)
-	p.lpy += aLP * (s.AY - p.lpy)
+	p.lpx += aLP * (ax - p.lpx)
+	p.lpz += aLP * (az - p.lpz)
+	p.lpy += aLP * (ay - p.lpy)
 	p.dcx += aHP * (p.lpx - p.dcx)
 	p.dcz += aHP * (p.lpz - p.dcz)
 	p.dcy += aHP * (p.lpy - p.dcy)
@@ -339,8 +371,13 @@ func (p *phone) resample(start, step int64, n int, axis string) {
 	p.h = growF(p.h, n)
 	p.v = growF(p.v, n)
 	p.valid = growB(p.valid, n)
-	hx := make([]float64, n)
-	hz := make([]float64, n)
+	p.sx, p.sz = growF(p.sx, n), growF(p.sz, n)
+	hx, hz := p.sx, p.sz
+	if p.lev.on {
+		// A levelled phone's horizontal axes point any way round: always
+		// use its dominant horizontal direction.
+		axis = "xz"
+	}
 	j := sort.Search(len(p.pts), func(i int) bool { return p.pts[i].t >= start })
 	for i := 0; i < n; i++ {
 		t := start + int64(i)*step
@@ -348,6 +385,7 @@ func (p *phone) resample(start, step int64, n int, axis string) {
 			j++
 		}
 		p.valid[i] = false
+		hx[i], hz[i] = 0, 0
 		switch {
 		case j < len(p.pts) && p.pts[j].t == t && p.pts[j].valid:
 			hx[i], hz[i], p.v[i], p.valid[i] = p.pts[j].hx, p.pts[j].hz, p.pts[j].hy, true
@@ -368,11 +406,15 @@ func (p *phone) resample(start, step int64, n int, axis string) {
 	case "xz":
 		// Dominant horizontal direction: principal axis of (x, z).
 		var cxx, czz, cxz float64
-		for i := range hx {
-			if p.valid[i] {
-				cxx += hx[i] * hx[i]
-				czz += hz[i] * hz[i]
-				cxz += hx[i] * hz[i]
+		if p.lev.on {
+			cxx, czz, cxz = slowCov(hx, hz, int(swayAxisMs/step))
+		} else {
+			for i := range hx {
+				if p.valid[i] {
+					cxx += hx[i] * hx[i]
+					czz += hz[i] * hz[i]
+					cxz += hx[i] * hz[i]
+				}
 			}
 		}
 		th := 0.5 * math.Atan2(2*cxz, cxx-czz)
@@ -389,6 +431,35 @@ func (p *phone) resample(start, step int64, n int, axis string) {
 			p.v[i] = 0
 		}
 	}
+}
+
+// swayAxisMs is the moving average a levelled phone's horizontal vector is
+// smoothed with before its dominant direction is taken. Half a second
+// cancels a 2 Hz step or jump beat (and its harmonics) and keeps 85 % of a
+// 0.6 Hz push, so the direction is that of the slow sway, not of whatever
+// the bouncing leaks into the horizontal plane. Only the direction is taken
+// from the smoothed vector; the trace projected onto it is not smoothed.
+const swayAxisMs = 500
+
+// slowCov is the covariance (sums) of the horizontal vector (x, z) after a
+// moving average over w grid points. Invalid points are zero in x and z.
+func slowCov(x, z []float64, w int) (cxx, czz, cxz float64) {
+	if w < 1 {
+		w = 1
+	}
+	var sx, sz float64
+	for i := range x {
+		sx += x[i]
+		sz += z[i]
+		if i >= w {
+			sx -= x[i-w]
+			sz -= z[i-w]
+		}
+		cxx += sx * sx
+		czz += sz * sz
+		cxz += sx * sz
+	}
+	return
 }
 
 // Step runs one detection pass at server time now (ms).
@@ -413,6 +484,7 @@ func (d *Detector) Step(now int64) Result {
 	for _, id := range ids {
 		p := d.phones[id]
 		p.wave = false
+		p.walking = false
 		p.sway = 0
 		p.zones = nil
 		if now-p.lastT > cfg.StaleMs {
@@ -432,6 +504,7 @@ func (d *Detector) Step(now int64) Result {
 			p.sway = math.Sqrt(ss / float64(cnt))
 		}
 		p.hrms, p.vrms = rms(p.h, p.valid), rms(p.v, p.valid)
+		p.walking = d.walking(p, int(cfg.MaxLagMs/cfg.StepMs))
 		if !p.outside {
 			p.zones = d.zoneIdxs(p.x, p.y)
 			spatial = append(spatial, p)
@@ -458,7 +531,8 @@ func (d *Detector) Step(now int64) Result {
 		e := Edge{From: a.id, To: b.id}
 		sup := false
 		canCorr := a.lastT >= a.handlingUntil && b.lastT >= b.handlingUntil &&
-			a.sway >= cfg.EdgeMinSway && b.sway >= cfg.EdgeMinSway
+			a.sway >= cfg.EdgeMinSway && b.sway >= cfg.EdgeMinSway &&
+			!a.walking && !b.walking
 		if canCorr {
 			// |corr|: a phone held upside down, or iOS vs Android sign conventions,
 			// flips the axis but not the timing.
@@ -481,7 +555,7 @@ func (d *Detector) Step(now int64) Result {
 		edges = append(edges, e)
 		support = append(support, sup)
 		recs = append(recs, pairRec{a: a, b: b, handA: a.lastT < a.handlingUntil, handB: b.lastT < b.handlingUntil,
-			swayA: a.sway, swayB: b.sway, preChain: e.Wave})
+			swayA: a.sway, swayB: b.sway, walkA: a.walking, walkB: b.walking, preChain: e.Wave})
 	}
 	d.keepChains(edges, support)
 	d.last = lastStep{pairs: recs, edges: edges, n: n, maxLag: maxLag, minOverlap: minOverlap}
@@ -518,7 +592,7 @@ func (d *Detector) Step(now int64) Result {
 			st = protocol.StatusHandling
 		case p.wave:
 			st = protocol.StatusWave
-		case p.sway > cfg.SwayThreshold:
+		case p.sway > cfg.SwayThreshold && !p.walking:
 			st = protocol.StatusSwaying
 		}
 		res.Phones = append(res.Phones, PhoneResult{ID: id, X: p.x, Y: p.y, Outside: p.outside, Status: st, Sway: p.sway, LastT: p.lastT})

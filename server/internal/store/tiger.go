@@ -23,6 +23,7 @@ type Reading struct {
 	AY      float64
 	AZ      float64
 	Rot     float64
+	G       []float64 // gravity in the device frame ([gx, gy, gz]); nil when the reading carried none
 }
 
 // AlertRow is one alert headed for storage.
@@ -83,7 +84,7 @@ func NewJSONLSink(dir string) (*JSONLSink, error) {
 }
 
 func (s *JSONLSink) Reading(r Reading) {
-	s.w.Write(Record{K: KindM, T: r.Time.UnixMilli(), CT: r.Time.UnixMilli(), ID: r.PhoneID, X: F(r.X), Y: F(r.Y), AX: r.AX, AY: r.AY, AZ: r.AZ, Rot: r.Rot})
+	s.w.Write(Record{K: KindM, T: r.Time.UnixMilli(), CT: r.Time.UnixMilli(), ID: r.PhoneID, X: F(r.X), Y: F(r.Y), AX: r.AX, AY: r.AY, AZ: r.AZ, Rot: r.Rot, G: r.G})
 }
 
 func (s *JSONLSink) Alert(a AlertRow) {
@@ -166,6 +167,10 @@ func (t *Tiger) migrate(ctx context.Context) error {
 		// Venue metres (free positions); NULL on rows from the row/col days.
 		`ALTER TABLE readings ADD COLUMN IF NOT EXISTS x REAL`,
 		`ALTER TABLE readings ADD COLUMN IF NOT EXISTS y REAL`,
+		// Gravity in the device frame, NULL when the reading carried none.
+		`ALTER TABLE readings ADD COLUMN IF NOT EXISTS gx REAL`,
+		`ALTER TABLE readings ADD COLUMN IF NOT EXISTS gy REAL`,
+		`ALTER TABLE readings ADD COLUMN IF NOT EXISTS gz REAL`,
 	}
 	for _, q := range must {
 		if _, err := t.pool.Exec(ctx, q); err != nil {
@@ -239,10 +244,15 @@ func (t *Tiger) flush() {
 	defer cancel()
 	if len(batch) > 0 {
 		_, err := t.pool.CopyFrom(ctx, pgx.Identifier{"readings"},
-			[]string{"time", "phone_id", "zone", "x", "y", "ax", "ay", "az", "rot"},
+			[]string{"time", "phone_id", "zone", "x", "y", "ax", "ay", "az", "rot", "gx", "gy", "gz"},
 			pgx.CopyFromSlice(len(batch), func(i int) ([]any, error) {
 				r := batch[i]
-				return []any{r.Time, r.PhoneID, r.Zone, float32(r.X), float32(r.Y), r.AX, r.AY, r.AZ, r.Rot}, nil
+				var gx, gy, gz *float32
+				if len(r.G) == 3 {
+					g := [3]float32{float32(r.G[0]), float32(r.G[1]), float32(r.G[2])}
+					gx, gy, gz = &g[0], &g[1], &g[2]
+				}
+				return []any{r.Time, r.PhoneID, r.Zone, float32(r.X), float32(r.Y), r.AX, r.AY, r.AZ, r.Rot, gx, gy, gz}, nil
 			}))
 		if err != nil {
 			log.Printf("store: COPY %d readings failed, writing to fallback: %v", len(batch), err)
@@ -306,7 +316,7 @@ func (t *Tiger) LoadRun(ctx context.Context, label string) ([]Record, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := t.pool.Query(ctx, `SELECT time, phone_id, row, col, x, y, ax, ay, az, rot FROM readings
+	rows, err := t.pool.Query(ctx, `SELECT time, phone_id, row, col, x, y, ax, ay, az, rot, gx, gy, gz FROM readings
 		WHERE time BETWEEN $1 AND $2 ORDER BY time`, run.Start, run.End)
 	if err != nil {
 		return nil, err
@@ -326,8 +336,12 @@ func (t *Tiger) LoadRun(ctx context.Context, label string) ([]Record, error) {
 		var ts time.Time
 		var r Record
 		var w where
-		if err := rows.Scan(&ts, &r.ID, &w.row, &w.col, &w.x, &w.y, &r.AX, &r.AY, &r.AZ, &r.Rot); err != nil {
+		var gx, gy, gz *float32
+		if err := rows.Scan(&ts, &r.ID, &w.row, &w.col, &w.x, &w.y, &r.AX, &r.AY, &r.AZ, &r.Rot, &gx, &gy, &gz); err != nil {
 			return nil, err
+		}
+		if gx != nil && gy != nil && gz != nil {
+			r.G = []float64{float64(*gx), float64(*gy), float64(*gz)}
 		}
 		p, ok := seen[r.ID]
 		if !ok || p.row != w.row || p.col != w.col || !same(p.x, w.x) || !same(p.y, w.y) {

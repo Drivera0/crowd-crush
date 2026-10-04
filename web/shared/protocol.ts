@@ -54,6 +54,13 @@ export interface Motion {
   ay: number;
   az: number;
   rot: number;
+  /**
+   * Unit gravity vector in the device frame ([gx, gy, gz], 2 decimals): "down" as the phone sees it,
+   * so the server can level the sample however the phone is carried. Optional: the server holds the
+   * last value, so the phone sends it only when it changed. Never sent = upright against the chest
+   * (x, z horizontal, y vertical).
+   */
+  g?: [number, number, number];
 }
 
 export type FromPhone = Hello | Pos | Gps | Pong | Motion;
@@ -84,9 +91,14 @@ export interface PhoneState {
   /** Venue size (metres), for the same map. */
   w?: number;
   h?: number;
+  /** This phone's generated name ("Blue Otter") and its colour (CSS hex), as on the dashboard map. */
+  name?: string;
+  color?: string;
+  /** This state comes from the crowd simulation running around the phone (a drill), not from the real crowd. */
+  sim?: boolean;
 }
 
-export type ToPhone = Ping | PhoneState;
+export type ToPhone = Ping | PhoneState | import('./demo').Shake;
 
 // ---- Server → dashboard ----
 
@@ -99,6 +111,13 @@ export interface Node {
   src?: 'gps' | 'manual';
   /** Outside the venue rectangle: counts toward nothing. */
   outside?: boolean;
+  /** A real phone's generated name and colour (absent for simulated and replayed phones). */
+  name?: string;
+  color?: string;
+  /** Being shaken right now ("that's me"). */
+  shake?: boolean;
+  /** Mode "sim": a real phone standing in the simulated crowd. */
+  real?: boolean;
   status: NodeStatus;
   sway: number;
   rtt: number;
@@ -284,6 +303,8 @@ export interface Config {
   yellow: number; // zone score thresholds
   red: number;
   neighbourRadius: number;
+  /** The demo spot is on (GET /api/demo): the server places a phone that joins without a position. */
+  demo?: boolean;
 }
 
 /** Fixed features of the venue, in venue metres. */

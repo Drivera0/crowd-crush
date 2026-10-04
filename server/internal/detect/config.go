@@ -53,6 +53,13 @@ type Config struct {
 	SwayWindowMs     int64   `json:"swayWindowMs"`     // RMS window for the sway score
 	SwayThreshold    float64 `json:"swayThreshold"`    // RMS above this → swaying
 
+	// Phones that send their gravity vector (levelled; see level.go).
+	HandlingTiltDeg float64 `json:"handlingTiltDeg"` // gravity turning this far in the device frame within handlingTiltMs = being handled (out of a pocket, turned over); 0 = off
+	HandlingTiltMs  int64   `json:"handlingTiltMs"`
+	WalkRhythm      float64 `json:"walkRhythm"`  // walking gate: vertical and horizontal motion both this periodic (autocorrelation) → walking, not sway; 0 = off
+	WalkMinVert     float64 `json:"walkMinVert"` // … with at least this much vertical RMS (m/s²)
+	WalkHoldMs      int64   `json:"walkHoldMs"`  // … and the phone stays "walking" this long after the last time it was seen
+
 	// Per neighbour pair.
 	CorrWindowMs  int64   `json:"corrWindowMs"`  // how much history to cross-correlate
 	MaxLagMs      int64   `json:"maxLagMs"`      // search lags -MaxLag..+MaxLag
@@ -97,6 +104,12 @@ func DefaultConfig() Config {
 		Axis:             "x",
 		SwayWindowMs:     5000,
 		SwayThreshold:    0.25,
+
+		HandlingTiltDeg: 45,
+		HandlingTiltMs:  500,
+		WalkRhythm:      0.75,
+		WalkMinVert:     0.3,
+		WalkHoldMs:      3000,
 
 		CorrWindowMs:  6000,
 		MaxLagMs:      1500,
