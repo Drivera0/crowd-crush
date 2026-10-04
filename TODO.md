@@ -42,6 +42,17 @@ The demo runs on the **MacBook**, on a different network from home. Nothing belo
 - [ ] If using the quick tunnel: the address changes on every restart, so re-check the QR. The `.tech` domain fixes this.
 - [ ] Google Home Mini (if used) on the same network as the Mac.
 
+**Phones: test on real devices (at home, over the tunnel)**
+| Phone / browser | Join + motion prompt | GPS dot lands right | Tap-your-spot fallback | Red screen on alert | Screen stays on |
+|---|---|---|---|---|---|
+| iPhone · Safari | [ ] | [ ] | [ ] | [ ] | [ ] |
+| iPhone · Chrome (uses Safari's engine) | [ ] | [ ] | [ ] | [ ] | [ ] |
+| Android · Chrome | [ ] | [ ] | [ ] | [ ] | [ ] |
+| Android · Samsung Internet | [ ] | [ ] | [ ] | [ ] | [ ] |
+- Open the QR link with the **camera app** (iPhone → Safari; Android → default browser). In-app browsers (Instagram, Messenger) may block motion.
+- Turn **Precise Location** on (iPhone: Settings → Privacy → Location Services → Safari Websites; Android: allow "Precise" when asked).
+- Low Power Mode (iPhone) / Battery Saver (Android) can pause sensors or let the screen lock: turn them off for the demo.
+
 **At the venue, before judges arrive**
 - [ ] Re-anchor GPS: dashboard → Venue → set the room size → **📍 Centre map on this laptop**. The anchor from home puts every phone in the wrong place.
 - [ ] Draw the watch areas for this room (they're saved on the server).
