@@ -99,10 +99,14 @@ type nodeMeta struct {
 	// correction measured there.
 	tower string
 	bias  gpsBias
+
+	bcn beaconPos // latest Bluetooth beacon report and fix (beacons.go)
 }
 
 func (m *nodeMeta) src() string {
 	switch {
+	case m.bcn.owns(m):
+		return protocol.SrcBeacon
 	case m.acc > 0:
 		return protocol.SrcGPS
 	case m.tower != "":
@@ -198,7 +202,7 @@ func (p *pipeline) step(now int64) (detect.Result, []crowd.Change) {
 		if pr.Status == protocol.StatusStale || pr.Outside || (m != nil && !m.connected) {
 			continue
 		}
-		pts = append(pts, crowd.Point{ID: pr.ID, X: pr.X, Y: pr.Y})
+		pts = append(pts, crowd.Point{ID: pr.ID, X: pr.X, Y: pr.Y, Acc: pr.Acc})
 	}
 	var ch []crowd.Change
 	p.pts = pts
@@ -219,6 +223,7 @@ func (p *pipeline) step(now int64) (detect.Result, []crowd.Change) {
 // place moves a phone in this pipeline.
 func (p *pipeline) place(id string, m *nodeMeta) {
 	p.det.SetPhone(id, m.x, m.y)
+	p.det.SetAccuracy(id, m.acc) // > 0 (a GPS fix): neighbours by motion, density at the scale the fix supports
 	p.det.SetOutside(id, m.outside || m.unplaced)
 }
 
@@ -273,6 +278,9 @@ type App struct {
 	names map[string]names.Name // generated phone names, by session id (demo.go)
 	demo  protocol.DemoSpot     // where joining phones are lined up (demo.go)
 	surge *surgeDirector        // "surge around the phones" in progress (hybrid.go)
+	mesh  *meshState            // phone-to-phone mesh bookkeeping (mesh.go)
+
+	bcn beaconState // Bluetooth beacon positioning: constants and board links (beacons.go, beaconlinks.go)
 }
 
 // New creates the app and its hub, loading saved areas and venue from
@@ -459,9 +467,11 @@ func (a *App) gpsLocked(now int64, id string, lat, lon, acc float64) {
 	x, y := anchor.ToVenue(lat, lon)
 	x, y = m.gps.Add(x, y, acc)
 	x, y = m.bias.apply(now, x, y) // a tower check-in's correction, fading out (tower.go)
-	m.outside = x < 0 || y < 0 || x > cfg.VenueW || y > cfg.VenueH
-	m.x, m.y = cfg.Clamp(x, y)
+	if m.bcn.holds(m, now) {
+		return // a fresh 2-D Bluetooth beacon fix outranks GPS (beacons.go)
+	}
 	m.acc = math.Max(0.1, math.Round(m.gps.Acc*10)/10)
+	m.x, m.y, m.outside = cfg.Place(x, y, m.acc) // outside only when beyond the edge by more than the accuracy; nearer, mirrored back in
 	if a.placedLocked(a.live, now, id, m) {
 		return // its first fix: recorded as its hello
 	}
@@ -596,6 +606,9 @@ func (a *App) Run(ctx context.Context) {
 		}()
 	}
 	go a.watchHardware(ctx)
+	// Phones connected to a board over Bluetooth (beaconlinks.go).
+	go a.watchBeaconLinks(ctx)
+	go a.meshLoop(ctx) // pairs phones for the mesh, drops relayed phones that went quiet (mesh.go)
 	det := time.NewTicker(DetectEvery)
 	snap := time.NewTicker(SnapshotEvery)
 	st := time.NewTicker(PhoneStateEvery)
@@ -832,7 +845,7 @@ func (a *App) snapshotLocked(now int64) protocol.Snapshot {
 		if !e.Wave {
 			continue
 		}
-		w := protocol.Wave{From: e.From, To: e.To, LagMs: e.LagMs, Corr: round2(e.Corr)}
+		w := protocol.Wave{From: e.From, To: e.To, LagMs: e.LagMs, Corr: round2(e.Corr), Motion: e.Motion}
 		if w.LagMs < 0 { // always report in the direction of travel
 			w.From, w.To, w.LagMs = w.To, w.From, -w.LagMs
 		}
@@ -841,10 +854,11 @@ func (a *App) snapshotLocked(now int64) protocol.Snapshot {
 	for _, c := range p.clusters {
 		s.Clusters = append(s.Clusters, protocol.Cluster{ID: c.ID, X: r2(c.X), Y: r2(c.Y), R: r2(c.R), Count: c.Count,
 			Density: round2(c.Density), People: c.People, Trend: c.Trend, Level: c.Level, Est: round2(c.Est),
-			Rate: round2(c.Rate), ETA: math.Round(c.ETA*10) / 10})
+			Rate: round2(c.Rate), ETA: math.Round(c.ETA*10) / 10, Acc: math.Round(c.Acc*10) / 10})
 	}
 	st := a.statusLocked(p)
 	s.Status = &st
+	s.Mesh = a.meshFrameLocked(p, s.Nodes, now)
 	return s
 }
 

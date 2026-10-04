@@ -282,9 +282,8 @@ func (a *App) simGPSIn(p *pipeline, now int64, id string, x, y, acc float64) {
 		return
 	}
 	x, y = m.gps.Add(x, y, acc)
-	m.outside = x < 0 || y < 0 || x > cfg.VenueW || y > cfg.VenueH
-	m.x, m.y = cfg.Clamp(x, y)
 	m.acc = math.Max(0.1, math.Round(m.gps.Acc*10)/10)
+	m.x, m.y, m.outside = cfg.Place(x, y, m.acc) // as gpsLocked
 	if a.placedLocked(p, now, id, m) {
 		return // its first fix: recorded as its hello
 	}

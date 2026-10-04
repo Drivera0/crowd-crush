@@ -84,7 +84,14 @@ export interface PhoneState {
    * coordinates (x right, y down the map), toward lower density and, when one
    * is close enough in that direction, an open exit.
    */
-  move?: { dx: number; dy: number; to?: string; reason: 'push' | 'density' };
+  move?: {
+    dx: number;
+    dy: number;
+    to?: string;
+    reason: 'push' | 'density';
+    /** How far the arrow can be trusted, 0..1: 1 for a hand-placed phone, lower the rougher its GPS fix. Below 0.5 show a plain instruction instead of an arrow. */
+    conf?: number;
+  };
   /** Venue bearing (degrees clockwise from north of the map's "up"), when the venue is GPS-anchored: lets a phone with a compass point the arrow for real. */
   bearing?: number;
   /** This phone's position (venue metres), for the little map on its screen. */
@@ -111,7 +118,7 @@ export interface Node {
   /** GPS accuracy radius in metres; 0 = placed by hand. */
   acc?: number;
   /** How the position was set: GPS, by hand, or by checking in at a tower (its QR code). */
-  src?: 'gps' | 'manual' | 'tower';
+  src?: 'gps' | 'manual' | 'tower' | 'beacon';
   /** Outside the venue rectangle: counts toward nothing. */
   outside?: boolean;
   /** A real phone's generated name and colour (absent for simulated and replayed phones). */
@@ -149,11 +156,15 @@ export interface Wave {
   to: string;
   lagMs: number;
   corr: number;
+  /** The pair was found by motion (GPS-placed phones, positions only good to metres), not by distance on the map. */
+  motion?: boolean;
 }
 
 /** A group of phones packed together. */
 export interface Cluster {
   id: string;
+  /** Median position accuracy of the cluster's phones (m); absent when they were placed by hand. Several metres = `est` is averaged over a disc about that wide: a lower bound on the tightest spot. */
+  acc?: number;
   x: number;
   y: number;
   r: number;
@@ -260,6 +271,8 @@ export interface Snapshot {
   };
   clusters: Cluster[];
   stats: Stats;
+  /** The phone-to-phone mesh: links between phones and how each reaches the server (absent in a replay). */
+  mesh?: import('./mesh').MeshFrame;
 }
 
 export interface Alert {

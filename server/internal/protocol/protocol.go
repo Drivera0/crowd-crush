@@ -127,6 +127,11 @@ type Motion struct {
 	// changed. A phone that never sends it is taken to be upright against
 	// the chest (x, z horizontal, y vertical).
 	G []float64 `json:"g,omitempty"`
+	// HD and HB are compass headings in degrees clockwise from north (see
+	// locate.go in this package): HD of the phone's top edge, HB of the
+	// phone's back. Optional; used only for dead reckoning.
+	HD *float64 `json:"hd,omitempty"`
+	HB *float64 `json:"hb,omitempty"`
 }
 
 // ---- Server → phone ----
@@ -169,6 +174,10 @@ type Move struct {
 	DY     float64 `json:"dy"`
 	To     string  `json:"to,omitempty"`
 	Reason string  `json:"reason"` // push | density
+	// Conf: how far the arrow can be trusted, 0..1 (to 1 decimal): 1 for a
+	// phone placed by hand, lower the rougher its GPS fix (crowd.Conf). Below
+	// 0.5 (crowd.GuideMinConf) show a plain instruction instead of an arrow.
+	Conf float64 `json:"conf"`
 }
 
 // Guidance reasons.
@@ -321,6 +330,10 @@ type Cluster struct {
 	// ETA: projected seconds until the danger density at that rate (early
 	// warning); only when it is rising and within earlyWarnS.
 	ETA float64 `json:"eta,omitempty"`
+	// Acc: median position accuracy of the cluster's phones (m); omitted
+	// when they were placed by hand. Several metres = est is the density
+	// averaged over a disc about that wide: a lower bound on the tightest spot.
+	Acc float64 `json:"acc,omitempty"`
 }
 
 // Venue is the venue's size and geo-anchor (GET/PUT /api/venue). Lat/Lon
@@ -378,6 +391,9 @@ type Wave struct {
 	To    string  `json:"to"`
 	LagMs int64   `json:"lagMs"`
 	Corr  float64 `json:"corr"`
+	// Motion: the pair was found by motion (GPS-placed phones, positions
+	// only good to metres), not by distance on the map.
+	Motion bool `json:"motion,omitempty"`
 }
 
 type Stats struct {
@@ -433,6 +449,9 @@ type Snapshot struct {
 	// Status is the one overall status the console shows: the worst of the
 	// zones (wave detector), area rules and clusters.
 	Status *Status `json:"status,omitempty"`
+	// Mesh: the phone-to-phone links and how each phone reaches the server
+	// (mesh.go); absent in a replay.
+	Mesh *MeshFrame `json:"mesh,omitempty"`
 }
 
 // Status kinds: what makes the worst place the worst.
@@ -544,6 +563,9 @@ type NodeDetail struct {
 	JoinedAt  int64    `json:"joinedAt"` // server clock, ms; 0 if unknown (replay)
 	Messages  int64    `json:"messages"` // motion summaries received
 	Samples   []Sample `json:"samples"`  // last ~30 s, oldest first
+	// Beacons: the Pulse boards this phone hears over Bluetooth and the fix
+	// from them (beacons.go); absent unless the phone reports beacons.
+	Beacons *BeaconFix `json:"beacons,omitempty"`
 }
 
 // ---- Crowd simulation (mode "sim") ----

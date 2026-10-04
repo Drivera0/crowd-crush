@@ -61,6 +61,8 @@ export interface LeaveCtx {
   device: string;
   /** Motion summaries this page sent. */
   sent: () => number;
+  /** Phones this one is linked to over the mesh right now. */
+  linked?: () => number;
   /** Close the connection and stop the sensors, for good. */
   leave: () => void;
 }
@@ -70,6 +72,8 @@ export function initLeave(ctx: LeaveCtx) {
   $('leaveBtn').addEventListener('click', async () => {
     const btn = $('leaveBtn') as HTMLButtonElement;
     btn.disabled = true;
+    const linked = ctx.linked?.() ?? 0;
+    if (linked > 0) $('rcMesh').append(` When you left, this phone was linked to ${linked} ${linked === 1 ? 'other' : 'others'}; those links are closed now.`);
     let r: Receipt | null = null;
     try {
       const res = await fetch(`/api/receipt/${encodeURIComponent(ctx.id)}`, { cache: 'no-store' });
@@ -98,7 +102,7 @@ function showReceipt(ctx: LeaveCtx, r: Receipt | null) {
       'Position in the room',
       r.src === 'none'
         ? 'None <small>you were never placed on the venue map, so your motion numbers counted toward nothing and were not stored</small>'
-        : `${r.x.toFixed(1)} m, ${r.y.toFixed(1)} m on the venue map <small>${r.src === 'gps' ? 'from GPS, turned into metres in the room on arrival' : r.src === 'tower' ? 'next to the spot whose check-in code you scanned' : 'placed on the map (by you or by staff)'}</small>`,
+        : `${r.x.toFixed(1)} m, ${r.y.toFixed(1)} m on the venue map <small>${r.src === 'gps' ? 'from GPS, turned into metres in the room on arrival' : r.src === 'tower' ? 'next to the spot whose check-in code you scanned' : r.src === 'beacon' ? 'from the Bluetooth signal strength of the venue’s Pulse boards (no other Bluetooth device was looked at)' : 'placed on the map (by you or by staff)'}</small>`,
     ]);
     rows.push([
       'Motion numbers',

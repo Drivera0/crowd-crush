@@ -225,6 +225,10 @@ export class Mesh {
   private theme: 'dark' | 'light' = 'dark';
   /** Zoom and pan: screen = world * k + (x, y). */
   view = { k: 1, x: 0, y: 0 };
+  /** Drawn above the neighbour lines, below the clusters and dots (the phone-to-phone mesh layer, meshnet.ts). */
+  overlay: ((g: CanvasRenderingContext2D, now: number) => void) | null = null;
+  /** No decorative "readings shared between neighbours" dots (the real mesh links are on screen). */
+  quietGossip = false;
   /** Drawn above the background, below everything else (custom areas). */
   underlay: ((g: CanvasRenderingContext2D, now: number) => void) | null = null;
 
@@ -790,7 +794,7 @@ export class Mesh {
     if (this.reduced) {
       this.packets.length = 0;
     } else {
-      this.gossip(now);
+      if (!this.quietGossip) this.gossip(now);
       this.spawnWavePackets(now);
     }
     this.deliver(now);
@@ -1076,6 +1080,7 @@ export class Mesh {
       g.stroke();
     }
     g.setLineDash([]);
+    this.overlay?.(g, now);
 
     this.drawClusters(g, pulse);
     this.drawWaves(g, now, pulse);
@@ -1815,6 +1820,12 @@ export class Mesh {
       g.arc(hp[p1 * 2], hp[p1 * 2 + 1], pad, a0, a1, false);
     }
     g.closePath();
+  }
+
+  /** Where a phone's dot is drawn (world px, the space overlays draw in); null = not on the map. */
+  bodyAt(id: string): { x: number; y: number } | null {
+    const b = this.bodies.get(id);
+    return b && !b.gone && b.vis > 0.05 ? b : null;
   }
 
   neighbourCount(id: string) {

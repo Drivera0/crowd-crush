@@ -139,3 +139,70 @@ button:disabled { opacity: 0.4; }
 }
 .dot.on { background: var(--ok); }
 .dot.syncing { background: var(--yellow); }
+
+/* The phone-to-phone mesh: one quiet line, and the lost-signal switch. */
+.mesh-line { opacity: 0.85; }
+.lost-sig {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.lost-sig[hidden] { display: none; }
+.lost-sig input { width: 18px; height: 18px; accent-color: var(--accent); }
+
+/* Pocket mode (pocket.ts): a black sheet that swallows touches. */
+.pocket-btn { font-size: 17px; font-weight: 600; padding: 12px 22px; }
+.pocket-btn[hidden], .pocket-hint[hidden] { display: none; }
+.pocket-hint {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(56, 189, 248, 0.5);
+  border-radius: 12px;
+  font-size: 14px;
+  max-width: 30em;
+}
+.pocket-hint span { flex-basis: 100%; }
+.pocket {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: #000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  border: 3px solid transparent;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  text-align: center;
+  padding: 24px;
+}
+.pocket[hidden] { display: none; }
+.pocket.zone-yellow { border-color: var(--yellow); }
+.pocket-line { margin: 0; font-size: 14px; color: #3f4854; }
+.pocket.zone-yellow .pocket-line { color: #6b5a12; }
+.pocket-danger { display: none; }
+/* Danger breaks through: never black while the phone is red or has a way to go. */
+.pocket.danger { animation: redpulse 1s ease-in-out infinite; border-color: var(--red); }
+.pocket.danger .pocket-danger { display: block; color: #fff; }
+.pocket.danger .pocket-line { color: rgba(255, 255, 255, 0.75); }
+.pocket-ring { position: absolute; width: 120px; height: 120px; bottom: 12%; opacity: 0; transform: rotate(-90deg); pointer-events: none; }
+.pocket-ring circle { fill: none; stroke: #7dd3fc; stroke-width: 6; stroke-linecap: round; stroke-dasharray: 277; stroke-dashoffset: 277; }
+.pocket.holding .pocket-ring { opacity: 1; }
+.pocket.holding .pocket-ring circle { transition: stroke-dashoffset 2s linear; stroke-dashoffset: 0; }
+.pocket.shake { animation: pocketshake 1s ease-out; }
+@keyframes pocketshake {
+  0% { border-color: var(--accent); box-shadow: inset 0 0 60px rgba(56, 189, 248, 0.5); }
+  100% { border-color: transparent; box-shadow: none; }
+}

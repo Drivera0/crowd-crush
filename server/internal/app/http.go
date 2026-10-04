@@ -24,6 +24,8 @@ import (
 func (a *App) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /ws/phone", a.Hub.ServePhone)
 	mux.HandleFunc("GET /ws/dash", a.Hub.ServeDash)
+	a.meshRoutes(mux)   // GET /api/mesh, POST /api/mesh/jam (mesh.go)
+	a.beaconRoutes(mux) // Bluetooth beacon positioning (beacons.go)
 
 	mux.HandleFunc("GET /api/config", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()

@@ -5,6 +5,7 @@ import { wsURL } from '../../shared/protocol';
 import { animate } from 'motion';
 import { Areas, inPoly, type Tool } from './areas';
 import { initDemo } from './demo';
+import { initMeshNet } from './meshnet';
 import { Mesh } from './mesh';
 import { Setup } from './setup';
 
@@ -419,6 +420,7 @@ function renderTooltip() {
   tip.innerHTML =
     `<div class="tt-head">${n.name ? whoHTML(n.id) : `<b>${esc(n.id.slice(0, 8))}</b>`}<span class="st ${n.status}">${statusText[n.status]}</span></div>` +
     `<div class="tt-ua">${esc(deviceName(n.ua))} · ${where(n)}${n.real ? ' · real phone in the simulated crowd' : ''}</div>` +
+    (meshNet.tip(n.id) ? `<div class="tt-ua tt-mesh">${esc(meshNet.tip(n.id))}</div>` : '') +
     `<div class="tt-foot">${n.name && lastMode !== 'replay' ? 'Click for live telemetry · drag to move' : 'Click for live telemetry'}</div>`;
   tip.hidden = false;
   const w = $('mesh').clientWidth;
@@ -450,7 +452,7 @@ function whoHTML(id: string): string {
 /** How the phone's position is known. */
 function where(n: Node) {
   if (n.outside) return 'outside the venue';
-  return n.src === 'gps' || (n.acc ?? 0) > 0 ? `GPS ±${Math.round(n.acc ?? 0)} m` : n.src === 'tower' ? 'checked in at a tower' : 'placed on map';
+  return n.src === 'gps' || (n.acc ?? 0) > 0 ? `GPS ±${Math.round(n.acc ?? 0)} m` : n.src === 'tower' ? 'checked in at a tower' : n.src === 'beacon' ? 'Bluetooth beacons' : 'placed on map';
 }
 
 /** Zone ids → names, from the latest snapshot (custom areas have random ids). */
@@ -527,6 +529,7 @@ async function refreshDrawer() {
   $('dOffset').textContent = n ? `${n.offset >= 0 ? '+' : ''}${n.offset} ms` : '–';
   $('dAge').textContent = n ? `${(n.age / 1000).toFixed(1)} s ago` : '–';
   $('dNeigh').textContent = String(mesh.neighbourCount(id));
+  meshNet.renderDrawer();
   const s = d?.samples ?? [];
   chart('chX', s.map((p) => p.ax), color, 'vX', 'm/s²');
   chart('chZ', s.map((p) => p.az), color, 'vZ', 'm/s²');
@@ -955,6 +958,7 @@ function onSnapshot(s: Snapshot) {
   const clusters = s.clusters ?? [];
   mesh.update(s.nodes, s.waves, s.links ?? [], clusters, s.venue ?? { w: 24, h: 16 });
   areas.sync(s.zones, s.nodes);
+  meshNet.onSnapshot(s.mesh, s.nodes);
   // People each phone stands for (for the "Max people" hint).
   const ppl = clusters.reduce((n, c) => n + (c.people ?? 0), 0);
   const cnt = clusters.reduce((n, c) => n + (c.people != null ? c.count : 0), 0);
@@ -2574,6 +2578,8 @@ void loadEval();
 // ---------------------------------------------------------------------------
 // the judge demo: demo spot, dragging real phones, surge around the phones
 // ---------------------------------------------------------------------------
+
+const meshNet = initMeshNet({ mesh, toast, nameOf: who, selected: () => drawerId });
 
 const demo = initDemo({
   mesh,

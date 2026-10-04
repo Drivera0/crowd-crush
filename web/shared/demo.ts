@@ -29,7 +29,7 @@ export interface Receipt {
   x: number;
   y: number;
   /** How the position was set; "none" = the phone was never placed (x, y mean nothing). */
-  src: 'gps' | 'manual' | 'tower' | 'none';
+  src: 'gps' | 'manual' | 'tower' | 'beacon' | 'none';
   /** Motion summaries received. */
   messages: number;
   /** Seconds since the phone joined. */

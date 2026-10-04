@@ -273,6 +273,7 @@ func nodeDetail(p *pipeline, id string, m *nodeMeta) protocol.NodeDetail {
 		ID: id, X: r2(m.x), Y: r2(m.y), Acc: m.acc, Src: m.src(), Outside: m.outside, UA: m.ua, Zone: zone,
 		Connected: m.connected, Synced: m.synced, RTT: m.rtt, Offset: m.offset,
 		JoinedAt: m.joinedAt, Messages: m.msgs, Samples: m.samples(),
+		Beacons: m.bcn.report(m, hub.Now()),
 	}
 }
 

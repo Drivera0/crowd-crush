@@ -90,7 +90,7 @@ func (a *App) guideLocked(p *pipeline, now int64, sim bool) {
 		if !red && !wave && !inCluster[pr.ID] {
 			continue
 		}
-		g := crowd.GuideIn{ID: pr.ID, X: m.x, Y: m.y, Reason: protocol.ReasonDensity, Leave: out}
+		g := crowd.GuideIn{ID: pr.ID, X: m.x, Y: m.y, Acc: m.acc, Reason: protocol.ReasonDensity, Leave: out}
 		if v := push[pr.ID]; wave && (v[0] != 0 || v[1] != 0) {
 			g.Reason, g.PushX, g.PushY = protocol.ReasonPush, v[0], v[1]
 		} else if waveRed || wave {
@@ -153,7 +153,7 @@ func moveFor(p *pipeline, id string) *protocol.Move {
 	if !ok {
 		return nil
 	}
-	return &protocol.Move{DX: round2(mv.DX), DY: round2(mv.DY), To: mv.To, Reason: mv.Reason}
+	return &protocol.Move{DX: round2(mv.DX), DY: round2(mv.DY), To: mv.To, Reason: mv.Reason, Conf: math.Round(mv.Conf*10) / 10}
 }
 
 // sameState compares two phone states by value.
