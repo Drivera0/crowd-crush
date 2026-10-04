@@ -129,12 +129,39 @@ type Ping struct {
 	T0   int64  `json:"t0"`
 }
 
-// PhoneState is optional colour feedback on the phone screen.
+// PhoneState is colour feedback and personal guidance on the phone screen.
 type PhoneState struct {
 	Type string `json:"type"`
 	Node string `json:"node"` // "ok" | "handling" (or any node status)
 	Zone string `json:"zone"` // level of the worst zone containing the phone: calm | yellow | red
+	// Move is where this person should go, only while the phone is in
+	// danger (red zone, yellow/red cluster or a push passing through).
+	Move *Move `json:"move,omitempty"`
+	// Bearing is the venue's bearing (degrees clockwise from north of the
+	// map's up), only when the venue is GPS-anchored.
+	Bearing *float64 `json:"bearing,omitempty"`
+	// The phone's position and the venue size (m), for the map on its screen.
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+	W float64 `json:"w"`
+	H float64 `json:"h"`
 }
+
+// Move is personal guidance: a unit vector in venue coordinates (x right,
+// y down the map) toward lower density and, when one lies that way, an
+// open exit (To = its name; else "less crowded side").
+type Move struct {
+	DX     float64 `json:"dx"`
+	DY     float64 `json:"dy"`
+	To     string  `json:"to,omitempty"`
+	Reason string  `json:"reason"` // push | density
+}
+
+// Guidance reasons.
+const (
+	ReasonPush    = "push"
+	ReasonDensity = "density"
+)
 
 // ---- Server → dashboard ----
 
@@ -255,6 +282,11 @@ type Cluster struct {
 	People  int     `json:"people"`  // estimated head count (count / participation)
 	Trend   string  `json:"trend"`   // forming | steady | dispersing
 	Level   string  `json:"level"`   // calm | yellow | red, from the estimated density
+	// Rate: how fast the estimated density is changing (people/m² per minute).
+	Rate float64 `json:"rate,omitempty"`
+	// ETA: projected seconds until the danger density at that rate (early
+	// warning); only when it is rising and within earlyWarnS.
+	ETA float64 `json:"eta,omitempty"`
 }
 
 // Venue is the venue's size and geo-anchor (GET/PUT /api/venue). Lat/Lon
@@ -318,6 +350,34 @@ type Stats struct {
 	Phones    int     `json:"phones"`
 	MsgPerSec float64 `json:"msgPerSec"`
 	MedianRTT int64   `json:"medianRtt"`
+	// DetectMs: mean detector step time over the last ~5 s (ms, 2 decimals).
+	DetectMs float64 `json:"detectMs,omitempty"`
+	// SnapshotBytes: size of the last snapshot sent to dashboards.
+	SnapshotBytes int `json:"snapshotBytes,omitempty"`
+}
+
+// EdgeExplain is GET /api/edge?from=&to=: why the detector did (or didn't)
+// call a neighbour pair a travelling wave, from its latest step.
+type EdgeExplain struct {
+	From   string     `json:"from"`
+	To     string     `json:"to"`
+	StepMs int64      `json:"stepMs"`
+	A      []*float64 `json:"a"` // band-passed horizontal motion, oldest first (m/s²); null = no valid sample
+	B      []*float64 `json:"b"`
+	Lags   []int64    `json:"lags"` // ms; positive = b moves after a
+	Corr   []*float64 `json:"corr"` // |r| per lag; null = too little overlap
+	LagMs  int64      `json:"lagMs"`
+	Peak   float64    `json:"peak"`
+	Second float64    `json:"second"` // best separate peak
+	Wave   bool       `json:"wave"`
+	Checks []Check    `json:"checks"`
+}
+
+// Check is one test the detector applies to a neighbour pair.
+type Check struct {
+	Name   string `json:"name"`
+	Pass   bool   `json:"pass"`
+	Detail string `json:"detail"`
 }
 
 type Snapshot struct {
@@ -342,10 +402,13 @@ type Snapshot struct {
 // rising, briefing arriving, ack, resolve, escalation); the dashboard
 // upserts by ID.
 type Alert struct {
-	Type     string  `json:"type"`
-	ID       string  `json:"id"`
-	T        int64   `json:"t"`              // when the incident opened (server ms)
-	Kind     string  `json:"kind,omitempty"` // wave (default) | density | rule
+	Type string `json:"type"`
+	ID   string `json:"id"`
+	T    int64  `json:"t"`              // when the incident opened (server ms)
+	Kind string `json:"kind,omitempty"` // wave (default) | density | rule
+	// Early: a density pre-warning, not dangerous yet but projected to be
+	// soon (cleared when the incident goes red).
+	Early    bool    `json:"early,omitempty"`
 	Zone     string  `json:"zone"`
 	Level    string  `json:"level"` // the worst level the incident reached
 	Score    float64 `json:"score"`

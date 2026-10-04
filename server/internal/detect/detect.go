@@ -177,6 +177,7 @@ type Detector struct {
 	phones   map[string]*phone
 	zones    []*zone
 	lastStep int64
+	last     lastStep // inputs of the latest step, for Explain
 }
 
 // New creates a detector with the default zones for cfg's venue.
@@ -451,6 +452,7 @@ func (d *Detector) Step(now int64) Result {
 	pairs := d.neighbourPairs(spatial)
 	edges := make([]Edge, 0, len(pairs))
 	support := make([]bool, 0, len(pairs)) // hop is wave-like enough to extend a chain
+	recs := make([]pairRec, 0, len(pairs))
 	for _, pr := range pairs {
 		a, b := pr[0], pr[1]
 		e := Edge{From: a.id, To: b.id}
@@ -478,8 +480,11 @@ func (d *Detector) Step(now int64) Result {
 		}
 		edges = append(edges, e)
 		support = append(support, sup)
+		recs = append(recs, pairRec{a: a, b: b, handA: a.lastT < a.handlingUntil, handB: b.lastT < b.handlingUntil,
+			swayA: a.sway, swayB: b.sway, preChain: e.Wave})
 	}
 	d.keepChains(edges, support)
+	d.last = lastStep{pairs: recs, edges: edges, n: n, maxLag: maxLag, minOverlap: minOverlap}
 
 	for i, e := range edges {
 		a, b := d.phones[e.From], d.phones[e.To]
@@ -780,9 +785,15 @@ func (d *Detector) keepChains(edges []Edge, support []bool) {
 // Correlation is Pearson over the overlapping valid samples. second is the
 // height of the next-best separate peak (or range edge), for ambiguity checks.
 func xcorr(a, b []float64, va, vb []bool, maxLag, minOverlap int, useAbs bool) (lag, corr, second float64, ok bool) {
+	return peaks(corrCurve(a, b, va, vb, maxLag, minOverlap, useAbs), maxLag)
+}
+
+// corrCurve is the Pearson correlation of b[i+k] against a[i] for every lag
+// k in -maxLag..maxLag (index k+maxLag); NaN where fewer than minOverlap
+// samples overlap or a side is flat.
+func corrCurve(a, b []float64, va, vb []bool, maxLag, minOverlap int, useAbs bool) []float64 {
 	n := len(a)
 	cs := make([]float64, 2*maxLag+1)
-	best := -1
 	for k := -maxLag; k <= maxLag; k++ {
 		var sa, sb, saa, sbb, sab float64
 		var m int
@@ -812,8 +823,17 @@ func xcorr(a, b []float64, va, vb []bool, maxLag, minOverlap int, useAbs bool) (
 			}
 		}
 		cs[k+maxLag] = c
+	}
+	return cs
+}
+
+// peaks finds the best lag of a correlation curve (sub-step refined), its
+// height and the height of the next-best separate peak.
+func peaks(cs []float64, maxLag int) (lag, corr, second float64, ok bool) {
+	best := -1
+	for i, c := range cs {
 		if !math.IsNaN(c) && (best < 0 || c > cs[best]) {
-			best = k + maxLag
+			best = i
 		}
 	}
 	if best < 0 {

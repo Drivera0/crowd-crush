@@ -37,6 +37,8 @@ type Config struct {
 	DensityWatch   float64 `json:"densityWatch"`   // people/m² → yellow
 	DensityDanger  float64 `json:"densityDanger"`  // people/m² → red
 	Participation  float64 `json:"participation"`  // fraction of attendees with the page open (people = phones / participation)
+	EarlyWarnS     float64 `json:"earlyWarnS"`     // early warning: a cluster projected to reach densityDanger within this many seconds (at its current rate) is at least yellow; 0 = off
+	EarlyFloor     float64 `json:"earlyFloor"`     // … once its estimated density is at least this fraction of densityDanger
 
 	// GPS fixes less accurate than this (m) are ignored.
 	GPSMaxAcc float64 `json:"gpsMaxAcc"`
@@ -84,6 +86,7 @@ func DefaultConfig() Config {
 		HighRiskFactor: 0.5,
 		ClusterEps:     1.2, ClusterMinPts: 3, ClusterTrendMs: 10000,
 		DensityWatch: 2.0, DensityDanger: 4.0, Participation: 1.0,
+		EarlyWarnS: 30, EarlyFloor: 0.55,
 		GPSMaxAcc: 25,
 
 		HandlingRot:      200,
@@ -152,6 +155,8 @@ func (c Config) Validate() error {
 		return fmt.Errorf("need 0 < densityWatch < densityDanger")
 	case !(c.Participation > 0 && c.Participation <= 1):
 		return fmt.Errorf("participation must be in (0, 1]")
+	case !(c.EarlyWarnS >= 0 && c.EarlyWarnS <= 600) || !(c.EarlyFloor >= 0 && c.EarlyFloor < 1):
+		return fmt.Errorf("earlyWarnS must be 0..600 s and earlyFloor in [0, 1)")
 	case !(c.GPSMaxAcc > 0):
 		return fmt.Errorf("gpsMaxAcc must be > 0")
 	case c.StepMs <= 0 || c.CorrWindowMs <= 2*c.MaxLagMs:

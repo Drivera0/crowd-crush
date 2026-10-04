@@ -48,6 +48,7 @@ type incident struct {
 	key        string // source|zone|kind; "" = not matched by later changes (tests, calm notices)
 	redAt      int64  // when it first went red (0 = never)
 	briefing   bool   // a briefing was requested
+	earlyBrief bool   // that briefing was an early warning's (the red one still gets its own)
 	escalating bool
 	notify     notify
 }
@@ -105,12 +106,17 @@ type briefJob struct {
 	test   bool
 	replay bool
 	notify notify
+	early  bool // an early warning's projection: dropped if the alert went red meanwhile
 }
 
 // raiseLocked turns one level change into an alert: a new incident, an
 // update of the open one, or a calm notice. It returns the alert to
-// broadcast and, on the way to red, a briefing to write. Caller holds mu.
-func (a *App) raiseLocked(source, kind, zone, from, to string, score float64, now int64, replay bool, info func() brief.Info) (protocol.Alert, *briefJob) {
+// broadcast and, on the way to red, a briefing to write. early marks a
+// density pre-warning (the trend, not the density, raised it to yellow):
+// the incident gets early:true until it goes red, and a briefing worded as
+// a projection right away; the red that may follow still gets its own.
+// Caller holds mu.
+func (a *App) raiseLocked(source, kind, zone, from, to string, score float64, now int64, replay, early bool, info func() brief.Info) (protocol.Alert, *briefJob) {
 	if to == protocol.LevelCalm {
 		return a.newAlertLocked("", protocol.Alert{T: now, Kind: kind, Zone: zone, Level: to, Score: score,
 			Status: protocol.StatusResolved, ResolvedAt: now}, now), nil
@@ -126,6 +132,11 @@ func (a *App) raiseLocked(source, kind, zone, from, to string, score float64, no
 			} else if to == al.Level {
 				al.Score = max(al.Score, score)
 			}
+			if to == protocol.LevelRed {
+				al.Early = false
+			} else if early && al.Level == protocol.LevelYellow {
+				al.Early = true
+			}
 			if to == protocol.LevelRed && inc.redAt == 0 {
 				inc.redAt = now
 			}
@@ -133,23 +144,30 @@ func (a *App) raiseLocked(source, kind, zone, from, to string, score float64, no
 		})
 	}
 	if !ok {
-		al = a.newAlertLocked(key, protocol.Alert{T: now, Kind: kind, Zone: zone, Level: to, Score: score}, now)
+		al = a.newAlertLocked(key, protocol.Alert{T: now, Kind: kind, Zone: zone, Level: to, Score: score,
+			Early: early && to == protocol.LevelYellow}, now)
 	}
 	inc := a.incidents[al.ID]
-	if to != protocol.LevelRed || from == protocol.LevelRed || al.Brief != "" || inc.briefing || now-a.lastBrief[zone] < BriefCooldown {
+	earlyJob := early && to == protocol.LevelYellow && !inc.briefing && now-a.lastBrief[zone] >= BriefCooldown
+	// Red after an early warning's briefing: brief again (the cooldown was
+	// spent on the projection).
+	redAfterEarly := to == protocol.LevelRed && from != protocol.LevelRed && inc.earlyBrief
+	redJob := to == protocol.LevelRed && from != protocol.LevelRed && !inc.briefing && now-a.lastBrief[zone] >= BriefCooldown
+	if !earlyJob && !redJob && !redAfterEarly {
 		return al, nil
 	}
 	a.lastBrief[zone] = now
-	inc.briefing = true
+	inc.briefing, inc.earlyBrief = true, earlyJob
 	in := info()
 	in.Message = a.messageFor(zone)
-	return al, &briefJob{id: al.ID, info: in, replay: replay, notify: inc.notify}
+	return al, &briefJob{id: al.ID, info: in, replay: replay, notify: inc.notify, early: earlyJob}
 }
 
 func (a *App) detectTick(now int64) {
 	a.mu.Lock()
 	res, cch := a.live.step(now)
 	rch := a.stepRules(a.live, now)
+	a.guideLocked(a.live, now, false)
 	forget(a.live, now)
 	active, pnow, isReplay, src, source := a.live, now, false, "", "live"
 	changes := res.Changes
@@ -159,6 +177,7 @@ func (a *App) detectTick(now int64) {
 		var rres detect.Result
 		rres, cch = r.p.step(pnow)
 		rch = a.stepRules(r.p, pnow)
+		a.guideLocked(r.p, pnow, false)
 		changes = rres.Changes
 		active, isReplay, src, source = r.p, true, " [replay]", "replay"
 		if pnow > r.recEnd+3000 {
@@ -170,6 +189,7 @@ func (a *App) detectTick(now int64) {
 		var sres detect.Result
 		sres, cch = s.p.step(now)
 		rch = a.stepRules(s.p, now)
+		a.guideLocked(s.p, now, true)
 		changes = sres.Changes
 		active, isReplay, src, source = s.p, true, " [sim]", "sim"
 		forget(s.p, now)
@@ -201,19 +221,19 @@ func (a *App) detectTick(now int64) {
 		}
 	}
 	for _, ch := range changes {
-		al, job := a.raiseLocked(source, protocol.KindWave, ch.Zone, ch.From, ch.To, round2(ch.Score), now, isReplay,
+		al, job := a.raiseLocked(source, protocol.KindWave, ch.Zone, ch.From, ch.To, round2(ch.Score), now, isReplay, false,
 			func() brief.Info { return briefInfo(active, ch.Zone, protocol.LevelRed, pnow) })
 		add(al, ch.To, job)
 	}
 	for _, ch := range cch {
 		c := ch.Cluster
 		zone := active.det.ZoneOf(c.X, c.Y)
-		al, job := a.raiseLocked(source, protocol.KindDensity, zone, ch.From, ch.To, round2(c.Est), now, isReplay,
+		al, job := a.raiseLocked(source, protocol.KindDensity, zone, ch.From, ch.To, round2(c.Est), now, isReplay, ch.Early,
 			func() brief.Info { return densityInfo(active, c, zone) })
 		add(al, ch.To, job)
 	}
 	for _, ch := range rch {
-		al, job := a.raiseLocked(source, protocol.KindRule, ch.zone, ch.from, ch.to, ruleScore(ch), now, isReplay,
+		al, job := a.raiseLocked(source, protocol.KindRule, ch.zone, ch.from, ch.to, ruleScore(ch), now, isReplay, false,
 			func() brief.Info { return ruleInfo(active, ch) })
 		add(al, ch.to, job)
 	}
@@ -303,12 +323,17 @@ func (a *App) briefAndSpeak(j *briefJob) {
 	}
 	log.Printf("brief zone %s: %s", info.Zone, text)
 	a.mu.Lock()
+	stale := false
 	al, ok := a.updateAlertLocked(j.id, func(al *protocol.Alert, _ *incident) {
+		if j.early && al.Level == protocol.LevelRed {
+			stale = true // the red briefing says it better
+			return
+		}
 		al.Brief, al.Headline, al.Action, al.AudioURL = text, bf.Headline, bf.Action, url
 	})
 	a.mu.Unlock()
-	if !ok {
-		return // dropped from the log meanwhile
+	if !ok || stale {
+		return // dropped from the log meanwhile, or overtaken
 	}
 	a.Hub.BroadcastJSON(al)
 	if !j.test && !j.replay {

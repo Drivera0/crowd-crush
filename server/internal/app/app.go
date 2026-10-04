@@ -119,17 +119,51 @@ type pipeline struct {
 	hist     map[string][]histPoint
 	lastHist int64
 	rules    map[string]*ruleState // area rule machines, by area id (rules.go)
+	pts      []crowd.Point         // phones that count (clusters, guidance) in the latest step
+	guide    *crowd.Guide          // personal guidance state (guide.go)
+	moves    map[string]crowd.Move // guidance for the phones in danger, latest step
+	stepDur  []stepTime            // detector step durations, last ~5 s
 }
+
+// stepTime is one pipeline step's duration.
+type stepTime struct {
+	t  int64
+	ns int64
+}
+
+// statWindowMs is the window of Stats.detectMs.
+const statWindowMs = 5000
 
 func newPipeline(cfg detect.Config) *pipeline {
 	return &pipeline{det: detect.New(cfg), crowd: crowd.NewTracker(crowd.ConfigFrom(cfg)),
-		meta: map[string]*nodeMeta{}, hist: map[string][]histPoint{}}
+		meta: map[string]*nodeMeta{}, hist: map[string][]histPoint{}, guide: crowd.NewGuide()}
+}
+
+// detectMs is the mean step duration over the last statWindowMs (ms, 2 decimals).
+func (p *pipeline) detectMs() float64 {
+	if len(p.stepDur) == 0 {
+		return 0
+	}
+	var sum int64
+	for _, s := range p.stepDur {
+		sum += s.ns
+	}
+	return round2(float64(sum) / float64(len(p.stepDur)) / 1e6)
 }
 
 func (p *pipeline) cfg() detect.Config { return p.det.Config() }
 
 // step runs the detector and the crowd clusters.
 func (p *pipeline) step(now int64) (detect.Result, []crowd.Change) {
+	t0 := time.Now()
+	defer func() {
+		p.stepDur = append(p.stepDur, stepTime{now, time.Since(t0).Nanoseconds()})
+		cut := 0
+		for cut < len(p.stepDur) && p.stepDur[cut].t <= now-statWindowMs {
+			cut++
+		}
+		p.stepDur = append(p.stepDur[:0], p.stepDur[cut:]...)
+	}()
 	p.last = p.det.Step(now)
 	var pts []crowd.Point
 	for _, pr := range p.last.Phones {
@@ -140,6 +174,7 @@ func (p *pipeline) step(now int64) (detect.Result, []crowd.Change) {
 		pts = append(pts, crowd.Point{ID: pr.ID, X: pr.X, Y: pr.Y})
 	}
 	var ch []crowd.Change
+	p.pts = pts
 	p.clusters, ch = p.crowd.Update(now, pts)
 	if now-p.lastHist >= 1000 {
 		p.lastHist = now
@@ -206,6 +241,7 @@ type App struct {
 	alertSeq  int
 	incidents map[string]*incident // by alert id, see alerts.go
 	openInc   map[string]string    // incident key → id of its unresolved alert
+	snapBytes int                  // size of the last snapshot broadcast
 }
 
 // New creates the app and its hub, loading saved areas and venue from
@@ -505,7 +541,15 @@ func (a *App) Run(ctx context.Context) {
 			a.mu.Lock()
 			s := a.snapshotLocked(hub.Now())
 			a.mu.Unlock()
-			a.Hub.BroadcastJSON(s)
+			b, err := json.Marshal(s)
+			if err != nil {
+				log.Printf("snapshot: %v", err)
+				continue
+			}
+			a.mu.Lock()
+			a.snapBytes = len(b)
+			a.mu.Unlock()
+			a.Hub.Broadcast(b)
 		case <-st.C:
 			a.phoneStates(hub.Now())
 		case <-simT.C:
@@ -589,7 +633,11 @@ func zoneName(p *pipeline, zone string) string {
 // densityInfo describes a cluster that packed past the danger density.
 func densityInfo(p *pipeline, c crowd.Cluster, zone string) brief.Info {
 	in := brief.Info{Kind: protocol.KindDensity, Zone: zone, Where: zoneName(p, zone), Level: c.Level, Density: round2(c.Est),
-		People: c.People, AreaM2: math.Round(c.Area()*10) / 10, Trend: c.Trend, X: math.Round(c.X), Y: math.Round(c.Y)}
+		People: c.People, AreaM2: math.Round(c.Area()*10) / 10, Trend: c.Trend, X: math.Round(c.X), Y: math.Round(c.Y),
+		Danger: p.cfg().DensityDanger}
+	if c.Early && c.Level == protocol.LevelYellow {
+		in.Early, in.ETA, in.Rate = true, math.Round(c.ETA), round2(c.Rate)
+	}
 	if c.Peak > c.Density {
 		// The level comes from the packed spot, not the cluster as a whole:
 		// describe that spot.
@@ -680,6 +728,8 @@ func (a *App) snapshotLocked(now int64) protocol.Snapshot {
 		s.Stats.MedianRTT = rtts[len(rtts)/2]
 	}
 	s.Stats.MsgPerSec = math.Round(a.msgRate)
+	s.Stats.DetectMs = p.detectMs()
+	s.Stats.SnapshotBytes = a.snapBytes
 	for _, z := range p.last.Zones {
 		poly := make([]protocol.Point, len(z.Poly))
 		for i, pt := range z.Poly {
@@ -701,13 +751,16 @@ func (a *App) snapshotLocked(now int64) protocol.Snapshot {
 	}
 	for _, c := range p.clusters {
 		s.Clusters = append(s.Clusters, protocol.Cluster{ID: c.ID, X: r2(c.X), Y: r2(c.Y), R: r2(c.R), Count: c.Count,
-			Density: round2(c.Density), People: c.People, Trend: c.Trend, Level: c.Level})
+			Density: round2(c.Density), People: c.People, Trend: c.Trend, Level: c.Level,
+			Rate: round2(c.Rate), ETA: math.Round(c.ETA*10) / 10})
 	}
 	return s
 }
 
-// phoneStates sends colour feedback to phones when it changes (and every few
-// seconds as a heartbeat). zone = level of the worst zone containing the phone.
+// phoneStates sends colour feedback and guidance to phones when it changes
+// (and every few seconds as a heartbeat). zone = level of the worst zone
+// containing the phone; move = where to go while it is in danger (guide.go);
+// x, y, w, h = its position (to the decimetre) and the venue size.
 func (a *App) phoneStates(now int64) {
 	type out struct {
 		id string
@@ -715,6 +768,30 @@ func (a *App) phoneStates(now int64) {
 	}
 	var send []out
 	a.mu.Lock()
+	states := a.phoneStatesLocked()
+	for _, id := range sortedKeys(states) {
+		st := states[id]
+		if !sameState(st, a.sentState[id]) || now-a.sentAt[id] > 3000 {
+			a.sentState[id], a.sentAt[id] = st, now
+			send = append(send, out{id, st})
+		}
+	}
+	a.mu.Unlock()
+	for _, o := range send {
+		a.Hub.SendPhone(o.id, o.st)
+	}
+}
+
+// phoneStatesLocked is the state message for every connected live phone.
+// Caller holds mu.
+func (a *App) phoneStatesLocked() map[string]protocol.PhoneState {
+	out := map[string]protocol.PhoneState{}
+	cfg := a.liveConfig()
+	var bearing *float64
+	if a.venue.Geo {
+		b := a.venue.Bearing
+		bearing = &b
+	}
 	zoneLevel := map[string]string{}
 	for _, z := range a.live.last.Zones {
 		zoneLevel[z.ID] = a.live.zoneLevel(z)
@@ -736,16 +813,19 @@ func (a *App) phoneStates(now int64) {
 				}
 			}
 		}
-		st := protocol.PhoneState{Type: protocol.TypeState, Node: node, Zone: level}
-		if st != a.sentState[pr.ID] || now-a.sentAt[pr.ID] > 3000 {
-			a.sentState[pr.ID], a.sentAt[pr.ID] = st, now
-			send = append(send, out{pr.ID, st})
-		}
+		out[pr.ID] = protocol.PhoneState{Type: protocol.TypeState, Node: node, Zone: level, Move: moveFor(a.live, pr.ID),
+			Bearing: bearing, X: math.Round(m.x*10) / 10, Y: math.Round(m.y*10) / 10, W: cfg.VenueW, H: cfg.VenueH}
 	}
-	a.mu.Unlock()
-	for _, o := range send {
-		a.Hub.SendPhone(o.id, o.st)
+	return out
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	ks := make([]string, 0, len(m))
+	for k := range m {
+		ks = append(ks, k)
 	}
+	sort.Strings(ks)
+	return ks
 }
 
 func round2(v float64) float64 { return math.Round(v*100) / 100 }
@@ -787,4 +867,12 @@ func (a *App) modeLocked() string {
 		return "replay"
 	}
 	return "live"
+}
+
+// ExplainEdge is GET /api/edge: why the active pipeline's latest detector
+// step did or didn't call the pair a travelling wave (either order).
+func (a *App) ExplainEdge(from, to string) (protocol.EdgeExplain, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.active().det.Explain(from, to)
 }

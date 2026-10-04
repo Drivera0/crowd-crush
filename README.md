@@ -37,7 +37,7 @@ Copy `.env.example` to `.env` (git-ignored); the server reads it on start. All o
 | `TIGER_DATABASE_URL` | readings recorded to `recordings/auto/*.jsonl` |
 | `GEMINI_API_KEY` (`GEMINI_MODEL`) | template briefing sentence |
 | `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` | dashboard uses the browser's speech synthesis |
-| `SIGN_URL` | no sign (Arduino + ESP32 zone lights: see docs/SETUP.md) |
+| `SIGN_URL` | no sign (Arduino + ESP32 zone lights over Wi-Fi, or `serial:auto` for the sign on USB: see docs/SETUP.md) |
 | `PUBLIC_URL` | QR code uses the dashboard's own host |
 | `VENUE_W`, `VENUE_H` | 24 × 16 m venue |
 | `VENUE_LAT`, `VENUE_LON`, `VENUE_BEARING` | no geo-anchor: GPS fixes are ignored and phones are placed by hand (set it later with `PUT /api/venue`; it's saved in `data/venue.json`, which wins over the env on restart) |
@@ -89,6 +89,12 @@ Per zone: score = |Σ unit travel vectors of the wave edges| ÷ the zone's edges
 
 **Density alerts.** A cluster's level comes from its estimated density = phones/m² ÷ `participation`, where phones/m² is the larger of the cluster-disc density and the *peak local density* (phones within 1.5 m of a member ÷ 7.07 m², at the 90th percentile of the members). Without the local peak, a 20 m crowd pressed against a barrier is one big cluster whose disc average hides the packed front (the crowd simulator showed 1.2/m² for a front at 6/m²). Levels: yellow above `densityWatch` (2 people/m²) for 2 s, red above `densityDanger` (4 people/m²) for 2 s, each clearing 10 % below its threshold. Yellow → red raises an alert through the same chain as a wave (timeline, a Gemini briefing worded as crowding, voice, sign) for the zone the cluster's centre is in, with the same one-briefing-per-zone-per-30-s limit. **The participation caveat:** density counts *phones*. The default `participation` of 1.0 assumes everyone in the cluster has the page open. If only a third do, set 0.33, so that 4 phones in a few m² read as 12 people. Set it too high and real crushes read as half as dense; too low and comfortable groups raise alarms. It's the weakest number in the system, so tune it per event.
 
+**Early warning from the density trend.** Waiting for the density to pass 4/m² for 2 s made Pulse ~2 s late on a sudden surge. Each cluster now also has a `rate` (least-squares slope of its estimated density over the last 8 s, people/m² per minute) and, when it is rising, an `eta`: seconds until it would reach `densityDanger` at that rate, if within `earlyWarnS` (30 s). A cluster whose `eta` is set while its density is already at least `earlyFloor` × danger (0.55 → 2.2 people/m²) goes yellow after 500 ms instead of waiting for the 2 s hold, with a density alert marked `early: true` and a briefing worded as a projection: *"Stage front: about 40 people packing in fast; at this rate it reaches a dangerous 4 per m² in about 12 s. Open space ahead of them now."* Red still needs the danger density itself, unchanged. When small groups merge into one big cluster (what a surge does), the new cluster inherits the density history of the group most of its phones came from, so its rate doesn't restart from zero.
+
+**"Move this way" on the attendee's phone.** While a phone is in danger (a red zone, including an area turned red by a staff rule such as capacity; a yellow or red cluster it belongs to; or a push passing through it), its `state` message carries `move: {dx, dy, to, reason}`, a unit vector on the venue map, plus its position and the venue size (and the venue's bearing when GPS-anchored) so the phone can draw an arrow on a little map. The direction is down the gradient of a kernel density estimate of all phones (Gaussian, σ 1.5 m): toward fewer people, sliding along walls and the stage instead of into them. For a push it is sideways to the push's travel direction, on the emptier side and slightly with the push: crowd-safety advice is to move diagonally out of a surge, never against it. Inside an area a rule turned red, it leads out of the area. An open exit within ±60° of that direction and 25 m is blended in and named (`to`), else `to` is "less crowded side". The arrow is smoothed (EMA, 2 s) and only turns when the new direction is more than 30° from the one shown, so it doesn't jitter. Simulated phones get guidance too (nothing reads it yet).
+
+**"Why did it fire?"** `GET /api/edge?from=<id>&to=<id>` explains one neighbour pair from the latest detector step: both phones' band-passed traces, the full cross-correlation curve with its peak, second peak and lag, the verdict, and every test with pass/fail and a plain-words detail (`"sway 0.41 and 0.38 m/s², need 0.15"`, `"250 ms: one person to the next"`, `"23 ms: moving together (dancing, jumping)"`, …). It is computed on request from inputs the detector keeps, so the 250 ms step doesn't pay for it. The dashboard's stats also show `detectMs` (mean step time over 5 s) and `snapshotBytes`.
+
 Every threshold lives in one struct: `./bin/pulse -dump-config > detect.json`, edit, `./bin/pulse -config detect.json` (`detect.example.json` holds the defaults).
 
 The line demo (`-layout line`, 8 phones 0.6 m apart) and the crowd layout (`-layout crowd`, the default: about 70 % of phones in one or two dense groups, the rest scattered, all wandering slowly) run through the same detector. Outcomes over 20 random crowds each, ±25 ms clock error:
@@ -127,6 +133,17 @@ Also tested: every other phone held upside down, the false-positive scenarios ov
 | `stage` at 5 s → `surge` 0.7 + shoves at 30 s | 30 s | 3 seeds: 12–13 s (during `stage`); 2 seeds: 31–32 s | +17 to +19 s, or −0.8 to −1.9 s |
 | `stage` → `surge` 0.3 | 30–32 s | same pattern | +17 to +19 s, or −0.4 to −0.8 s |
 
+**With the early warning** (`calm → surge 0.7 + shoves`, 5 seeds, first density alert after the surge vs the truth turning dangerous; `PULSE_SIMSWEEP=1 go test ./server/internal/app -run SimEarlySweep -v`):
+
+| | Seed 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|---|
+| truth dangerous | 34.2 s | 33.3 s | 33.1 s | 33.4 s | 33.5 s |
+| first alert, before (`earlyWarnS: 0`) | 35.25 (−1.05) | 35.75 (−2.45) | 33.75 (−0.65) | 34.25 (−0.85) | 34.0 (−0.5) |
+| first alert, with early warning | **33.0 (+1.2)** | **33.5 (−0.2)** | **33.0 (+0.1)** | **33.25 (+0.15)** | 34.0 (−0.5, no early) |
+| red (unchanged) | 35.5 | 35.75 | 35.25 | 35.5 | 35.5 |
+
+The first warning moves 0.75–2.25 s earlier on 4 of 5 seeds and lands at or before the truth turning dangerous on 3. The surge goes from calm to dangerous in about 3 s, which an 8 s trend can only partly anticipate. `calm` (120 s × 5 seeds): no early warning (the yellow density alerts some calm seeds already showed are unchanged). `attract`: yellow 0.25–1.25 s earlier on 4 seeds, never red. (Measured with the crowd simulator as of this change; its realism is still being worked on.)
+
 Read it honestly. A sudden surge into a loose crowd is caught ~2 s after the crowd turns dangerous: the density has to persist for 2 s, and the cluster has to fill. The large positive leads happen when `stage` crowding already passes Pulse's 4/m² danger threshold (true density ~5/m², pressure still below 1600 N/m), so Pulse is red before the surge starts. That's an early warning by Pulse's own threshold, not a prediction of the surge. In `calm` there is no red alert (and on seeds 1–3 over 120 s, no density alert at all). In `attract` (a group forming around a point) there is yellow density only.
 
 **What the simulator says about wave detection.** In this model the travelling-wave detector almost never fires. Bodies in a packed crowd are stiff (k = 1.2·10⁵ kg/s²), so a push crosses neighbours in tens of milliseconds, under the detector's 120 ms per-hop floor, and reads as moving together. In a loose crowd a push dies out within ~2 m. Either real crowds transmit pushes more slowly than stiff discs do (people are compliant and step), or the wave detector needs a lower lag floor for packed crowds. Recordings of real pushes would settle it.
@@ -155,6 +172,7 @@ Read it honestly. A sudden surge into a loose crowd is caught ~2 s after the cro
 | `GET /api/hardware` | signs and zone lights: online, Wi-Fi, BLE counts, `x, y`, `beacon`, `peers` |
 | `PUT /api/hardware/{key}/pos` | `{x, y}` (key `sign` or a light letter) → hardware list; 404 for an unknown board |
 | `GET /api/node/{id}` | one phone's details and last 30 s of readings |
+| `GET /api/edge?from=&to=` | why the detector did or didn't call a neighbour pair a wave: traces, cross-correlation curve, every check; 404 if not a neighbour pair |
 | `GET /api/sim`, `POST /api/sim/start`, `/stop`, `/action` | crowd simulation (docs/REFERENCE.md) |
 | `GET /api/recordings`, `POST /api/record/start`, `/record/stop`, `/replay`, `/live` | recordings and replay |
 | `POST /api/test-alert`, `POST /api/ask`, `GET /api/status`, `GET /api/qr.png`, `GET /api/phone-url` | drill, questions to Gemini, service status, join QR |
@@ -166,6 +184,8 @@ server/cmd/pulse      the server (flags: -venue-w -venue-h -venue-lat -venue-lon
 server/cmd/sim        fake phones: -scenario wave [-layout crowd|line] [-n 24] [-move=false] [-rows -cols for the line]
                       [-out file.jsonl for offline recordings, with hello x/y and pos records]
 server/cmd/dashtail   dashboard snapshots in a terminal
+server/cmd/eval       evaluation report: every scenario × N random crowds → docs/eval.json, docs/EVAL.md (-seeds 20)
+server/cmd/loadtest   N fake phones against a running server → docs/loadtest.md (-n 1000 -duration 60s)
 server/internal/      hub, clocksync, detect, crowd (clusters), geo (GPS → metres), store, brief, voice, sign, protocol, app, sim,
                       crowdsim (Social Force Model crowd, in-process: POST /api/sim/start)
 data/                 saved venue (size, anchor, layout, floor plan), staff-drawn areas, board positions (git-ignored)
@@ -180,6 +200,14 @@ Web dev with hot reload: run `./bin/pulse`, then `cd web && npm run dev:dash` (o
 ## Arduino sign
 
 `arduino/sign/sign.ino` for the Uno R4 WiFi: copy `arduino_secrets.h.example` to `arduino_secrets.h`, add Wi-Fi, flash, read the IP off the serial monitor, set `SIGN_URL=http://<ip>`. It serves `GET /level?v=calm|yellow|red&zone=B`: calm = heartbeat, yellow = `!`, red = flashing arrow + STOP (and pin 7 high for a buzzer/LED).
+
+**Over USB, no Wi-Fi:** `SIGN_URL=serial:auto` (or `serial:/dev/cu.usbmodem1101`, `serial:COM7`, `A=serial:…` for a zone) drives the sign through the cable at 115200 baud: one `L <calm|yellow|red> <zone>` line per level change, `S` for a `/pulse`-shaped status line. The server sets DTR (the R4 needs it), reconnects if the cable comes out, and re-sends the current level. If Wi-Fi doesn't connect within 15 s, the firmware carries on over USB only (a small "USB" shows while calm) and keeps retrying Wi-Fi. A server inside WSL can't see USB ports without `usbipd`, so USB mode is for the Mac at the demo. Details: [docs/SETUP.md](docs/SETUP.md).
+
+## Evaluation and load test
+
+`make eval` (`go run ./server/cmd/eval -seeds 20`) runs every simulator scenario in the line and crowd layouts over 20 random crowds, plus five crowd-simulation scripts with ground-truth lead times, through the real detector and density tracker in parallel (about 20 s on 32 threads). It writes [docs/EVAL.md](docs/EVAL.md) (table, method, limits) and `docs/eval.json` (the `EvalReport` shape in `web/shared/protocol.ts`). Latest: **0 false alarms in 600 look-alike runs; 22 of 160 true-positive runs missed** (19 of them `wave-jump` in a crowd, 3 `wave` in a crowd). These are simulated signals, scored with thresholds that were tuned on the same simulator, so they are not real-world validation.
+
+`make loadtest N=1000` (`go run ./server/cmd/loadtest -n 1000 -url ws://localhost:8080/ws/phone -duration 60s`; `-n 500,1000` runs both) connects fake phones to a running server over the real WebSocket: hello, clock-sync replies, 10 Hz calm motion, joining over 10 s. One dashboard client times the snapshots and `/api/status` is polled. Results and machine details go to [docs/loadtest.md](docs/loadtest.md). On a Ryzen 9 9950X (WSL2), 1000 phones all connected and none dropped: 10,000 messages/s went in, snapshots stayed at 10 Hz (worst gap 111 ms), and `/api/status` answered in 0.5 ms at the median (1.3 ms worst). The phones are real to the server, so in a small venue they are dense enough to raise density alerts.
 
 ## Privacy
 
