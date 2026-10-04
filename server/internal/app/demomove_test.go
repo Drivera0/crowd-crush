@@ -386,7 +386,9 @@ func TestBeaconSnapEdges(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		viaScan(a, "p", 4.5, 8.1, t1+20_000+int64(i)*1000, A, B)
 	}
-	if _, err := a.MovePhone("p", 12, 3); err != nil {
+	// Off the row's slots by a clear margin: (12, 3) is exactly half a
+	// spacing from one, which rounds either way depending on the CPU.
+	if _, err := a.MovePhone("p", 12, 3.3); err != nil {
 		t.Fatal(err)
 	}
 	if m := towerMeta(t, a, "p"); m.dm.snap.key != "" || m.x != 12 || m.src() != protocol.SrcManual {
