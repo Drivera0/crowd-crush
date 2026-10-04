@@ -32,7 +32,7 @@ Run `make env` (Mac / Git Bash). It explains each value, asks for it, writes `.e
 | `GEMINI_API_KEY` | https://aistudio.google.com/apikey → Create API key |
 | `ELEVENLABS_API_KEY` | https://elevenlabs.io/app/settings/api-keys → Create key with Text to Speech access |
 | `ELEVENLABS_VOICE_ID` | optional: Voice library → ⋯ → Copy voice ID |
-| `SIGN_URL` | after step 4: the IPs your boards print |
+| `SIGN_URL` | after step 4: the IPs your boards print, or `serial:auto` for the sign plugged in by USB |
 | `PUBLIC_URL` | after step 3: `https://pulse.yourname.tech` |
 
 `./bin/pulse -check` (or `make doctor`) re-tests at any time. Never commit `.env`.
@@ -70,6 +70,16 @@ Then:
 SIGN_URL=http://<uno ip>,A=http://<esp32 #1 ip>,B=http://<esp32 #2 ip>
 ```
 `./bin/pulse -check` should list all three. The dashboard's **Test alert** flashes them.
+
+**Sign over USB (no Wi-Fi):** plug the Uno R4 into the laptop running the server and set
+```
+SIGN_URL=serial:auto                       # or serial:/dev/cu.usbmodem1101 (Mac), serial:COM7 (Windows)
+SIGN_URL=serial:auto,A=http://<esp32 #1 ip>  # mixes with Wi-Fi boards; A=serial:… pins a zone
+```
+`serial:auto` picks the first Arduino (USB vendor 0x2341) or CP210x ESP32 (0x10C4). The server opens the port at 115200 baud with DTR on (the R4 ignores the sketch's serial input without it), waits 1.5 s, then writes one line per level change, `L <calm|yellow|red> <zone>`. Every hardware check it sends `S` and the sign answers with its `/pulse` JSON line. Unplug it and the server reopens the port when it comes back, then re-sends the current level. The sign firmware needs no Wi-Fi for this: if Wi-Fi doesn't connect within 15 s it shows a small **USB** while calm and keeps retrying Wi-Fi in the background. Close the Arduino IDE's Serial Monitor first, because only one program can hold the port.
+
+- **WSL can't see USB ports** unless you attach them with `usbipd`, so the server running inside WSL won't find the board. That's expected: USB mode is for the Mac (or a native Windows/Linux build) at the demo.
+- **ESP32 zone lights:** `serial:auto` finds them, but `zone-light.ino` doesn't read serial commands yet. Use their Wi-Fi URLs.
 
 ## 5. Before judging
 
