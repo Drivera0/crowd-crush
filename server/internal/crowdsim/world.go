@@ -1,8 +1,9 @@
 // Package crowdsim is a pedestrian crowd simulation for testing Pulse
 // against bodies instead of scripted signals: a Social Force Model in which
-// a crowd crush can emerge, and the phones some of those people carry.
+// a crowd crush can emerge, people who behave like a concert audience, and
+// the phones some of those people carry.
 //
-// Physics follows
+// # Physics
 //
 //   - D. Helbing and P. Molnár, "Social force model for pedestrian
 //     dynamics", Phys. Rev. E 51, 4282 (1995): each person is driven toward
@@ -26,31 +27,123 @@
 // clamped to MaxSpeed and accelerations to MaxAccel so a bad overlap can
 // never explode.
 //
-// Walking people also keep a time gap (TimeGap = 0.6 s) to whoever is in
-// their path, and step around a slower walker when that gets them on faster
-// (headings 0, ±10°, ±20°): speed adaptation as in Tordeux, Chraibi &
-// Seyfried's collision-free speed model (2016) and the steering heuristic
-// of Moussaïd, Helbing & Theraulaz (2011). People pressing toward the stage
-// (stage, surge) ignore the time gap: pushing on while blocked is what
-// builds crush pressure.
+// Walking people keep a time gap (TimeGap = 0.6 s) to whoever is in their
+// path (someone coming the other way counts as closing the gap), and step
+// around a slower walker when that gets them on faster: speed adaptation
+// as in Tordeux, Chraibi & Seyfried's collision-free speed model (2016)
+// and the steering heuristic of Moussaïd, Helbing & Theraulaz (2011). In
+// the venue they consider headings up to ±60° (to get round standing
+// people) and pass oncoming people on the right, the side preference
+// Moussaïd et al. (2009) measured; in the calibration corridor, ±20°.
+// People pressing toward the stage (stage, surge) ignore the time gap:
+// pushing on while blocked is what builds crush pressure. People leaving
+// (disperse) close up to EvacTimeGap = 0.3 s, calibrated on bottleneck
+// flow (below).
 //
-// Calibration. Mean walking speed against density in a 12 × 2.5 m periodic
-// corridor, compared with Weidmann's fundamental diagram (1993;
-// v0 = 1.34 m/s, γ = 1.913 m⁻², ρmax = 5.4 /m²), 3 seeds × 20 s each
+// # Behaviour (behaviour.go)
+//
+// Groups. 60 % of people arrive in groups of 2–4 (sizes 2:3:4 in
+// proportion 0.60:0.27:0.13); Moussaïd, Perozo, Garnier, Helbing &
+// Theraulaz, "The walking behaviour of pedestrian social groups and its
+// impact on crowd dynamics", PLoS ONE 5, e10047 (2010) found up to 70 % of
+// pedestrians walking in groups, mostly pairs. A group shares its purpose
+// and target. Walking, its members hold formation slots around the
+// centroid (a spring of 0.8 /s toward the slot on top of the group's
+// velocity): abreast at low density (pairs 0.75 m apart, fours 2.1 m
+// wide), bent into a V (middle behind) or U and narrowed as the local
+// density rises, as in that paper's Fig. 3. The group walks at its
+// slowest member's speed × 1, 0.9, 0.85, 0.8 for sizes 1–4 (bigger groups
+// are slower) and slows down while a member is more than ~1.6 m from the
+// centroid, so stragglers catch up. Stage and surge press groups forward
+// together (the group drifts as one and keeps its members side by side);
+// attract sends whole groups; disperse sends each group to the exit
+// nearest its centroid.
+//
+// The concert routine (calm, dance, intermission):
+//   - most people stand still facing the stage. Standing is planted: the
+//     driving term damps velocity with τ = 0.3 s, there is no wander force,
+//     and social (non-contact) repulsion below 150 N net is ignored, like
+//     static friction. Contact forces and shoves always act, so pushes
+//     still travel and pressure still builds; walkers squeezing past nudge
+//     standing people aside;
+//   - a quarter sway gently to the music, everyone sways and most bounce on
+//     "dance", and weight shifts and breathing go on the whole time. These
+//     move the torso, not the feet: they are in the phone signal (phone.go),
+//     not in the bodies' positions;
+//   - groups go to a point of interest now and then (mean every 12 min per
+//     group): a bar on the right wall, toilets on the left, merch at the
+//     back (pushed inward until clear of the stage and walls when a venue
+//     layout is used). Each member gets a spot in a half-disc in front of
+//     the POI sized for 2.5 people/m², so a busy bar draws a crowd. They
+//     stay 30–120 s (intermission: up to 150 s), then go back to within
+//     ~0.3 m of where they stood;
+//   - people arrive through a random open exit and walk to a spot with
+//     room (local density < 2/m²), and idle groups leave through the
+//     nearest exit, each at 1/2400 of the crowd per second (about 6 people
+//     a minute each way for 250);
+//   - intermission: the music stops and 55 % of idle groups set off for the
+//     POIs within 25 s, so the first ones come back through those still
+//     arriving (bidirectional flow) and the POIs crowd up.
+//
+// Motion is smooth: desired speed rises at most 1 m/s² (voluntary slowing
+// 3 m/s²; braking for the time gap is immediate), the walking heading turns
+// at most 2 rad/s (5 rad/s when nearly stopped, turning on the spot), and
+// the body turns to face where it is going (2 rad/s) or, standing, toward
+// the stage or the POI it is at (≤ 1 rad/s, with slow fidgeting of a few
+// degrees). The phone's frame is the body's facing.
+//
+// # Validation
+//
+// Mean walking speed against density in a 12 × 2.5 m periodic corridor,
+// compared with Weidmann's fundamental diagram (1993; v0 = 1.34 m/s,
+// γ = 1.913 m⁻², ρmax = 5.4 /m²), 3 seeds × 20 s each
 // (PULSE_WEIDMANN=1 go test ./server/internal/crowdsim -run WeidmannSweep -v):
 //
 //	ρ /m²    0.5   1.0   1.5   2.0   2.5   3.0   3.5   4.0   4.5   5.0
-//	sim m/s  1.15  1.08  0.90  0.59  0.31  0.28  0.19  0.08  0.02  0.00
+//	sim m/s  1.23  1.10  0.90  0.60  0.32  0.27  0.19  0.08  0.02  0.00
 //	Weidmann 1.30  1.06  0.81  0.61  0.45  0.33  0.23  0.16  0.09  0.04
 //
-// Within ±0.10 m/s from 1 to 5 /m² except 2.5 /m² (−0.14). Free walking
-// at 0.5 /m² is 0.15 m/s slow, because desired speeds average 1.3 m/s (not
-// Weidmann's 1.34) and the wander force costs a little. Jam density is
-// reached slightly early (≤ 0.02 m/s at 4.5 /m², Weidmann 0.09). TestWeidmann
-// checks 0.5, 2 and 5 /m² on every run. Only this one benchmark was checked:
-// unidirectional flow in a corridor. Bottlenecks, counterflow and
-// evacuation times were not. Without the time gap, the Helbing 2000 forces
-// alone (B = 0.08 m) let a corridor flow at ~1.3 m/s up to 4 /m².
+// Within ±0.10 m/s from 0.5 to 5 /m² except 2.5 /m² (−0.13). Free walking
+// is a little slow because desired speeds average 1.3 m/s (not 1.34) and
+// the wander force costs a little; jam density is reached slightly early.
+// TestWeidmann checks 0.5, 2 and 5 /m² on every run. Without the time gap,
+// the Helbing 2000 forces alone (B = 0.08 m) let a corridor flow at
+// ~1.3 m/s up to 4 /m².
+//
+// Bottleneck (TestBottleneck; sweep: PULSE_BOTTLE=1 go test
+// ./server/internal/crowdsim -run BottleneckSweep -v): 120 people waiting
+// in a 10 × 8 m room leave through a door in one wall. Specific flow
+// through a 1 m door: 1.6 persons/(m·s) (1.63 over 3 seeds; 0.8 m: 1.32,
+// 1.2 m: 2.01). Kretz, Grünebohm & Schreckenberg (2006) and Seyfried et
+// al. (2009) measured ~1.6–1.9 /(m·s) for ~1 m. The evacuation time gap
+// was chosen for this (0.6 s gives 1.2, 0.2 s gives 2.0). The specific
+// flow rises with door width here, while the experiments find it roughly
+// constant.
+//
+// Counterflow (TestCounterflow): a 12 × 4 m periodic corridor, half the
+// people walking each way. At 1 /m², lanes form (lane order parameter
+// 0.06–0.15 → 0.70–0.82 over two seeds; Rex & Löwen 2007) and people walk
+// at 67–87 % of the one-way speed with the same steering. At 2 /m² lanes
+// form only partly (→ 0.38–0.51) and speed drops to 49–58 %; whether lanes
+// or a gridlock win there depends on the seed, so it is only logged.
+// Experiments (Zhang et al. 2012) report a smaller loss at 2 /m², so this
+// is a sanity check, not a calibration.
+//
+// Behaviour checks: a standing crowd of 250 has mean speed < 0.001 m/s and
+// moves < 1 mm per person in 20 s (TestStandingNoJitter); walking group
+// members stay ~0.7 m from their centroid on average (TestGroups); nobody
+// turns or speeds up faster than the limits (TestSmoothMotion); an
+// intermission brings 60–75 % of a 150-person crowd to the POIs (local
+// density up to ~2.5–3 /m²) and back within 200 s, never dangerous
+// (TestIntermission).
+//
+// Limits. Groups never split (one member can't pop to the toilet alone);
+// POIs have no service model (people stand around them, they don't queue
+// in a line); standing people never shuffle their feet, so a crowd stays
+// exactly where it settled; the side preference is fixed to the right;
+// sway and dance exist only in the phone signal; bodies are discs, so
+// nobody turns sideways to squeeze through. Only the three benchmarks
+// above were checked, not evacuation times or panic behaviour.
 //
 // Vadere (TU Munich), JuPedSim (Forschungszentrum Jülich) and NetLogo are
 // reference tools for this model family. Pulse implements the Social Force
@@ -58,16 +151,19 @@
 // signals and live steering from the dashboard, which those tools don't
 // provide.
 //
-// A director sets everyone's goals (calm, stage, surge, attract, disperse)
-// and can shove, spawn and open or close exits. Nothing about how a push
-// travels is scripted: a shove is a short force on the people near a point
-// and everything after that is contact forces. In a packed crowd (bodies
-// touching, k = 1.2·10⁵ kg/s²) a push travels fast: in TestShovePropagates
-// a sideways shove peaks ~0.13 s later within 1.5 m and ~0.7 s later at
-// 3–5 m; pushed forward, a packed column responds as one within ~0.3 s.
-// Neighbouring phones (≤ 1.1 m apart) therefore mostly see lags under
-// Pulse's 120 ms wave floor, and the wave detector rarely fires here: in
-// this model crushes are caught by density, not travelling waves.
+// # Director, waves and ground truth
+//
+// A director sets the behaviour (calm, stage, surge, attract, disperse,
+// dance, intermission) and can shove, spawn and open or close exits.
+// Nothing about how a push travels is scripted: a shove is a short force
+// on the people near a point and everything after that is contact forces.
+// In a packed crowd (bodies touching, k = 1.2·10⁵ kg/s²) a push travels
+// fast: in TestShovePropagates a sideways shove peaks ~0.14 s later within
+// 1.5 m and ~0.65 s later at 3–5 m; pushed forward, a packed column
+// responds as one within ~0.3 s. Neighbouring phones (≤ 1.1 m apart)
+// therefore mostly see lags under Pulse's 120 ms wave floor, and the wave
+// detector rarely fires here: in this model crushes are caught by density,
+// not travelling waves.
 //
 // Ground truth (truth.go) is per-person pressure (Σ|k·g| ÷ 2πr) and local
 // density (people within 1 m ÷ π m²); the crowd is dangerous when ≥ 3
@@ -75,8 +171,9 @@
 //
 // A fraction of the people (participation) carry a phone flat on the
 // chest. Each phone reports its body's acceleration (dv/dt, from the
-// forces) in the body frame, plus gait, breathing and noise, as 100 ms
-// means: exactly what the phone page sends. See phone.go.
+// forces) in the body frame, plus gait, weight shifts, music, breathing
+// and noise, as 100 ms means: exactly what the phone page sends; and its
+// position every 100 ms. See phone.go.
 package crowdsim
 
 import (
@@ -84,7 +181,6 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
-	"sort"
 
 	"github.com/Drivera0/crowd-crush/server/internal/protocol"
 )
@@ -136,6 +232,12 @@ const (
 	ActExit     = "exit"
 	ActDisperse = "disperse"
 	ActSpawn    = "spawn"
+	// ActDance: everyone standing sways and bounces to a shared beat, each
+	// with their own delay and amplitude (the false-positive test).
+	ActDance = "dance"
+	// ActIntermission: the music stops and many groups head for the bar,
+	// toilets and merch at once, then come back.
+	ActIntermission = "intermission"
 )
 
 // Limits.
@@ -161,16 +263,27 @@ type Agent struct {
 	Density  float64 // people/m² within 1 m (incl. self)
 
 	gx, gy       float64 // goal
-	homeX, homeY float64 // calm: the spot this person mills around
-	nextHome     float64 // calm: when to pick a new spot
-	follow       bool    // attract: heading for the point
+	homeX, homeY float64 // where this person stands during the show (returns here after a trip)
+	spotX, spotY float64 // where this person is settling now
+	done         bool    // reached its spot (or gave up)
+	grp          *group
+	slot         int     // place in the group's formation
+	atPOI        int     // POI this person has a spot at, −1 = none
 	wx, wy       float64 // wander (Ornstein–Uhlenbeck, unit variance)
 	vbar         float64 // smoothed speed toward the goal (impatience)
+	sp, hd       float64 // smoothed desired speed (m/s) and heading (rad)
+	stand        bool    // standing still this tick (dead-band applies)
+	face         float64 // body facing (rad, venue frame: 0 = +x, y down); the phone's frame
+	prevFace     float64
+	yaw          float64 // slow fidgeting around the facing target
+	cdir         float64 // corridor: +1 walks toward +x, −1 toward −x
+	style        style   // how this person moves to music
 	dvx, dvy     float64 // desired velocity this tick
 	ex, ey       float64 // desired direction (0 when standing)
 	pushX, pushY float64 // shove force (m/s²) and how long it lasts
 	pushT        float64
 	fx, fy, comp float64 // per-step accumulators
+	sx, sy       float64 // social (non-contact) force this step
 	phone        *phone
 	out          bool // left through an exit
 }
@@ -197,19 +310,30 @@ type World struct {
 	T             float64 // s since start
 	StartMs       int64
 	Participation float64
-	Action        string // last behaviour action (calm, stage, surge, attract, disperse)
+	Action        string // last behaviour action (calm, stage, surge, attract, disperse, dance, intermission)
 	strength      float64
 	attX, attY    float64
+	// Churn: people arrive and leave through the exits at a low rate
+	// during the routine. Trips: groups go to the POIs and back. Both on
+	// for a concert; tests switch them off for a still crowd.
+	Churn, Trips bool
+	BeatHz       float64 // the music's beat (Hz)
 
-	agents   []*Agent
-	nextID   int
-	rng      *rand.Rand
-	solid    []Seg
-	grid     grid
-	truth    Truth
-	events   []Event
-	ticks    int64
-	periodic float64 // corridor length if x wraps around (calibration), else 0
+	agents    []*Agent
+	groups    []*group
+	nextGroup int
+	pois      []POI
+	packR     float64
+	nextID    int
+	rng       *rand.Rand
+	solid     []Seg
+	grid      grid
+	truth     Truth
+	events    []Event
+	ticks     int64
+	periodic  float64 // corridor length if x wraps around (calibration), else 0
+	counter   bool    // counterflow corridor: walkers steer as in the venue
+	quiet     bool    // phones off (settling before t = 0)
 }
 
 // New creates a world in the given scenario.
@@ -230,10 +354,13 @@ func New(c Config) (*World, error) {
 		return nil, errors.New("participation must be in (0, 1]")
 	}
 	w := &World{G: LayoutGeometry(c.W, c.H, c.Layout), StartMs: c.StartMs, Participation: c.Participation,
-		Action: ActCalm, rng: rand.New(rand.NewSource(c.Seed))}
+		Action: ActCalm, rng: rand.New(rand.NewSource(c.Seed)), Churn: true, Trips: true}
+	w.BeatHz = 1.8 + 0.4*w.rng.Float64() // 108–132 BPM
 	w.solid = w.G.solid()
 	w.truth.Init()
+	w.defaultPOIs()
 	w.placeConcert(c.People)
+	w.settle()
 	w.measure()
 	return w, nil
 }
@@ -258,9 +385,11 @@ func (w *World) newAgent(x, y float64) *Agent {
 	a := &Agent{ID: w.nextID, X: x, Y: y, R: 0.20 + 0.06*r.Float64(), M: 55 + 40*r.Float64(),
 		V0: math.Max(0.6, math.Min(2.0, 1.3+0.25*r.NormFloat64()))}
 	w.nextID++
-	a.homeX, a.homeY = x, y
-	a.nextHome = w.T + 10 + 30*r.Float64()
+	a.homeX, a.homeY, a.spotX, a.spotY, a.done, a.atPOI, a.cdir = x, y, x, y, true, -1, 1
+	a.hd = -math.Pi/2 + 0.6*(r.Float64()-0.5) // roughly toward the stage
+	a.face, a.prevFace = a.hd, a.hd
 	a.wx, a.wy = r.NormFloat64(), r.NormFloat64()
+	a.style = newStyle(r)
 	if r.Float64() < w.Participation {
 		a.phone = newPhone(w, a)
 	}
@@ -311,12 +440,32 @@ func (w *World) placeConcert(n int) {
 		a := w.newAgent(x, y)
 		a.R = r
 		w.agents = append(w.agents, a)
+		ms := []*Agent{a}
+		// The rest of the group stands next to them.
+		size := min(w.groupSize(), n-len(w.agents)+1)
+		for k := 0; len(ms) < size && k < 30; k++ {
+			ang := 2 * math.Pi * w.rng.Float64()
+			d := 0.5 + 0.25*w.rng.Float64()
+			px, py := x+d*math.Cos(ang), y+d*math.Sin(ang)
+			r := 0.20 + 0.06*w.rng.Float64()
+			if !w.free(px, py, r) {
+				continue
+			}
+			b := w.newAgent(px, py)
+			b.R = r
+			w.agents = append(w.agents, b)
+			ms = append(ms, b)
+		}
+		w.addGroup(ms)
 	}
 }
 
-// Spawn adds up to n people around (x, y); it returns how many fitted.
+// Spawn adds up to n people around (x, y), in groups like everyone else;
+// it returns how many fitted.
 func (w *World) Spawn(x, y float64, n int) int {
 	added := 0
+	var ms []*Agent
+	size := w.groupSize()
 	for tries := 0; added < n && tries < n*300 && len(w.agents) < MaxPeople; tries++ {
 		// Grow the disc as it fills.
 		rad := 0.4 + 0.35*math.Sqrt(float64(added+1)) + 0.002*float64(tries)
@@ -331,6 +480,13 @@ func (w *World) Spawn(x, y float64, n int) int {
 		a.R = r
 		w.agents = append(w.agents, a)
 		added++
+		if ms = append(ms, a); len(ms) >= size {
+			w.addGroup(ms)
+			ms, size = nil, w.groupSize()
+		}
+	}
+	if len(ms) > 0 {
+		w.addGroup(ms)
 	}
 	return added
 }
@@ -372,31 +528,53 @@ func (w *World) Apply(act Action) error {
 		return *act.Strength, nil
 	}
 	switch act.Type {
-	case ActCalm:
-		w.Action = ActCalm
-		for _, a := range w.agents {
-			a.follow = false
-			a.homeX, a.homeY = a.X, a.Y
-			a.nextHome = w.T + 10 + 30*w.rng.Float64()
+	case ActCalm, ActDance, ActIntermission:
+		// Back to the concert routine: whoever was pressing, gathering or
+		// leaving stops where they are; trips in progress carry on.
+		prev := w.Action
+		w.Action = act.Type
+		w.frame()
+		for _, g := range w.groups {
+			switch {
+			case prev == ActStage || prev == ActSurge || g.purpose == pFollow || g.purpose == pEvac:
+				w.toIdle(g)
+			case g.purpose == pIdle:
+				g.startAt = 0
+			}
+			if act.Type == ActIntermission && g.purpose == pIdle && w.rng.Float64() < interShare {
+				g.startAt = w.T + Dt + interSpread*w.rng.Float64()
+			}
 		}
-	case ActStage:
-		w.Action, w.strength = ActStage, 0
-		w.unfollow()
-	case ActSurge:
-		s, err := strength(0.7)
-		if err != nil {
-			return err
+	case ActStage, ActSurge:
+		s := 0.0
+		if act.Type == ActSurge {
+			var err error
+			if s, err = strength(0.7); err != nil {
+				return err
+			}
 		}
-		w.Action, w.strength = ActSurge, s
-		w.unfollow()
-		for _, a := range w.agents { // nobody is held up yet
-			a.vbar = a.V0 * (1 + s)
+		w.Action, w.strength = act.Type, s
+		w.frame()
+		for _, g := range w.groups { // everyone drops what they were doing
+			w.toIdle(g)
+		}
+		if act.Type == ActSurge {
+			for _, a := range w.agents { // nobody is held up yet
+				a.vbar = a.V0 * (1 + s)
+			}
 		}
 	case ActAttract:
 		if err := needXY(); err != nil {
 			return err
 		}
+		if w.Action == ActStage || w.Action == ActSurge || w.Action == ActDisperse {
+			w.frame()
+			for _, g := range w.groups {
+				w.toIdle(g)
+			}
+		}
 		w.Action, w.attX, w.attY = ActAttract, *act.X, *act.Y
+		w.frame()
 		w.pickFollowers()
 	case ActShove:
 		if err := needXY(); err != nil {
@@ -429,7 +607,12 @@ func (w *World) Apply(act Action) error {
 			return errors.New("every exit is closed: open one first")
 		}
 		w.Action = ActDisperse
-		w.unfollow()
+		w.frame()
+		for _, g := range w.groups {
+			w.toIdle(g)
+			g.exit = w.nearestExit(g.cx, g.cy)
+			w.setOff(g, pEvac, 0, 0)
+		}
 	case ActSpawn:
 		if err := needXY(); err != nil {
 			return err
@@ -446,39 +629,9 @@ func (w *World) Apply(act Action) error {
 	case "":
 		return errors.New("missing action type")
 	default:
-		return fmt.Errorf("unknown action %q (want calm, stage, surge, attract, shove, exit, disperse or spawn)", act.Type)
+		return fmt.Errorf("unknown action %q (want calm, stage, surge, attract, shove, exit, disperse, spawn, dance or intermission)", act.Type)
 	}
 	return nil
-}
-
-func (w *World) unfollow() {
-	for _, a := range w.agents {
-		a.follow = false
-	}
-}
-
-// pickFollowers sends about 40 % of the crowd to the attraction point,
-// mostly those nearer to it (distance plus a random 0–6 m).
-func (w *World) pickFollowers() {
-	type cand struct {
-		a *Agent
-		k float64
-	}
-	cs := make([]cand, len(w.agents))
-	for i, a := range w.agents {
-		a.follow = false
-		cs[i] = cand{a, math.Hypot(a.X-w.attX, a.Y-w.attY) + 6*w.rng.Float64()}
-	}
-	sort.Slice(cs, func(i, j int) bool { return cs[i].k < cs[j].k })
-	n := int(math.Round(attractShare * float64(len(cs))))
-	for i := 0; i < n; i++ {
-		cs[i].a.follow = true
-	}
-	for _, a := range w.agents { // the rest stay where they are
-		if !a.follow {
-			a.homeX, a.homeY = a.X, a.Y
-		}
-	}
 }
 
 // Shove pushes the people within ShoveRadius of (x, y) toward (dx, dy):
@@ -514,109 +667,6 @@ func (w *World) nearestExit(x, y float64) *Exit {
 	return best
 }
 
-// ---- behaviour ----
-
-// desire sets each person's goal and desired velocity for this tick.
-func (w *World) desire() {
-	g := w.G
-	cx := (g.BarrierX0 + g.BarrierX1) / 2
-	nFollow := 0
-	for _, a := range w.agents {
-		if a.follow {
-			nFollow++
-		}
-	}
-	// Followers stop pressing once inside the disc they would fill at ~3.5/m².
-	packR := math.Sqrt(float64(nFollow) / (3.5 * math.Pi))
-	w.grid.build(w.agents)
-	for i, a := range w.agents {
-		var speed float64
-		mode := w.Action
-		if mode == ActAttract && !a.follow {
-			mode = ActCalm
-		}
-		switch mode {
-		case ActCalm:
-			if w.T >= a.nextHome {
-				// Mill about: a new spot within ~1.5 m every 10–40 s.
-				for i := 0; i < 10; i++ {
-					hx := a.homeX + 1.5*(2*w.rng.Float64()-1)
-					hy := a.homeY + 1.5*(2*w.rng.Float64()-1)
-					if hx > 0.5 && hy > g.BarrierY+0.5 && hx < g.W-0.5 && hy < g.H-0.5 {
-						a.homeX, a.homeY = hx, hy
-						break
-					}
-				}
-				a.nextHome = w.T + 10 + 30*w.rng.Float64()
-			}
-			a.gx, a.gy = a.homeX, a.homeY
-			d := math.Hypot(a.gx-a.X, a.gy-a.Y)
-			speed = 0.5 * a.V0 * math.Min(1, math.Max(0, d-0.15)/1.0)
-		case ActStage, ActSurge:
-			// Head for the barrier just ahead, drifting toward the middle.
-			pull := 0.3
-			if mode == ActSurge {
-				pull = 0.3 + 0.3*w.strength
-			}
-			a.gx = math.Max(g.BarrierX0+0.3, math.Min(g.BarrierX1-0.3, a.X+(cx-a.X)*pull))
-			a.gy = g.BarrierY
-			speed = a.V0
-			if mode == ActSurge {
-				speed = w.surgeSpeed(a)
-			}
-		case ActAttract:
-			// Head for the point; stop pushing once it is crowded around you
-			// (about 3.5 people/m² within 1 m) near the group.
-			a.gx, a.gy = w.attX, w.attY
-			d := math.Hypot(a.gx-a.X, a.gy-a.Y)
-			speed = 0.8 * a.V0 * math.Max(0, math.Min(1, (d-0.3)/1.0))
-			if a.Density >= attractPack && d < packR+1.5 {
-				speed = 0
-			}
-		case actCorridor:
-			a.gx, a.gy = a.X+10, a.Y
-			speed = a.V0
-		case ActDisperse:
-			e := w.nearestExit(a.X, a.Y)
-			if e == nil {
-				a.gx, a.gy = a.X, a.Y
-				break
-			}
-			mx, my := e.mid()
-			// Aim for the gap from the inside, then straight out.
-			if (mx-a.X)*e.nx+(my-a.Y)*e.ny > 0.6 {
-				a.gx, a.gy = mx-0.3*e.nx, my-0.3*e.ny
-			} else {
-				a.gx, a.gy = mx+2*e.nx, my+2*e.ny
-			}
-			speed = a.V0
-		}
-		ex, ey := a.gx-a.X, a.gy-a.Y
-		if l := math.Hypot(ex, ey); l > 1e-6 {
-			ex, ey = ex/l, ey/l
-		} else {
-			ex, ey = 0, 0
-		}
-		// Walking (not pressing): no faster than the gap ahead allows.
-		if mode != ActStage && mode != ActSurge && speed > 0 {
-			speed, ex, ey = w.steer(i, speed, ex, ey)
-		}
-		a.dvx, a.dvy = speed*ex, speed*ey
-		a.ex, a.ey = 0, 0
-		if speed > 0.05 {
-			a.ex, a.ey = ex, ey
-		}
-		// Impatience bookkeeping: how fast this person actually gets on.
-		along := a.VX*ex + a.VY*ey
-		a.vbar += (Dt / 2.0) * (along - a.vbar)
-		// Wander: an Ornstein–Uhlenbeck force, so nobody freezes into a lattice.
-		const tw = 1.5
-		sq := math.Sqrt(2 * Dt / tw)
-		a.wx += -a.wx*Dt/tw + sq*w.rng.NormFloat64()
-		a.wy += -a.wy*Dt/tw + sq*w.rng.NormFloat64()
-	}
-}
-
 // surgeSpeed: desired speed × (1 + strength), plus mild impatience
 // (Helbing 2000): v0 drifts toward vmax as the person is held up.
 func (w *World) surgeSpeed(a *Agent) float64 {
@@ -627,20 +677,14 @@ func (w *World) surgeSpeed(a *Agent) float64 {
 	return (1-imp)*base + imp*vmax
 }
 
-func (w *World) wanderSigma() float64 {
-	switch w.Action {
-	case ActCalm, ActAttract:
-		return 0.25
-	}
-	return 0.15
-}
+// wanderSigma is the wander force (m/s²) on people walking or pressing.
+const wanderSigma = 0.15
 
 // ---- physics ----
 
 // Step advances the world by one 50 Hz tick.
 func (w *World) Step() {
 	w.desire()
-	sig := w.wanderSigma()
 	type v2 struct{ x, y float64 }
 	v0 := make([]v2, len(w.agents))
 	for i, a := range w.agents {
@@ -648,7 +692,7 @@ func (w *World) Step() {
 	}
 	h := Dt / SubSteps
 	for s := 0; s < SubSteps; s++ {
-		w.forces(h, sig)
+		w.forces(h)
 		for _, a := range w.agents {
 			ax, ay := a.fx/a.M, a.fy/a.M
 			if m := math.Hypot(ax, ay); m > MaxAccel {
@@ -677,19 +721,53 @@ func (w *World) Step() {
 	w.ticks++
 	w.leave()
 	w.measure()
-	w.phones()
+	if !w.quiet {
+		w.phones()
+	}
+}
+
+// settleSec of physics run before t = 0, phones off, so the random
+// placement relaxes (nobody starts overlapping a neighbour's personal
+// space) before anyone reports anything.
+const settleSec = 2.0
+
+func (w *World) settle() {
+	churn := w.Churn
+	w.quiet, w.Churn = true, false
+	for w.T < settleSec-1e-9 {
+		w.Step()
+	}
+	w.quiet, w.Churn = false, churn
+	w.T, w.ticks, w.events = 0, 0, nil
+	w.truth.Init()
+	for _, g := range w.groups {
+		g.until -= settleSec
+	}
+	w.measure()
 }
 
 // forces fills fx, fy and comp for every agent.
-func (w *World) forces(h, sig float64) {
+//
+// Someone standing still is planted: the driving term damps their velocity
+// to zero (tauStand), there is no wander, and the social (non-contact)
+// repulsion only moves them once its net exceeds standDead, like static
+// friction. Without this a standing crowd jiggles forever, every body
+// nudged by the exponential tails of a dozen neighbours. Body contact and
+// shoves always act in full, so a push still travels and pressure still
+// builds.
+func (w *World) forces(h float64) {
 	for _, a := range w.agents {
-		a.fx = a.M*(a.dvx-a.VX)/Tau + a.M*sig*a.wx
-		a.fy = a.M*(a.dvy-a.VY)/Tau + a.M*sig*a.wy
+		if a.stand {
+			a.fx, a.fy = -a.M*a.VX/tauStand, -a.M*a.VY/tauStand
+		} else {
+			a.fx = a.M*(a.dvx-a.VX)/Tau + a.M*wanderSigma*a.wx
+			a.fy = a.M*(a.dvy-a.VY)/Tau + a.M*wanderSigma*a.wy
+		}
 		if a.pushT > 0 {
 			a.fx += a.M * a.pushX
 			a.fy += a.M * a.pushY
 		}
-		a.comp = 0
+		a.comp, a.sx, a.sy = 0, 0, 0
 	}
 	pair := func(a, b *Agent) {
 		dx, dy := a.X-b.X, a.Y-b.Y
@@ -708,11 +786,31 @@ func (w *World) forces(h, sig float64) {
 		nx, ny := dx/d, dy/d
 		ov := rij - d
 		f := A * math.Exp(math.Min(ov, 0.4)/B)
+		// Someone standing yields in full to a person on the move (they
+		// step aside to let them past); only standers' pushes on each
+		// other go through the dead-band.
+		if a.stand && !b.stand {
+			a.fx += f * nx
+			a.fy += f * ny
+		} else {
+			a.sx += f * nx
+			a.sy += f * ny
+		}
+		if b.stand && !a.stand {
+			b.fx -= f * nx
+			b.fy -= f * ny
+		} else {
+			b.sx -= f * nx
+			b.sy -= f * ny
+		}
 		if ov > 0 {
 			c := K * ov
-			f += c
 			a.comp += c
 			b.comp += c
+			a.fx += c * nx
+			a.fy += c * ny
+			b.fx -= c * nx
+			b.fy -= c * ny
 			// Sliding friction κ·g·Δv_t·t, capped so one explicit step can
 			// at most halve the relative tangential velocity (stability).
 			tx, ty := -ny, nx
@@ -724,10 +822,6 @@ func (w *World) forces(h, sig float64) {
 			b.fx -= kap * dvt * tx
 			b.fy -= kap * dvt * ty
 		}
-		a.fx += f * nx
-		a.fy += f * ny
-		b.fx -= f * nx
-		b.fy -= f * ny
 	}
 	if w.periodic > 0 {
 		for i, a := range w.agents {
@@ -754,9 +848,12 @@ func (w *World) forces(h, sig float64) {
 			nx, ny := dx/d, dy/d
 			ov := a.R - d
 			f := A * math.Exp(math.Min(ov, 0.4)/B)
+			a.sx += f * nx
+			a.sy += f * ny
 			if ov > 0 {
 				c := K * ov
-				f += c
+				a.fx += c * nx
+				a.fy += c * ny
 				a.comp += c
 				tx, ty := -ny, nx
 				vt := a.VX*tx + a.VY*ty
@@ -764,25 +861,45 @@ func (w *World) forces(h, sig float64) {
 				a.fx -= kap * vt * tx
 				a.fy -= kap * vt * ty
 			}
-			a.fx += f * nx
-			a.fy += f * ny
 		}
+		sx, sy := a.sx, a.sy
+		if a.stand {
+			m := math.Hypot(sx, sy)
+			k := 0.0
+			if m > standDead {
+				k = (m - standDead) / m
+			}
+			sx, sy = sx*k, sy*k
+		}
+		a.fx += sx
+		a.fy += sy
 	}
 }
 
-// leave removes people who walked out through an exit.
+// leave removes people who walked out through an exit: past the venue's
+// edge, or (leaving through an inner door) through the door's gap.
 func (w *World) leave() {
 	if w.periodic > 0 {
 		return
 	}
 	g := w.G
 	keep := w.agents[:0]
+	var gone []*Agent
 	for _, a := range w.agents {
-		if a.X < -0.3 || a.Y < -0.3 || a.X > g.W+0.3 || a.Y > g.H+0.3 {
+		out := a.X < -0.3 || a.Y < -0.3 || a.X > g.W+0.3 || a.Y > g.H+0.3
+		if gr := a.grp; !out && gr != nil && gr.exit != nil && (gr.purpose == pLeave || gr.purpose == pEvac) {
+			e := gr.exit
+			mx, my := e.mid()
+			along := (a.X-mx)*e.nx + (a.Y-my)*e.ny
+			side := math.Abs((a.X-mx)*e.ny - (a.Y-my)*e.nx)
+			out = along > 0.4 && side < math.Hypot(e.X1-e.X0, e.Y1-e.Y0)/2+0.3
+		}
+		if out {
 			a.out = true
 			if a.phone != nil {
 				w.events = append(w.events, Event{Kind: EvGone, ID: a.phone.id})
 			}
+			gone = append(gone, a)
 			continue
 		}
 		keep = append(keep, a)
@@ -791,6 +908,9 @@ func (w *World) leave() {
 		w.agents[i] = nil
 	}
 	w.agents = keep
+	for _, a := range gone {
+		w.dropMember(a)
+	}
 }
 
 // ---- spatial hash ----
@@ -910,13 +1030,19 @@ func (g *grid) near(as []*Agent, i int, r float64, fn func(b *Agent)) {
 // TimeGap is a var only so the calibration sweep can try values.
 var TimeGap = 0.6 // s
 
+// EvacTimeGap is the time gap of people leaving (disperse, and the
+// bottleneck test): queueing for a door, people close up (calibrated
+// against bottleneck flows; see the package doc).
+var EvacTimeGap = 0.3 // s
+
 const lookAhead = 1.5 // m, centre to centre
 
 // gapAhead is the free distance (m) along (ex, ey) from agent i to the
-// nearest person in its path, lookAhead if nobody is.
-func (w *World) gapAhead(i int, ex, ey float64) float64 {
+// nearest person in its path, lookAhead if nobody is, and whether that
+// person is coming the other way.
+func (w *World) gapAhead(i int, ex, ey float64) (float64, bool) {
 	a := w.agents[i]
-	best := lookAhead
+	best, onc := lookAhead, false
 	check := func(b *Agent) {
 		dx, dy := b.X-a.X, b.Y-a.Y
 		if w.periodic > 0 {
@@ -931,9 +1057,16 @@ func (w *World) gapAhead(i int, ex, ey float64) float64 {
 		if perp >= rij {
 			return
 		}
-		// Distance along the path until the two bodies touch.
+		// Distance along the path until the two bodies touch; someone
+		// coming the other way closes it (the gap they leave after TimeGap).
 		g := along - math.Sqrt(rij*rij-perp*perp)
-		best = math.Min(best, math.Max(0, g))
+		bv := b.VX*ex + b.VY*ey
+		if bv < 0 {
+			g += bv * TimeGap
+		}
+		if g = math.Max(0, g); g < best {
+			best, onc = g, bv < -0.1
+		}
 	}
 	if w.periodic > 0 {
 		for j, b := range w.agents {
@@ -941,10 +1074,10 @@ func (w *World) gapAhead(i int, ex, ey float64) float64 {
 				check(b)
 			}
 		}
-		return best
+		return best, onc
 	}
 	w.grid.near(w.agents, i, lookAhead, check)
-	return best
+	return best, onc
 }
 
 // steerAngles are the headings (rad) a walker considers around the
@@ -954,19 +1087,29 @@ var steerAngles = []float64{0, 0.175, -0.175, 0.35, -0.35}
 // steer picks the heading that makes the most progress toward the goal
 // given the time gap (Moussaïd, Helbing & Theraulaz 2011: walk where the
 // way toward the destination is freest), so a fast walker steps around a
-// slow one instead of queueing behind it. Returns the capped speed and
-// the chosen direction.
-func (w *World) steer(i int, speed, ex, ey float64) (float64, float64, float64) {
+// slow one instead of queueing behind it. Someone coming the other way is
+// passed on the right (positive angles; y points down): the side
+// preference Moussaïd et al. (2009) measured, which is what makes lanes
+// form in counterflow. Returns the capped speed and the chosen direction.
+func (w *World) steer(i int, speed, ex, ey float64, angles []float64, tg float64) (float64, float64, float64) {
 	bestP, bestV, bx, by := -1.0, 0.0, ex, ey
-	for _, th := range steerAngles {
+	keepRight := false
+	for _, th := range angles {
+		if keepRight && th < 0 {
+			continue
+		}
 		c, s := math.Cos(th), math.Sin(th)
 		dx, dy := ex*c-ey*s, ex*s+ey*c
-		v := math.Min(speed, w.gapAhead(i, dx, dy)/TimeGap)
+		gap, onc := w.gapAhead(i, dx, dy)
+		v := math.Min(speed, gap/tg)
 		if p := v * c; p > bestP+1e-9 {
 			bestP, bestV, bx, by = p, v, dx, dy
 		}
-		if v >= speed && th == 0 {
-			break // the way ahead is free
+		if th == 0 {
+			if v >= speed {
+				break // the way ahead is free
+			}
+			keepRight = onc
 		}
 	}
 	return bestV, bx, by

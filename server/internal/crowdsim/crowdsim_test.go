@@ -36,7 +36,9 @@ func maxOverlap(w *World) float64 {
 }
 
 func TestPhysicsSanity(t *testing.T) {
+	t.Parallel()
 	w := newWorld(t, 250, 1)
+	w.Churn = false // nobody walks through an exit
 	if len(w.Agents()) != 250 {
 		t.Fatalf("placed %d of 250", len(w.Agents()))
 	}
@@ -66,6 +68,7 @@ func TestPhysicsSanity(t *testing.T) {
 }
 
 func TestWallsHoldUnderSurge(t *testing.T) {
+	t.Parallel()
 	w := newWorld(t, 400, 2)
 	w.Apply(Action{Type: ActSurge, Strength: f64(1)})
 	run(w, 20)
@@ -118,6 +121,7 @@ func TestDisperse(t *testing.T) {
 }
 
 func TestAttractFormsGroup(t *testing.T) {
+	t.Parallel()
 	w := newWorld(t, 200, 5)
 	w.Apply(Action{Type: ActAttract, X: f64(12), Y: f64(11)})
 	run(w, 40)
@@ -140,6 +144,7 @@ func TestAttractFormsGroup(t *testing.T) {
 // TestSurgeVsCalm: a surge packs the front past 6/m² with crushing
 // pressure; calm stays loose.
 func TestSurgeVsCalm(t *testing.T) {
+	t.Parallel()
 	calm := newWorld(t, 250, 6)
 	run(calm, 30)
 	tc := calm.Truth()
@@ -161,7 +166,7 @@ func TestSurgeVsCalm(t *testing.T) {
 	// Pressure is at the barrier, where the crowd is pushed against it.
 	var front, back []float64
 	for _, a := range surge.Agents() {
-		if a.Y < surge.G.BarrierY+1.5 {
+		if a.Y < surge.G.BarrierY+1.5 && a.X > surge.G.BarrierX0 && a.X < surge.G.BarrierX1 {
 			front = append(front, a.Pressure)
 		} else if a.Y > surge.G.BarrierY+4 {
 			back = append(back, a.Pressure)
@@ -184,6 +189,7 @@ func median(v []float64) float64 {
 // TestShovePropagates: a sideways shove in a packed crowd reaches people
 // further away later; nothing scripts the delay.
 func TestShovePropagates(t *testing.T) {
+	t.Parallel()
 	for _, seed := range []int64{3, 7} {
 		w := newWorld(t, 250, seed)
 		w.Apply(Action{Type: ActStage})
@@ -237,6 +243,7 @@ func TestShovePropagates(t *testing.T) {
 
 func TestPhoneMessages(t *testing.T) {
 	w := newWorld(t, 100, 8)
+	w.Churn = false
 	phones := w.Phones()
 	if phones < 40 || phones > 80 {
 		t.Fatalf("%d phones for 100 people at participation 0.6", phones)
@@ -295,17 +302,28 @@ func TestPhoneMessages(t *testing.T) {
 		}
 		break
 	}
-	moved := 0
+	// Positions: on the 100 ms grid, every 100 ms while walking (10 Hz).
+	moved, streak := 0, 0
 	for id, ts := range posAt {
 		moved++
-		for i := 1; i < len(ts); i++ {
-			if ts[i]-ts[i-1] < 0.5-1e-9 {
-				t.Fatalf("%s: positions %.2f s apart (max 2 Hz)", id, ts[i]-ts[i-1])
+		run := 0
+		for i, v := range ts {
+			if k := v / 0.1; math.Abs(k-math.Round(k)) > 1e-6 {
+				t.Fatalf("%s: position at %.3f s, off the 100 ms grid", id, v)
+			}
+			if i > 0 && ts[i]-ts[i-1] < 0.1-1e-9 {
+				t.Fatalf("%s: positions %.2f s apart (max 10 Hz)", id, ts[i]-ts[i-1])
+			}
+			if i > 0 && ts[i]-ts[i-1] < 0.1+1e-6 {
+				run++
+				streak = max(streak, run)
+			} else {
+				run = 0
 			}
 		}
 	}
-	if moved == 0 {
-		t.Error("no phone sent a position while people walked to the attraction")
+	if moved == 0 || streak < 20 {
+		t.Errorf("%d phones sent positions; longest 10 Hz run %d", moved, streak)
 	}
 }
 
@@ -318,7 +336,10 @@ func TestPhoneAxes(t *testing.T) {
 		a.phone = newPhone(w, a)
 	}
 	// Facing the stage (−y): a shove toward +x is "right".
-	a.phone.facing = -math.Pi / 2
+	// Straight in front of the stage, facing it (−y): a shove toward +x
+	// is "right".
+	a.X, a.Y = w.G.W/2, w.G.BarrierY+3
+	a.face, a.prevFace = -math.Pi/2, -math.Pi/2
 	run(w, 1)
 	w.Events()
 	w.Shove(a.X, a.Y, 1, 0, 1)
@@ -340,7 +361,7 @@ func TestPhoneAxes(t *testing.T) {
 func TestApplyValidation(t *testing.T) {
 	w := newWorld(t, 20, 10)
 	bad := []Action{
-		{Type: "dance"},
+		{Type: "moonwalk"},
 		{Type: ""},
 		{Type: ActAttract},
 		{Type: ActAttract, X: f64(5)},
