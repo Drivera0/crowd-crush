@@ -23,6 +23,7 @@ import (
 	"github.com/Drivera0/crowd-crush/server/internal/detect"
 	"github.com/Drivera0/crowd-crush/server/internal/geo"
 	"github.com/Drivera0/crowd-crush/server/internal/hub"
+	"github.com/Drivera0/crowd-crush/server/internal/names"
 	"github.com/Drivera0/crowd-crush/server/internal/protocol"
 	"github.com/Drivera0/crowd-crush/server/internal/sign"
 	"github.com/Drivera0/crowd-crush/server/internal/store"
@@ -79,11 +80,33 @@ type nodeMeta struct {
 	joinedAt  int64
 	msgs      int64
 	tele      []protocol.Sample // last teleKeep samples, for the dashboard's node panel
+
+	// The judge demo (demo.go, hybrid.go).
+	name, color string     // generated name and colour (live phones only)
+	shake       shakeState // being shaken right now
+	real        bool       // sim pipeline: a real phone standing in the simulated crowd
+	recorded    bool       // some of its readings went into a labelled recording
+
+	// unplaced: connected with no position yet (a GPS phone before its
+	// first usable fix). x, y mean nothing; the detector treats it as
+	// outside the venue (no zones, clusters, neighbours or density), the
+	// dashboard keeps it off the map and nothing about it is stored until
+	// it is placed (unplaced.go).
+	unplaced bool
+
+	// Tower check-in (tower.go): the tower this phone checked in at ("" =
+	// none, or it has been placed some other way since) and the GPS
+	// correction measured there.
+	tower string
+	bias  gpsBias
 }
 
 func (m *nodeMeta) src() string {
-	if m.acc > 0 {
+	switch {
+	case m.acc > 0:
 		return protocol.SrcGPS
+	case m.tower != "":
+		return protocol.SrcTower
 	}
 	return protocol.SrcManual
 }
@@ -196,7 +219,7 @@ func (p *pipeline) step(now int64) (detect.Result, []crowd.Change) {
 // place moves a phone in this pipeline.
 func (p *pipeline) place(id string, m *nodeMeta) {
 	p.det.SetPhone(id, m.x, m.y)
-	p.det.SetOutside(id, m.outside)
+	p.det.SetOutside(id, m.outside || m.unplaced)
 }
 
 type replayState struct {
@@ -246,6 +269,10 @@ type App struct {
 	incidents map[string]*incident // by alert id, see alerts.go
 	openInc   map[string]string    // incident key → id of its unresolved alert
 	snapBytes int                  // size of the last snapshot broadcast
+
+	names map[string]names.Name // generated phone names, by session id (demo.go)
+	demo  protocol.DemoSpot     // where joining phones are lined up (demo.go)
+	surge *surgeDirector        // "surge around the phones" in progress (hybrid.go)
 }
 
 // New creates the app and its hub, loading saved areas and venue from
@@ -270,6 +297,7 @@ func New(opt Options) *App {
 		sentAt:    map[string]int64{},
 		incidents: map[string]*incident{},
 		openInc:   map[string]string{},
+		names:     map[string]names.Name{},
 	}
 	if a.opt.PublicURL == "" {
 		a.opt.PublicURL = os.Getenv("PUBLIC_URL")
@@ -293,6 +321,7 @@ func New(opt Options) *App {
 	v.Floorplan = a.plan != nil
 	a.venue = v
 	a.areas = a.loadAreas()
+	a.demo = a.loadDemo()
 	a.live = newPipeline(a.liveConfig())
 	a.applyZones(a.live)
 	a.Hub = hub.New(a)
@@ -349,7 +378,10 @@ func (a *App) LegacyPos(row, col int) (x, y float64) {
 func (a *App) PhoneHello(id string, x, y float64, ua string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.helloIn(a.live, hub.Now(), id, x, y, ua)
+	a.helloLiveLocked(hub.Now(), id, x, y, ua)
+	if m := a.live.meta[id]; m != nil { // the phone says where it is: no longer "at the tower"
+		m.tower, m.bias = "", gpsBias{}
+	}
 }
 
 // helloIn places a phone in pipeline p. Live phones and simulated phones
@@ -364,7 +396,7 @@ func (a *App) helloIn(p *pipeline, now int64, id string, x, y float64, ua string
 			log.Printf("phone %s joined at %.1f, %.1f m (%s)", short(id), x, y, ua)
 		}
 	}
-	m.x, m.y, m.acc, m.outside = x, y, 0, false
+	m.x, m.y, m.acc, m.outside, m.unplaced = x, y, 0, false, false
 	m.gps.Reset()
 	m.ua, m.connected, m.goneAt = ua, true, 0
 	m.lastRecv = now
@@ -390,6 +422,10 @@ func (a *App) posIn(p *pipeline, now int64, id string, x, y float64) {
 	x, y = p.cfg().Clamp(x, y)
 	m.x, m.y, m.acc, m.outside = x, y, 0, false
 	m.gps.Reset()
+	m.tower, m.bias = "", gpsBias{}
+	if a.placedLocked(p, now, id, m) {
+		return // its first position: recorded as its hello
+	}
 	p.place(id, m)
 	a.record(store.Record{K: store.KindPos, T: now, ID: id, X: store.F(r2(x)), Y: store.F(r2(y))})
 }
@@ -397,9 +433,13 @@ func (a *App) posIn(p *pipeline, now int64, id string, x, y float64) {
 // PhoneGPS converts a fix to venue metres. lat/lon are used here and
 // dropped: never logged, stored or forwarded.
 func (a *App) PhoneGPS(id string, lat, lon, acc float64) {
-	now := hub.Now()
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.gpsLocked(hub.Now(), id, lat, lon, acc)
+}
+
+// gpsLocked is PhoneGPS at server time now. Caller holds mu.
+func (a *App) gpsLocked(now int64, id string, lat, lon, acc float64) {
 	m := a.live.meta[id]
 	if m == nil {
 		return
@@ -418,9 +458,13 @@ func (a *App) PhoneGPS(id string, lat, lon, acc float64) {
 	anchor := geo.Anchor{Lat: a.venue.Lat, Lon: a.venue.Lon, Bearing: a.venue.Bearing}
 	x, y := anchor.ToVenue(lat, lon)
 	x, y = m.gps.Add(x, y, acc)
+	x, y = m.bias.apply(now, x, y) // a tower check-in's correction, fading out (tower.go)
 	m.outside = x < 0 || y < 0 || x > cfg.VenueW || y > cfg.VenueH
 	m.x, m.y = cfg.Clamp(x, y)
 	m.acc = math.Max(0.1, math.Round(m.gps.Acc*10)/10)
+	if a.placedLocked(a.live, now, id, m) {
+		return // its first fix: recorded as its hello
+	}
 	a.live.place(id, m)
 	a.record(store.Record{K: store.KindPos, T: now, ID: id, X: store.F(r2(m.x)), Y: store.F(r2(m.y)), Acc: m.acc, Out: m.outside})
 }
@@ -438,18 +482,42 @@ func (a *App) syncIn(p *pipeline, now int64, id string, offset, rtt int64) {
 		return
 	}
 	m.synced, m.offset, m.rtt = true, offset, rtt
+	if m.unplaced {
+		return // recorded with its hello, once it has a position
+	}
 	a.record(store.Record{K: store.KindSync, T: now, ID: id, RTT: rtt, Offset: offset})
 }
 
 func (a *App) PhoneMotion(id string, mo protocol.Motion, recv int64) {
 	a.mu.Lock()
 	zone, x, y, ok := a.motionIn(a.live, id, mo, recv)
+	shook, unplaced := false, false
+	if m := a.live.meta[id]; ok && m != nil {
+		unplaced = m.unplaced
+		a.hybridMotionLocked(id, mo, recv, detRot(a.live.cfg(), m, mo, recv))
+		shook, m.shake.fresh = m.shake.fresh, false
+	}
 	a.mu.Unlock()
 	if !ok {
 		return
 	}
+	if shook {
+		a.Hub.SendPhone(id, protocol.Shake{Type: protocol.TypeShake})
+	}
+	if unplaced {
+		return // nowhere yet: nothing to store
+	}
 	a.opt.Sink.Reading(store.Reading{Time: time.UnixMilli(mo.T), PhoneID: id, Zone: zone, X: r2(x), Y: r2(y),
-		AX: mo.AX, AY: mo.AY, AZ: mo.AZ, Rot: mo.Rot})
+		AX: mo.AX, AY: mo.AY, AZ: mo.AZ, Rot: mo.Rot, G: gravityOf(mo)})
+}
+
+// gravityOf is the gravity vector a motion message carried, nil if it had
+// none (or a malformed one), for storage next to the reading.
+func gravityOf(mo protocol.Motion) []float64 {
+	if detect.Gravity(mo.G) == ([3]float64{}) {
+		return nil
+	}
+	return mo.G
 }
 
 // motionIn feeds one clock-corrected reading to pipeline p and the labelled
@@ -461,9 +529,17 @@ func (a *App) motionIn(p *pipeline, id string, mo protocol.Motion, recv int64) (
 	}
 	m.lastRecv = recv
 	m.addSample(protocol.Sample{T: mo.T, AX: mo.AX, AY: mo.AY, AZ: mo.AZ, Rot: mo.Rot})
-	p.det.Add(id, detect.Sample{T: mo.T, AX: mo.AX, AY: mo.AY, AZ: mo.AZ, Rot: mo.Rot})
-	a.record(store.Record{K: store.KindM, T: recv, ID: id, CT: mo.T, AX: mo.AX, AY: mo.AY, AZ: mo.AZ, Rot: mo.Rot})
-	if !m.outside {
+	if m.ua != "sim" {
+		m.shake.add(mo, recv) // a shaken phone reads as handled (demo.go)
+	}
+	if a.rec != nil {
+		m.recorded = true
+	}
+	p.det.Add(id, detect.Sample{T: mo.T, AX: mo.AX, AY: mo.AY, AZ: mo.AZ, Rot: detRot(p.cfg(), m, mo, recv), G: detect.Gravity(mo.G)})
+	if !m.unplaced { // a recording has no place for a phone that is nowhere yet
+		a.record(store.Record{K: store.KindM, T: recv, ID: id, CT: mo.T, AX: mo.AX, AY: mo.AY, AZ: mo.AZ, Rot: mo.Rot, G: gravityOf(mo)})
+	}
+	if !m.outside && !m.unplaced {
 		zone = p.det.ZoneOf(m.x, m.y)
 	}
 	return zone, m.x, m.y, true
@@ -482,6 +558,9 @@ func (a *App) PhoneGone(id string) {
 func (a *App) goneIn(p *pipeline, now int64, id string) {
 	if m := p.meta[id]; m != nil {
 		m.connected, m.goneAt = false, now
+		if m.unplaced {
+			return // never made it into the recording
+		}
 	}
 	a.record(store.Record{K: store.KindBye, T: now, ID: id})
 }
@@ -567,7 +646,9 @@ func (a *App) Run(ctx context.Context) {
 			if s != nil && s.busy.CompareAndSwap(false, true) {
 				go func() {
 					defer s.busy.Store(false)
-					a.simTick(hub.Now())
+					now := hub.Now()
+					a.hybridSync(now) // real phones stand in the simulated crowd (hybrid.go)
+					a.simTick(now)
 				}()
 			}
 		}
@@ -705,8 +786,9 @@ func (a *App) snapshotLocked(now int64) protocol.Snapshot {
 	var rtts []int64
 	for id, m := range p.meta {
 		n := protocol.Node{ID: id, X: r2(m.x), Y: r2(m.y), RTT: m.rtt, Offset: m.offset, AgeMs: max(0, pnow-m.lastRecv),
-			UA: m.ua, Acc: m.acc, Src: m.src(), Outside: m.outside}
-		if !m.outside {
+			UA: m.ua, Acc: m.acc, Src: m.src(), Outside: m.outside,
+			Name: m.name, Color: m.color, Real: m.real, Shake: m.connected && m.shake.active(now), Unplaced: m.unplaced}
+		if !m.outside && !m.unplaced {
 			n.Zone = p.det.ZoneOf(m.x, m.y)
 		}
 		pr, ok := status[id]
@@ -791,39 +873,14 @@ func (a *App) phoneStates(now int64) {
 	}
 }
 
-// phoneStatesLocked is the state message for every connected live phone.
-// Caller holds mu.
+// phoneStatesLocked is the state message for every connected live phone:
+// from the live pipeline, or, while a simulation runs around it, from the
+// sim pipeline (sim: true; see hybrid.go). Caller holds mu.
 func (a *App) phoneStatesLocked() map[string]protocol.PhoneState {
 	out := map[string]protocol.PhoneState{}
-	cfg := a.liveConfig()
-	var bearing *float64
-	if a.venue.Geo {
-		b := a.venue.Bearing
-		bearing = &b
-	}
-	zoneLevel := map[string]string{}
-	for _, z := range a.live.last.Zones {
-		zoneLevel[z.ID] = a.live.zoneLevel(z)
-	}
-	for _, pr := range a.live.last.Phones {
-		m := a.live.meta[pr.ID]
-		if m == nil || !m.connected {
-			continue
-		}
-		node := pr.Status
-		if !m.synced {
-			node = protocol.StatusConnecting
-		}
-		level := protocol.LevelCalm
-		if !m.outside {
-			for _, z := range a.live.det.ZonesOf(m.x, m.y) {
-				if levelRank[zoneLevel[z]] > levelRank[level] {
-					level = zoneLevel[z]
-				}
-			}
-		}
-		out[pr.ID] = protocol.PhoneState{Type: protocol.TypeState, Node: node, Zone: level, Move: moveFor(a.live, pr.ID),
-			Bearing: bearing, X: math.Round(m.x*10) / 10, Y: math.Round(m.y*10) / 10, W: cfg.VenueW, H: cfg.VenueH}
+	a.statesFrom(a.live, false, out)
+	if a.sim != nil {
+		a.statesFrom(a.sim.p, true, out)
 	}
 	return out
 }

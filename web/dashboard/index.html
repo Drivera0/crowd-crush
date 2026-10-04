@@ -264,6 +264,29 @@
                   <ol id="log"></ol>
                   <p id="logEmpty" class="muted small">No incidents for this event yet.</p>
                 </div>
+
+                <details class="card demo-card" id="demoCard">
+                  <summary><h3>Demo with a few phones</h3><span class="meta">try it at a table</span></summary>
+                  <label class="demo-check">
+                    <input id="demoOn" type="checkbox" />
+                    <span><b>Demo spot</b><small>Phones that join line up in a row 0.6 m apart, in the order they join. No GPS, no tapping.</small></span>
+                  </label>
+                  <p id="demoWhere" class="sim-now"></p>
+                  <div class="row">
+                    <button id="demoPick" class="sm">Pick the spot on the map…</button>
+                    <button id="demoArrange" class="sm" data-tip="Put every connected phone back in the row, in the order they joined">Line up phones now</button>
+                  </div>
+                  <p class="muted small demo-tip">Each phone has a name and colour on its own screen. Drag a named dot to where that person really stands; shake a phone and its dot ripples.</p>
+                  <div class="ops-block">
+                    <h4>Phones inside a simulated crowd</h4>
+                    <p class="muted small">Starts a virtual crowd and packs it around the real phones. Their own screens turn red and point the way out, marked as a drill.</p>
+                    <div class="row">
+                      <button class="primary surge-btn">🌊 Surge around the phones</button>
+                      <button id="surgeStop" class="ghost" hidden>■ Stop simulation</button>
+                    </div>
+                    <p id="demoMsg" class="muted small" aria-live="polite"></p>
+                  </div>
+                </details>
               </aside>
             </div>
           </section>
@@ -390,6 +413,9 @@
                       <button id="simStart" class="primary">▶ Start simulation</button>
                       <button id="simRestart" class="primary" hidden data-tip="The sliders differ from the running crowd">↻ Restart to apply</button>
                       <button id="simStop" class="ghost" hidden>■ Stop</button>
+                    </div>
+                    <div class="row">
+                      <button class="surge-btn" data-tip="Real phones stand in the virtual crowd. This packs the crowd around them (starts the simulation if needed)">🌊 Surge around the real phones</button>
                     </div>
                     <div id="simControls" class="sim-controls" hidden>
                       <h4>Steer the crowd</h4>
@@ -520,6 +546,7 @@
             <p id="mapSub" class="sub">Each dot is an attendee's phone at its real spot. Lines join phones close enough to compare readings; shaded circles are crowds packing together.</p>
           </div>
           <div id="legend">
+            <span id="locating" class="locating" hidden data-tip="Connected, but with no position yet (waiting for a usable GPS fix, or for a tap on the phone's map). Not counted anywhere until placed."></span>
             <span><i class="lg ok"></i>Calm</span>
             <span><i class="lg swaying"></i>Swaying</span>
             <span><i class="lg wave"></i>In a push</span>
@@ -569,7 +596,7 @@
             <div class="d-head">
               <span id="dAvatar" class="d-avatar"></span>
               <div>
-                <div class="d-title">Attendee <span id="dId" class="mono"></span></div>
+                <div class="d-title"><span id="dName">Attendee</span> <span id="dId" class="mono"></span></div>
                 <div class="d-sub" id="dDevice">–</div>
               </div>
               <span id="dStatus" class="st"></span>

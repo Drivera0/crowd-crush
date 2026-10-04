@@ -80,6 +80,12 @@ export class Areas {
   onLink: (from: string, to: string) => void = () => {};
   /** Fires when a board marker is dropped at a new spot (venue metres). */
   onBoardMoved: (key: string, x: number, y: number) => void = () => {};
+  /** May staff drag this phone on the map? (Real, named phones, outside a replay.) */
+  canDragNode: (id: string) => boolean = () => false;
+  /** Fires when a phone's dot is dropped at a new spot (venue metres). */
+  onNodeMoved: (id: string, x: number, y: number) => void = () => {};
+  /** The phone pressed on, if staff may drag it. */
+  private nodePress: string | null = null;
 
   constructor(private canvas: HTMLCanvasElement, private mesh: Mesh) {
     canvas.addEventListener('pointerdown', (e) => this.down(e));
@@ -88,6 +94,8 @@ export class Areas {
     canvas.addEventListener('pointercancel', () => {
       this.draft = this.drag = null;
       this.pan = this.press = null;
+      this.nodePress = null;
+      this.mesh.dragNode(null);
     });
     canvas.addEventListener(
       'wheel',
@@ -335,6 +343,8 @@ export class Areas {
       const node = this.mesh.pick(scr.x, scr.y);
       const hit = node ? undefined : [...this.list].reverse().find((a) => inPoly(a.poly, p.x, p.y));
       this.press.node = node;
+      this.nodePress = node && this.canDragNode(node) ? node : null;
+      if (this.nodePress) return; // a drag moves the phone; a click opens it
       if (hit) {
         this.select(hit.id);
         this.drag = { id: hit.id, x: p.x, y: p.y };
@@ -368,6 +378,14 @@ export class Areas {
       return;
     }
     if (this.press && Math.hypot(scr.x - this.press.x, scr.y - this.press.y) > 4) this.press.moved = true;
+    if (this.nodePress && this.press) {
+      if (this.press.moved) {
+        const [x, y] = this.clampPt([p.x, p.y]);
+        this.mesh.dragNode(this.nodePress, x, y);
+        this.canvas.style.cursor = 'grabbing';
+      }
+      return;
+    }
     if (this.drag) {
       const a = this.get(this.drag.id);
       if (a) {
@@ -415,6 +433,13 @@ export class Areas {
     const press = this.press;
     this.press = null;
     this.pan = null;
+    const nd = this.nodePress;
+    this.nodePress = null;
+    if (nd && this.mesh.nodeDrag) {
+      this.canvas.style.cursor = '';
+      this.onNodeMoved(nd, this.mesh.nodeDrag.x, this.mesh.nodeDrag.y);
+      return;
+    }
     const bd = this.mesh.boardDrag;
     if (bd) {
       this.canvas.style.cursor = '';

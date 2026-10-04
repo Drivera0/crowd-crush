@@ -13,6 +13,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -120,7 +121,17 @@ func main() {
 		if u == "" {
 			u = requestBaseURL(r)
 		}
-		png, err := qrcode.Encode(strings.TrimRight(u, "/")+"/", qrcode.Medium, 512)
+		link := strings.TrimRight(u, "/") + "/"
+		// ?at=<key>: a tower's check-in code (the join link with ?at=<key>).
+		if at := r.URL.Query().Get("at"); at != "" {
+			if t, err := a.Tower(at); err == nil {
+				link += "?at=" + url.QueryEscape(t.Key)
+			} else {
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
+		}
+		png, err := qrcode.Encode(link, qrcode.Medium, 512)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

@@ -206,7 +206,7 @@ func (a *App) StartRecording(label string) (string, error) {
 	}
 	for _, p := range pipes {
 		for id, m := range p.meta {
-			if m.connected {
+			if m.connected && !m.unplaced {
 				w.Write(store.Record{K: store.KindHello, T: now, ID: id, X: store.F(r2(m.x)), Y: store.F(r2(m.y)),
 					Acc: m.acc, Out: m.outside, UA: m.ua})
 				if m.synced {

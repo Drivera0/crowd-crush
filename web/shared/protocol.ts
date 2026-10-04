@@ -22,6 +22,8 @@ export interface Hello {
   row?: number;
   col?: number;
   ua?: string;
+  /** The key of the tower whose check-in QR code the phone joined through (?at=<key>): placed next to it. */
+  at?: string;
 }
 
 /** The phone was placed or moved on the venue map (metres). */
@@ -108,7 +110,8 @@ export interface Node {
   y: number;
   /** GPS accuracy radius in metres; 0 = placed by hand. */
   acc?: number;
-  src?: 'gps' | 'manual';
+  /** How the position was set: GPS, by hand, or by checking in at a tower (its QR code). */
+  src?: 'gps' | 'manual' | 'tower';
   /** Outside the venue rectangle: counts toward nothing. */
   outside?: boolean;
   /** A real phone's generated name and colour (absent for simulated and replayed phones). */
@@ -118,6 +121,8 @@ export interface Node {
   shake?: boolean;
   /** Mode "sim": a real phone standing in the simulated crowd. */
   real?: boolean;
+  /** Connected but not located yet (no x/y, no accepted GPS fix): x, y mean nothing and it counts toward nothing. Keep it off the map. */
+  unplaced?: boolean;
   status: NodeStatus;
   sway: number;
   rtt: number;
@@ -370,6 +375,9 @@ export interface Area {
 /** GET /api/hardware: every sign and zone light, probed every 5 s. */
 export interface Hardware {
   name: string;
+  /** "laptop", "sign" or a zone-light letter: the key in PUT /api/hardware/{key}/pos and in a check-in link (?at=<key>). */
+  key?: string;
+  /** sign | zone-light | laptop (this computer: always online, no probe). */
   kind: string;
   url: string;
   zone?: string;

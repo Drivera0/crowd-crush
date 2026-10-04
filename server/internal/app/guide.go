@@ -161,6 +161,9 @@ func sameState(a, b protocol.PhoneState) bool {
 	if a.Type != b.Type || a.Node != b.Node || a.Zone != b.Zone || a.X != b.X || a.Y != b.Y || a.W != b.W || a.H != b.H {
 		return false
 	}
+	if a.Name != b.Name || a.Color != b.Color || a.Sim != b.Sim {
+		return false
+	}
 	if (a.Bearing == nil) != (b.Bearing == nil) || (a.Bearing != nil && *a.Bearing != *b.Bearing) {
 		return false
 	}
