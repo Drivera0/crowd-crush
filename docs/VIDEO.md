@@ -53,16 +53,18 @@ This is the most important step: almost every number in the pitch comes from the
 
 ## The 3-minute screen recording (recommended)
 
-One continuous recording of the dashboard while you talk: 3:00, about 430 spoken words, no camera, no slides, only trimming. The simulator supplies the crowds and your own phone supplies the real-phone moment, so nobody else is needed.
+One continuous recording of the dashboard while you talk: 3:00, about 450 spoken words, no camera, no slides, only trimming. The simulator supplies the crowds and your own phone supplies the real-phone moment, so nobody else is needed.
 
 ### Before you hit record
 
 - Server and tunnel running; `./bin/pulse -check` green. Dashboard full screen (⛶), light theme, browser zoom 110 %.
 - **Settings:** escalation off, spoken alerts on, volume up.
 - **Your phone:** your Android joined from `pulsecrowd.tech` (it shows "You're #1 in the row"). Mirror it onto the Mac with **scrcpy** (`brew install scrcpy`, USB debugging on) and put its window at the right edge of the screen. Without scrcpy, skip the phone window and use the fallback line at 1:55.
-- **Venue page:** a floor-plan image already uploaded (any real venue plan); don't apply the suggestion yet.
 - **Areas & alerts:** one area drawn over the stage front, named "Stage front", with the rule "more than 4 people per m² for 5 seconds".
 - **Simulation page:** scenario **Concert**, 250 people, 60 %, not started.
+- **Your phone runs the Pulse Android app** for this recording (not the browser), so the "App mode: Bluetooth on" line and the beacon readings are real. Join with it before recording.
+- **Boards:** the sign and both zone lights powered and showing online on the Hardware page, each dragged to its place on the map (or **Set up table demo**).
+- **Check the mesh layer in the dry run:** on Live, tick **Phone links** while the simulation runs and confirm links draw between the dots. If nothing draws, stay on the Live map for that line and don't point at links.
 - Do one full dry run: you'll learn how long the surge takes to go red and where to keep talking.
 - Record: ⇧⌘5 → Record Entire Screen, microphone on.
 
@@ -71,25 +73,24 @@ One continuous recording of the dashboard while you talk: 3:00, about 430 spoken
 | Time | Your clicks | Say (word for word) |
 |---|---|---|
 | 0:00 | **Live** page, QR showing | "In October 2022, 159 people died in a crowd crush in Itaewon, in Seoul. Nobody inside the crowd could see it building, and nobody outside could either. This is Pulse: early warning for crowd crushes, using the phones already in the crowd." |
-| 0:15 | Point at the QR, then your dot on the map, then the mirrored phone | "Attendees scan one code at pulsecrowd.tech. No app, no account, no name. Each phone becomes a dot on the steward's map and streams ten motion readings a second." |
-| 0:28 | **Venue** → **✦ Find stage and exits** on the uploaded plan | "Setting up a venue takes minutes. Upload a floor plan and Gemini suggests the stage and the exits." |
-| 0:38 | **Areas & alerts** → the "Stage front" area and its rule | "Staff mark the risky spots and decide what raises an alert, in plain words: more than four people per square metre, for five seconds." |
-| 0:48 | **Simulation** → **Start simulation** → **Dance** | "Now a crowd. These are 250 simulated people, 60 percent with the app. They're dancing: everyone moving at the same moment. Pulse ignores it." |
-| 1:00 | **To the stage**, then **Surge** | "A crush is different. People pack in until they can't move on their own, and a push travels from person to person, a fraction of a second apart. Pulse compares every phone with its neighbours and watches how tightly they're packed." |
-| 1:15 | Wait: the front turns amber, then red; the alert card and status line go red; the briefing plays | "It goes red where the crush is, not everywhere. The steward hears one sentence and one action." *(let the voice play)* |
-| 1:32 | Point at **Ground truth vs Pulse** | "The simulator knows the true pressure on every body. Pulse only sees the phones, and it warned before the crowd became dangerous." |
-| 1:42 | Alert card → **Why did it fire?**, then **Acknowledge** | "Every alert shows its evidence. The math decides; Gemini only writes the sentence, and if it's down, a template does. Staff acknowledge, and the log keeps who and when." |
-| 1:55 | **Stop**, then **🌊 Surge around the real phones**; point at the mirrored phone as it turns red | "Now a real phone, mine, placed inside the simulated crush. It turns red, labelled as a drill, and points me out: sideways, never against the push." *(no scrcpy: "On the attendee's own phone, the screen turns red with an arrow that points them out of the push.")* |
-| 2:15 | **Stop** → scenario **Classroom** → **Start simulation** → **Class ends** | "Normal crowds shouldn't alarm. Here a class ends: people pack up, file out row by row and queue at the door. Nobody is stuck, so nothing fires." |
-| 2:32 | **Hardware** page: sign and zone lights | "Pulse also drives a warning sign and zone lights over USB, and it ran a thousand simulated phones on one server without dropping one." |
-| 2:42 | Back to **Live** | "The honest part: these results come from the simulator, and phone GPS indoors is metres off, so packed crowds still need better positions. Next is recording real crowds, with consent. Pulse is for venue safety teams and ticketing platforms, through the ticket app people already have. Pulse: pulsecrowd.tech." |
+| 0:15 | Point at the QR, then your dot, then the mirrored phone | "Attendees scan one code at pulsecrowd.tech. No account, no name. Each phone becomes a dot on the steward's map and streams ten motion readings a second." |
+| 0:26 | **Areas & alerts**: the "Stage front" area and its rule | "Staff mark the risky spots and set the rules in plain words, and Gemini can read a floor plan to find the stage and exits." |
+| 0:36 | **Simulation** → **Start simulation** → **Dance** | "Now a crowd: 250 simulated people, 60 percent with the app. They're dancing, everyone moving at the same moment. Pulse ignores it." |
+| 0:47 | **To the stage**, then **Surge**; wait for amber, then red; the briefing plays | "A crush is different. People pack in, and a push travels from person to person, a fraction of a second apart. Pulse compares every phone with its neighbours, and goes red where the crush is, not everywhere. The steward hears one sentence and one action." *(let the voice play)* |
+| 1:17 | Point at **Ground truth vs Pulse**, then the card's **Why did it fire?** | "The simulator knows the true pressure on every body. Pulse only sees the phones, and it warned before the crowd became dangerous. Every alert shows its evidence: the math decides, the AI only writes the sentence." |
+| 1:32 | **Stop**, then **🌊 Surge around the real phones**; point at the mirrored phone turning red | "Here's a real phone, mine, placed inside the simulated crush. It turns red, labelled as a drill, and points me out: sideways, never against the push." |
+| 1:50 | **Live** → tick **Phone links** in the map legend; point along the links | "Now the part I'm proudest of. The phones don't only talk to the server. They link directly to the phones around them, peer to peer, and pass each other's positions and warnings along. If a phone loses its connection in a jammed network, its data relays through its neighbours, and a warning can still reach it. Phones that move together also confirm they're side by side, which sharpens everyone's position." |
+| 2:12 | **Hardware** page: the sign, zone lights and laptop on the map, lines between the boards | "And the room itself helps. This Arduino sign and these ESP32 zone lights aren't only warning lights: they're anchors. Each one broadcasts a Bluetooth beacon from a known spot, measures its distance to the others, and counts the devices around it." |
+| 2:28 | Point at the mirrored phone: the Pulse app's "App mode: Bluetooth on" line; then your dot's details: located by Bluetooth beacons | "GPS is metres off indoors, so the plan is the app. This is the Pulse Android app: it hears the anchors, the anchors hear it, and together they place the phone far more precisely. It also keeps working with the screen off, in a pocket." |
+| 2:44 | Back to **Live** | "Honest status: the crush results are from the simulator, and the mesh and app are tested on a handful of devices, not a real crowd yet. The goal is Pulse inside the ticketing or wallet app people already carry, for venue safety teams. Pulse: pulsecrowd.tech." |
 | 3:00 | Stop recording | |
 
 ### Notes
 
 - The surge's time to red varies by run. If it's slow, keep talking over the amber stage; trim silence afterwards rather than cutting the moment it turns red.
 - Say "simulated" whenever the crowd is simulated, as the script does. It's the first thing a sharp judge checks.
-- If the classroom shows a brief yellow at the door, say "a short watch at the door, then calm" and move on; don't re-record for it.
+- What's verified, so you can answer if asked: on your Galaxy, the app heard both zone lights and both zone lights heard the app. The mesh relay was tested between browser tabs, and screen-off streaming on an emulator. The script's "tested on a handful of devices" covers this; don't claim more.
+- The "wow" lines (1:50–2:44) describe what's built plus the plan. Keep "the plan is the app" as a plan: precise beacon positioning hasn't been measured yet.
 - Two phones can't show a real push going red (that needs three), which is why this version uses the simulation for the crush. The live table demo is where judges push each other.
 
 ## The full 3-minute video script (with table footage)
