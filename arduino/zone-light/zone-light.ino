@@ -17,12 +17,12 @@
 // GET /links → {"links":[...],"heard":[...]}: just those two, cheap enough for the server to poll every second.
 //
 // Onboard blue LED (GPIO 2), no wiring needed:
-//   joining Wi-Fi = quick double flash (stays like this if Wi-Fi is wrong)
-//   calm          = slow breathing pulse
-//   yellow        = faster, brighter breathing
+//   joining Wi-Fi = solid on (stays on if Wi-Fi is wrong)
+//   calm, alone   = 1 blink every 2 s
+//   calm, linked  = 2 blinks every 2 s (another Pulse board is heard)
+//   calm, phone   = 3 blinks every 2 s (a phone is connected or its app is heard)
+//   yellow        = slow even blink, half a second on, half a second off
 //   red           = rapid strobe
-//   + a quick triple blip each time a Bluetooth scan finishes (~every 6 s)
-//   + a short double blip when another Pulse board is heard for the first time
 //
 // Optional wiring, each LED through a 220 Ω resistor to GND:
 //   separate LEDs: GPIO 25 green, GPIO 26 yellow/orange, GPIO 27 red
@@ -590,7 +590,8 @@ void setup() {
   unsigned long t0 = millis();
   while (WiFi.status() != WL_CONNECTED) {
     unsigned long p = (millis() - t0) % 600;
-    ledcWrite(BLUE, (p < 60 || (p > 150 && p < 210)) ? 255 : 0); // double flash: joining Wi-Fi
+    (void)p;
+    ledcWrite(BLUE, 255); // solid: joining Wi-Fi
     delay(10);
     if ((millis() - t0) % 500 < 10) Serial.print(".");
   }
@@ -617,30 +618,26 @@ void loop() {
 
   if (WiFi.status() != WL_CONNECTED) {
     WiFi.reconnect();
-    unsigned long p = t % 600;
-    ledcWrite(BLUE, (p < 60 || (p > 150 && p < 210)) ? 255 : 0);
+    ledcWrite(BLUE, 255);
     delay(5);
     return;
   }
 
+  // Onboard blue LED: count the blinks. 1 = alone, 2 = linked to another
+  // Pulse board, 3 = a phone is connected or heard. Yellow and red override.
+  bool linked = peerCount > 0;
+  int phones = heardCount;
+  for (int i = 0; i < MAX_LINKS; i++)
+    if (links[i].used) phones++;
+  int blinks = phones > 0 ? 3 : linked ? 2 : 1;
+  unsigned long lp = t % 2000;
+  bool linkFlash = lp < (unsigned long)blinks * 300 && (lp % 300) < 120;
   int pwm;
   switch (level) {
-    case CALM: pwm = breathe(t, 3000, 4, 140); break;
-    case WARN: pwm = breathe(t, 1100, 10, 255); break;
+    case CALM: pwm = linkFlash ? 255 : 0; break;
+    case WARN: pwm = (t % 1000) < 500 ? 255 : 0; break;
     default:   pwm = (t % 140) < 70 ? 255 : 0; break;
   }
-  // Triple blip right after each Bluetooth scan (calm/yellow only, so red stays unambiguous).
-  unsigned long since = bleLastScan ? t - bleLastScan : 99999;
-  if (level != DANGER && since < 420) pwm = (since / 70) % 2 == 0 ? 255 : 0;
-  // Short double blip when a new Pulse board is heard (shows after the scan's triple blip).
-  unsigned long pb = peerBlip ? t - peerBlip : 99999;
-  if (level != DANGER && pb >= 500 && pb < 700) pwm = (pb < 540 || (pb >= 620 && pb < 660)) ? 255 : 0;
-  // Linked to another Pulse board (its beacon is being heard): a double flash
-  // every 1.5 s while calm, on the green LED and on the onboard blue one.
-  bool linked = peerCount > 0;
-  unsigned long lp = t % 1500;
-  bool linkFlash = lp < 90 || (lp >= 200 && lp < 290);
-  if (level == CALM && linked && since >= 420 && !(pb >= 500 && pb < 700)) pwm = linkFlash ? 255 : 6;
   ledcWrite(BLUE, pwm);
 
   // External LEDs: green → orange → red, speeding up.
