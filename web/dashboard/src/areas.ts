@@ -74,6 +74,8 @@ export class Areas {
    */
   pick: { label: string; arrow: boolean; done: (p: { x: number; y: number; dx: number; dy: number }) => void } | null = null;
   private pickDrag: { x0: number; y0: number; x1: number; y1: number } | null = null;
+  /** Fires when a board marker is dropped at a new spot (venue metres). */
+  onBoardMoved: (key: string, x: number, y: number) => void = () => {};
 
   constructor(private canvas: HTMLCanvasElement, private mesh: Mesh) {
     canvas.addEventListener('pointerdown', (e) => this.down(e));
@@ -181,6 +183,14 @@ export class Areas {
     a.sens = a.sens === 'high' ? 'normal' : 'high';
     this.save();
     this.onChange();
+  }
+
+  /** Replace an area's alert rules. */
+  setRules(id: string, rules: Area['rules']) {
+    const a = this.get(id);
+    if (!a) return;
+    a.rules = rules;
+    this.save();
   }
 
   /** Which zone light shows this area ("" = none). */
@@ -305,6 +315,12 @@ export class Areas {
     this.start = p;
     this.press = { x: scr.x, y: scr.y, node: null, moved: false };
     this.canvas.setPointerCapture(e.pointerId);
+    const board = this.tool === 'select' ? this.mesh.boardAt(scr.x, scr.y) : null;
+    if (board) {
+      this.mesh.boardDrag = { key: board, x: p.x, y: p.y };
+      this.canvas.style.cursor = 'grabbing';
+      return;
+    }
     if (this.tool === 'select') {
       const node = this.mesh.pick(scr.x, scr.y);
       const hit = node ? undefined : [...this.list].reverse().find((a) => inPoly(a.poly, p.x, p.y));
@@ -329,6 +345,16 @@ export class Areas {
     if (this.pickDrag) {
       this.pickDrag.x1 = p.x;
       this.pickDrag.y1 = p.y;
+      return;
+    }
+    if (this.mesh.boardDrag) {
+      const [x, y] = this.clampPt([p.x, p.y]);
+      this.mesh.boardDrag.x = x;
+      this.mesh.boardDrag.y = y;
+      return;
+    }
+    if (this.tool === 'select' && this.mesh.boardAt(scr.x, scr.y)) {
+      this.canvas.style.cursor = 'grab';
       return;
     }
     if (this.press && Math.hypot(scr.x - this.press.x, scr.y - this.press.y) > 4) this.press.moved = true;
@@ -379,6 +405,13 @@ export class Areas {
     const press = this.press;
     this.press = null;
     this.pan = null;
+    const bd = this.mesh.boardDrag;
+    if (bd) {
+      this.canvas.style.cursor = '';
+      if (press?.moved) this.onBoardMoved(bd.key, bd.x, bd.y);
+      else this.mesh.boardDrag = null;
+      return;
+    }
     if (this.drag) {
       const a = this.get(this.drag.id);
       if (a) a.poly = a.poly.map((pt) => this.clampPt(pt));

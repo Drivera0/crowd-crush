@@ -160,14 +160,25 @@ export interface Snapshot {
 
 export interface Alert {
   type: 'alert';
+  /** Stable id: later messages with the same id update the alert (ack, resolve, briefing). */
+  id?: string;
   t: number;
   zone: string;
   level: Level;
   score: number;
-  kind?: 'wave' | 'density';
+  kind?: 'wave' | 'density' | 'rule';
   brief?: string;
+  /** Structured briefing: what is happening and where … */
+  headline?: string;
+  /** … and the one thing staff should do. */
+  action?: string;
   audioUrl?: string;
   test?: boolean;
+  status?: 'open' | 'ack' | 'resolved';
+  ackAt?: number;
+  resolvedAt?: number;
+  /** Still unacknowledged after the escalation delay: re-announced. */
+  escalated?: boolean;
 }
 
 export interface Alerts {
@@ -189,6 +200,14 @@ export interface Config {
   neighbourRadius: number;
 }
 
+/** Fixed features of the venue, in venue metres. */
+export interface VenueLayout {
+  /** Stage outline. */
+  stage?: Point[];
+  exits?: { id: string; name: string; x0: number; y0: number; x1: number; y1: number }[];
+  walls?: [number, number, number, number][];
+}
+
 /** GET/PUT /api/venue. lat/lon is the map's top-left corner; bearing = degrees clockwise from north of the map's "up". */
 export interface Venue {
   w: number;
@@ -197,6 +216,37 @@ export interface Venue {
   lon?: number;
   bearing?: number;
   geo: boolean;
+  /** Preset the size came from (club, theatre, arena, festival) or "custom". */
+  template?: string;
+  /** A floor-plan image is stored: GET /api/venue/floorplan. */
+  floorplan?: boolean;
+  layout?: VenueLayout;
+}
+
+/** POST /api/venue/floorplan/analyze: Gemini's reading of the uploaded plan. Nothing is saved until staff accept it. */
+export interface FloorplanSuggestion {
+  w: number;
+  h: number;
+  layout: VenueLayout;
+  /** What Gemini based the scale on, and anything it was unsure about. */
+  notes: string;
+  confidence: 'low' | 'medium' | 'high';
+}
+
+/** Per-area alert rules, on top of the detector's push and density alerts. */
+export interface AlertRules {
+  /** Alert when the estimated density inside the area exceeds this (people/m²); 0/absent = off. */
+  density?: number;
+  /** … for at least this long (s). */
+  densityHoldS?: number;
+  /** Push (travelling wave) detection for this area. Default on. */
+  push?: boolean;
+  /** Alert when more phones than this are inside (capacity); 0/absent = off. */
+  maxPhones?: number;
+  /** Text staff hear and see instead of the generic briefing. */
+  message?: string;
+  /** Where the alert goes. Defaults: all on. */
+  notify?: { sign?: boolean; light?: boolean; voice?: boolean };
 }
 
 /** GET/PUT /api/areas: watch areas drawn by staff; each becomes a server zone. */
@@ -207,6 +257,7 @@ export interface Area {
   poly: Point[];
   /** Zone light that shows this area (its letter in SIGN_URL); absent = none. */
   light?: string;
+  rules?: AlertRules;
 }
 
 /** GET /api/hardware: every sign and zone light, probed every 5 s. */
@@ -223,6 +274,13 @@ export interface Hardware {
   level?: string;
   ble?: { devices: number; near: number; scans: number; age: number };
   areas?: string[];
+  /** Where staff placed the board on the venue map (metres); PUT /api/hardware/{key}/pos. */
+  x?: number;
+  y?: number;
+  /** Bluetooth beacon name, e.g. PULSE-A. */
+  beacon?: string;
+  /** Other Pulse boards this one hears, with an estimated distance (log-distance path loss). */
+  peers?: { name: string; rssi: number; dist: number; age: number }[];
 }
 
 /** GET /api/sim: the in-process crowd simulation (Social Force Model). */
