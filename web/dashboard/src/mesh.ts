@@ -937,7 +937,8 @@ export class Mesh {
   /** Simulated people: phone carriers are drawn as nodes; the rest are grey, tinted by how hard they're squeezed. */
   private drawSimBodies(g: CanvasRenderingContext2D) {
     if (!this.sim) return;
-    const r = Math.max(2, 0.22 * this.fit.s);
+    // Body-sized when zoomed out, capped near the phone dots' size in small venues.
+    const r = Math.max(3, Math.min(8, 0.22 * this.fit.s));
     const light = this.theme === 'light';
     for (const [x, y, pressure, phone] of this.sim.bodies) {
       const p = this.venueToWorld(x, y);
