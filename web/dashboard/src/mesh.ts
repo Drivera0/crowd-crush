@@ -864,7 +864,7 @@ export class Mesh {
         g.stroke();
         g.setLineDash([]);
         const mx = (a.x + q.x) / 2, my = (a.y + q.y) / 2;
-        const label = `≈${peer.dist.toFixed(1)} m · ${peer.rssi} dBm`;
+        const label = `Bluetooth ≈${peer.dist.toFixed(1)} m${peer.mapDist != null ? ` · map ${peer.mapDist.toFixed(1)} m` : ''} · ${peer.rssi} dBm`;
         const tw = g.measureText(label).width;
         g.fillStyle = light ? 'rgba(255,255,255,0.95)' : 'rgba(20,20,20,0.9)';
         g.fillRect(mx - tw / 2 - 5, my - 9, tw + 10, 16);

@@ -282,7 +282,7 @@ export interface Hardware {
   /** Bluetooth beacon name, e.g. PULSE-A. */
   beacon?: string;
   /** Other Pulse boards this one hears, with an estimated distance (log-distance path loss). */
-  peers?: { name: string; rssi: number; dist: number; age: number }[];
+  peers?: { name: string; rssi: number; dist: number; age: number; mapDist?: number }[];
 }
 
 /** GET /api/sim: the in-process crowd simulation (Social Force Model). */
