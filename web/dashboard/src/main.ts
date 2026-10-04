@@ -1,5 +1,5 @@
 import './style.css';
-import type { Alert, Cluster, Config, Level, Node, NodeDetail, Snapshot, ToDash, Venue } from '../../shared/protocol';
+import type { Alert, Cluster, Config, Hardware, Level, Node, NodeDetail, SimAction, SimState, Snapshot, ToDash, Venue } from '../../shared/protocol';
 import { wsURL } from '../../shared/protocol';
 import { animate } from 'motion';
 import { Areas, type Tool } from './areas';
@@ -85,6 +85,7 @@ areas.onChange = () => {
         `<input class="name" maxlength="32" aria-label="Area name" />` +
         `<span class="lvl"></span>` +
         `<button class="sens sm" data-tip="High-risk areas alert on the first push"></button>` +
+        `<select class="light sm" aria-label="Zone light for this area" data-tip="Which zone light shows this area"></select>` +
         `<button class="del sm ghost" data-tip="Delete area" aria-label="Delete area">✕</button>` +
         `<div class="meta"></div>`;
       const id = a.id;
@@ -93,6 +94,9 @@ areas.onChange = () => {
       name.addEventListener('change', () => areas.rename(id, name.value));
       name.addEventListener('keydown', (e) => e.key === 'Enter' && name.blur());
       li.querySelector('.sens')!.addEventListener('click', () => areas.toggleSens(id));
+      li.querySelector<HTMLSelectElement>('.light')!.addEventListener('change', (e) =>
+        areas.setLight(id, (e.target as HTMLSelectElement).value),
+      );
       li.querySelector('.del')!.addEventListener('click', () => areas.remove(id));
       li.addEventListener('click', (e) => {
         if (!(e.target as HTMLElement).closest('button')) areas.select(id);
@@ -110,6 +114,7 @@ areas.onChange = () => {
     const sens = li.querySelector<HTMLButtonElement>('.sens')!;
     sens.textContent = a.sens === 'high' ? '⚑ High risk' : 'Normal';
     sens.classList.toggle('hi', a.sens === 'high');
+    fillLightPicker(li.querySelector<HTMLSelectElement>('.light')!, a.light ?? '');
     li.querySelector('.meta')!.textContent =
       a.phones === 0
         ? 'No phones inside yet'
@@ -547,6 +552,20 @@ function logEntry(e: LogItem, fresh = true) {
   renderLog(fresh);
 }
 
+/** Zone-light letters reported by the server (A, B, …), for the area light pickers. */
+let lightKeys: string[] = [];
+
+function fillLightPicker(sel: HTMLSelectElement, current: string) {
+  const keys = [...new Set([...lightKeys, ...(current ? [current] : [])])].sort();
+  const want = ['', ...keys].join('|');
+  if (sel.dataset.keys !== want) {
+    sel.dataset.keys = want;
+    sel.replaceChildren(new Option('No light', ''), ...keys.map((k) => new Option(`Light ${k}`, k)));
+  }
+  sel.value = current;
+  sel.hidden = keys.length === 0;
+}
+
 function renderLog(fresh = false) {
   const ol = $('log');
   $('logEmpty').hidden = timeline.length > 0;
@@ -686,16 +705,31 @@ function onSnapshot(s: Snapshot) {
   setCounter('cWaves', s.waves.length);
 
   const replay = s.mode === 'replay';
+  const simulating = s.mode === 'sim';
   const badge = $('mode');
-  badge.textContent = replay ? 'REPLAY' : 'LIVE';
-  badge.className = `badge ${replay ? 'replay' : 'live'}`;
-  $('replayBanner').hidden = !replay;
-  if (replay) $('replayInfo').textContent = `${s.replay ?? ''} · ${Math.round((s.progress ?? 0) * 100)}%`;
-  if (replay !== wasReplay) {
-    wasReplay = replay;
-    $('liveBtn').classList.toggle('on', !replay);
-    $('replayBtn').classList.toggle('on', replay);
-    $('replayOpts').hidden = !replay;
+  badge.textContent = replay ? 'REPLAY' : simulating ? 'SIMULATION' : 'LIVE';
+  badge.className = `badge ${replay ? 'replay' : simulating ? 'sim' : 'live'}`;
+  $('replayBanner').hidden = !replay && !simulating;
+  $('replayBanner').classList.toggle('sim', simulating);
+  if (replay) {
+    $('rbTag').textContent = 'REPLAY';
+    $('replayInfo').textContent = `${s.replay ?? ''} · ${Math.round((s.progress ?? 0) * 100)}%`;
+    $('rbNote').textContent = 'Not live: a saved run is playing through the detector.';
+  } else if (simulating) {
+    $('rbTag').textContent = 'SIMULATION';
+    $('replayInfo').textContent = `${simState?.people ?? s.sim?.bodies.length ?? 0} people · ${actionText[s.sim?.action ?? ''] ?? s.sim?.action ?? ''}`;
+    $('rbNote').textContent = 'Not live: a virtual crowd is feeding the detector.';
+  }
+  mesh.setSim(simulating ? (s.sim ?? null) : null, simulating ? simState : null);
+  const mode = s.mode;
+  if (mode !== lastMode) {
+    lastMode = mode;
+    $('liveBtn').classList.toggle('on', mode === 'live');
+    $('replayBtn').classList.toggle('on', mode === 'replay');
+    $('simBtn').classList.toggle('on', mode === 'sim');
+    $('replayOpts').hidden = mode !== 'replay';
+    if (mode === 'sim') $('simOpts').hidden = false;
+    renderSimRunning(mode === 'sim');
   }
 
   $('recBadge').hidden = !s.recording;
@@ -794,14 +828,17 @@ async function loadRecordings(select?: string) {
   }
 }
 
-let wasReplay = false;
+let lastMode: Snapshot['mode'] | '' = '';
 
 async function goLive() {
   try {
     await post('/api/live');
+    if (lastMode === 'sim') await fetch('/api/sim/stop', { method: 'POST' }).catch(() => {});
     $('replayOpts').hidden = true;
+    $('simOpts').hidden = true;
     $('liveBtn').classList.add('on');
     $('replayBtn').classList.remove('on');
+    $('simBtn').classList.remove('on');
     msg('Showing live phones');
   } catch (e) {
     msg((e as Error).message, true);
@@ -812,7 +849,9 @@ $('backLiveBtn').addEventListener('click', () => void goLive());
 // Choosing Replay only opens the picker; nothing changes until Play.
 $('replayBtn').addEventListener('click', () => {
   $('replayOpts').hidden = false;
+  $('simOpts').hidden = true;
   $('liveBtn').classList.remove('on');
+  $('simBtn').classList.remove('on');
   $('replayBtn').classList.add('on');
   animate($('replayOpts'), { opacity: [0, 1], y: [-6, 0] }, { duration: 0.25 });
 });
@@ -999,3 +1038,216 @@ $('vAnchor').addEventListener('click', () => {
 });
 
 $('vClearGeo').addEventListener('click', () => void saveVenue({ ...venueForm(), lat: undefined, lon: undefined, geo: false }));
+
+// ---------------------------------------------------------------------------
+// hardware: every sign and zone light, as the server last found it
+// ---------------------------------------------------------------------------
+
+function ago2(ms: number) {
+  const sec = Math.round(ms / 1000);
+  return sec < 60 ? `${sec}s` : sec < 3600 ? `${Math.round(sec / 60)} min` : `${Math.round(sec / 3600)} h`;
+}
+
+function bars(rssi?: number) {
+  if (!rssi) return '';
+  const n = rssi >= -55 ? 4 : rssi >= -65 ? 3 : rssi >= -75 ? 2 : 1;
+  return `<span class="bars b${n}" title="Wi-Fi ${rssi} dBm"><i></i><i></i><i></i><i></i></span>`;
+}
+
+async function loadHardware() {
+  let list: Hardware[] = [];
+  try {
+    const r = await fetch('/api/hardware');
+    if (r.ok) list = (await r.json()) as Hardware[];
+  } catch {
+    return;
+  }
+  lightKeys = list.filter((h) => h.zone).map((h) => h.zone!);
+  areas.onChange();
+  $('hwEmpty').hidden = list.length > 0;
+  const on = list.filter((h) => h.online).length;
+  $('hwSummary').textContent = list.length ? `${on} of ${list.length} online` : '';
+  const heard = list.reduce((n, h) => n + (h.ble?.devices ?? 0), 0);
+  $('hw').replaceChildren(
+    ...list.map((h) => {
+      const li = document.createElement('li');
+      li.className = `hw-row ${h.online ? 'on' : 'off'}`;
+      const host = h.url.replace(/^https?:\/\//, '');
+      const status = h.online
+        ? `${bars(h.rssi)}${h.uptime ? `<span class="muted">up ${ago2(h.uptime * 1000)}</span>` : ''}`
+        : `<span class="off-text">offline${h.lastSeen ? ` · seen ${ago2(Date.now() - h.lastSeen)} ago` : ''}</span>`;
+      const lvl = h.online && h.level ? `<span class="st ${h.level === 'red' ? 'wave' : h.level === 'yellow' ? 'swaying' : 'ok'}">${esc(h.level)}</span>` : '';
+      const ble = h.ble
+        ? `<div class="hw-ble">📶 Bluetooth: <b>${h.ble.devices}</b> devices nearby · ${h.ble.near} close</div>`
+        : '';
+      const shows = h.zone
+        ? `<div class="hw-areas">${h.areas?.length ? `Shows ${h.areas.map(esc).join(', ')}` : 'No area assigned yet: pick “Light ' + esc(h.zone) + '” on a watch area'}</div>`
+        : '<div class="hw-areas">Shows the worst alert anywhere</div>';
+      li.innerHTML =
+        `<span class="hw-dot"></span><div class="hw-main"><div class="hw-top"><b>${esc(h.name)}</b>${lvl}</div>` +
+        `<div class="hw-sub"><span class="mono">${esc(host)}</span>${status}</div>${ble}${shows}</div>`;
+      return li;
+    }),
+  );
+  if (heard && snap) {
+    $('hwSummary').textContent += ` · ${heard} Bluetooth devices heard vs ${snap.stats.phones} on Pulse`;
+  }
+}
+void loadHardware();
+setInterval(() => void loadHardware(), 5000);
+
+// ---------------------------------------------------------------------------
+// simulation: a virtual crowd (Social Force Model) staff can steer
+// ---------------------------------------------------------------------------
+
+let simState: SimState | null = null;
+const actionText: Record<string, string> = {
+  calm: 'calm',
+  stage: 'pressing to the stage',
+  surge: 'surging',
+  attract: 'gathering',
+  shove: 'shoved',
+  spawn: 'arriving',
+  disperse: 'evacuating',
+  exit: 'exits changed',
+};
+
+for (const [id, out, fmt] of [
+  ['simPeople', 'simPeopleV', (v: string) => v],
+  ['simPart', 'simPartV', (v: string) => `${v}%`],
+] as const) {
+  const input = $(id) as HTMLInputElement;
+  const show = () => ($(out).textContent = fmt(input.value));
+  input.addEventListener('input', show);
+  show();
+}
+
+$('simBtn').addEventListener('click', () => {
+  $('simOpts').hidden = false;
+  $('replayOpts').hidden = true;
+  $('liveBtn').classList.remove('on');
+  $('replayBtn').classList.remove('on');
+  $('simBtn').classList.add('on');
+  animate($('simOpts'), { opacity: [0, 1], y: [-6, 0] }, { duration: 0.25 });
+});
+
+function renderSimRunning(running: boolean) {
+  $('simStart').hidden = running;
+  $('simStop').hidden = !running;
+  $('simControls').hidden = !running;
+}
+
+$('simStart').addEventListener('click', async () => {
+  const people = Number(($('simPeople') as HTMLInputElement).value);
+  const participation = Number(($('simPart') as HTMLInputElement).value) / 100;
+  try {
+    await post('/api/sim/start', { people, participation, scenario: 'concert' });
+    msg(`Simulating ${people} people`);
+    renderSimRunning(true);
+    void pollSim();
+  } catch (e) {
+    msg((e as Error).message, true);
+  }
+});
+
+$('simStop').addEventListener('click', () => void goLive());
+
+async function simAction(a: SimAction) {
+  try {
+    await post('/api/sim/action', a);
+    void pollSim();
+  } catch (e) {
+    msg((e as Error).message, true);
+  }
+}
+
+function pickOnMap(label: string, arrow: boolean, done: (p: { x: number; y: number; dx: number; dy: number }) => void) {
+  areas.pick = { label, arrow, done };
+  const hint = $('hint');
+  hint.textContent = `${label} · Esc to cancel`;
+  animate(hint, { opacity: [0, 1], y: [-6, 0] }, { type: 'spring', bounce: 0.35, duration: 0.4 });
+  const clear = () => animate(hint, { opacity: 0 }, { duration: 0.15 });
+  const orig = done;
+  areas.pick.done = (p) => {
+    clear();
+    orig(p);
+  };
+}
+
+for (const b of document.querySelectorAll<HTMLButtonElement>('[data-sim]')) {
+  b.addEventListener('click', () => {
+    const type = b.dataset.sim!;
+    const strength = Number(($('simStrength') as HTMLInputElement).value) / 100;
+    switch (type) {
+      case 'calm':
+      case 'stage':
+      case 'disperse':
+        void simAction({ type });
+        break;
+      case 'surge':
+        void simAction({ type: 'surge', strength });
+        break;
+      case 'attract':
+        pickOnMap('Click where the group should gather', false, (p) => void simAction({ type: 'attract', x: p.x, y: p.y }));
+        break;
+      case 'spawn':
+        pickOnMap('Click where 20 people arrive', false, (p) => void simAction({ type: 'spawn', x: p.x, y: p.y, n: 20 }));
+        break;
+      case 'shove':
+        pickOnMap('Drag on the map: where the push starts, and which way', true, (p) => {
+          const len = Math.hypot(p.dx, p.dy);
+          if (len < 0.3) return msg('Drag a little further to give the push a direction', true);
+          void simAction({ type: 'shove', x: p.x, y: p.y, dx: p.dx / len, dy: p.dy / len });
+        });
+        break;
+    }
+  });
+}
+
+function renderSimState(st: SimState) {
+  $('simExits').replaceChildren(
+    ...(st.exits ?? []).map((e) => {
+      const btn = document.createElement('button');
+      btn.className = `sm exit ${e.open ? 'open' : 'closed'}`;
+      btn.textContent = `${e.open ? '🟢' : '🔴'} ${e.name}`;
+      btn.dataset.tip = e.open ? 'Close this exit' : 'Open this exit';
+      btn.addEventListener('click', () => void simAction({ type: 'exit', id: e.id, open: !e.open }));
+      return btn;
+    }),
+  );
+  const t = st.truth;
+  if (!t) {
+    $('simTruth').textContent = '';
+    return;
+  }
+  let verdict = '';
+  if (t.leadSeconds != null) {
+    verdict =
+      t.leadSeconds >= 0
+        ? `<div class="lead good">Pulse warned <b>${t.leadSeconds.toFixed(0)} s before</b> the crowd became dangerous.</div>`
+        : `<div class="lead bad">Pulse warned <b>${(-t.leadSeconds).toFixed(0)} s after</b> the crowd became dangerous.</div>`;
+  } else if (t.alertAt != null) {
+    verdict = `<div class="lead good">Pulse raised the alarm at ${t.alertAt.toFixed(0)} s; the crowd hasn't reached crush levels.</div>`;
+  } else if (t.dangerAt != null) {
+    verdict = `<div class="lead bad">The crowd became dangerous at ${t.dangerAt.toFixed(0)} s and Pulse hasn't alerted.</div>`;
+  }
+  $('simTruth').innerHTML =
+    `<h4>Ground truth (only the simulator knows this)</h4>` +
+    `<div class="truth-grid"><div><b>${t.maxDensity.toFixed(1)}</b><span>people/m² at the densest spot</span></div>` +
+    `<div><b>${Math.round(t.maxPressure)}</b><span>N/m peak body pressure</span></div>` +
+    `<div><b>${t.crushing}</b><span>people at crush level</span></div></div>${verdict}`;
+}
+
+async function pollSim() {
+  try {
+    const r = await fetch('/api/sim');
+    if (!r.ok) return;
+    simState = (await r.json()) as SimState;
+    renderSimState(simState);
+  } catch {
+    /* server busy */
+  }
+}
+setInterval(() => {
+  if (lastMode === 'sim') void pollSim();
+}, 1000);

@@ -130,9 +130,9 @@
             </div>
 
             <div id="replayBanner" class="replay-banner" hidden>
-              <span class="rb-tag">REPLAY</span>
+              <span id="rbTag" class="rb-tag">REPLAY</span>
               <span id="replayInfo">recording</span>
-              <span class="rb-note">Not live: a saved run is playing through the detector.</span>
+              <span id="rbNote" class="rb-note">Not live: a saved run is playing through the detector.</span>
               <button id="backLiveBtn" class="sm">Back to live</button>
             </div>
             <div id="hint" class="hint"></div>
@@ -229,6 +229,15 @@
             </div>
           </div>
 
+          <div class="card">
+            <div class="card-head">
+              <h3>Hardware</h3>
+              <span id="hwSummary" class="meta"></span>
+            </div>
+            <ul id="hw" class="hw"></ul>
+            <p id="hwEmpty" class="muted small">No signs or lights configured. Add them to SIGN_URL in .env.</p>
+          </div>
+
           <div class="card brief-panel" id="briefPanel">
             <div class="card-head">
               <h3>AI briefing</h3>
@@ -253,6 +262,38 @@
               <button id="replayBtn" role="radio">
                 <b>Replay</b><span>Play back a saved run</span>
               </button>
+              <button id="simBtn" role="radio">
+                <b>Simulate</b><span>A virtual crowd you can steer</span>
+              </button>
+            </div>
+            <div id="simOpts" class="replay-opts" hidden>
+              <p class="muted small">
+                Simulated people walk, keep their distance and push each other like real crowds (the Social Force Model,
+                Helbing et&nbsp;al.). Some carry a phone running Pulse; the detector only sees those phones.
+              </p>
+              <div class="sim-sliders">
+                <label>People <b id="simPeopleV">250</b><input id="simPeople" type="range" min="40" max="500" step="10" value="250" /></label>
+                <label>With the app <b id="simPartV">60%</b><input id="simPart" type="range" min="10" max="100" step="5" value="60" /></label>
+              </div>
+              <div class="row">
+                <button id="simStart" class="primary">▶ Start simulation</button>
+                <button id="simStop" class="ghost" hidden>■ Stop</button>
+              </div>
+              <div id="simControls" class="sim-controls" hidden>
+                <h4>Steer the crowd</h4>
+                <div class="sim-actions">
+                  <button data-sim="calm" data-tip="People mill about">😌 Calm</button>
+                  <button data-sim="stage" data-tip="Everyone presses toward the stage">🎤 To the stage</button>
+                  <button data-sim="surge" data-tip="A surge toward the stage: the classic crush">🌊 Surge</button>
+                  <button data-sim="attract" data-tip="Click the map: a group forms there">📍 Gather here…</button>
+                  <button data-sim="shove" data-tip="Drag on the map: a push in that direction">👉 Shove…</button>
+                  <button data-sim="spawn" data-tip="Click the map: 20 more people arrive">➕ Add people…</button>
+                  <button data-sim="disperse" data-tip="Everyone heads for the open exits">🚪 Evacuate</button>
+                </div>
+                <label class="sim-strength">Surge strength <input id="simStrength" type="range" min="10" max="100" step="5" value="70" /></label>
+                <div id="simExits" class="sim-exits"></div>
+                <div id="simTruth" class="sim-truth"></div>
+              </div>
             </div>
             <div id="replayOpts" class="replay-opts" hidden>
               <p class="muted small">A replay feeds a saved recording through the same detector, as if it were happening now. Use it to rehearse, or as a backup if phones can't connect.</p>
