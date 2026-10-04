@@ -33,7 +33,7 @@ Run `make env` (Mac / Git Bash). It explains each value, asks for it, writes `.e
 | `ELEVENLABS_API_KEY` | https://elevenlabs.io/app/settings/api-keys → Create key with Text to Speech access |
 | `ELEVENLABS_VOICE_ID` | optional: Voice library → ⋯ → Copy voice ID |
 | `SIGN_URL` | after step 4: `serial:auto,A=serial:auto,B=serial:auto` for boards plugged into this laptop (`scripts/boards.sh env --write` writes it), or their Wi-Fi URLs |
-| `PUBLIC_URL` | after step 3: `https://pulse.yourname.tech` |
+| `PUBLIC_URL` | after step 3: `https://pulsecrowd.tech` |
 
 `./bin/pulse -check` (or `make doctor`) re-tests at any time. Never commit `.env`.
 
@@ -48,10 +48,10 @@ Phones need HTTPS for motion sensors; the tunnel gives you that with no port for
    ```sh
    cloudflared tunnel login                       # browser opens, pick the domain
    cloudflared tunnel create pulse
-   cloudflared tunnel route dns pulse pulse.yourname.tech
+   cloudflared tunnel route dns pulse pulsecrowd.tech
    cloudflared tunnel run --url http://localhost:8080 pulse
    ```
-5. Open `https://pulse.yourname.tech/dash/` and set `PUBLIC_URL=https://pulse.yourname.tech` in `.env`.
+5. Open `https://pulsecrowd.tech/dash/` and set `PUBLIC_URL=https://pulsecrowd.tech` in `.env` (or paste it into the dashboard's QR window).
 
 Until DNS is ready: `cloudflared tunnel --url http://localhost:8080` gives a random `https://….trycloudflare.com` URL that works the same way.
 

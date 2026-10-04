@@ -118,7 +118,7 @@ The rule across all of them: math detects, the services explain, store and reach
 - An alert nobody acknowledges is re-voiced as "Still unacknowledged. …"; "Escalate now" does the same on demand.
 - A fallback clip is generated once at startup, so there's always something to play. Without a key, the browser's own voice reads the text.
 
-**.Tech domain: the address on the QR code.** `[TECH: claim it and say the address]` A short, memorable HTTPS address for the join QR, pointing at the Cloudflare tunnel. Phones need HTTPS for the motion sensors, so this is what makes "scan and join" work.
+**.Tech domain: the address on the QR code.** **pulsecrowd.tech.** A short, memorable HTTPS address for the join QR, pointing at the Cloudflare tunnel. Phones need HTTPS for the motion sensors, so this is what makes "scan and join" work.
 
 **Not sponsors, but they'll ask** (check against this year's track list, `[TRACKS]` in TRACKS.md):
 - **Cloudflare Tunnel** gives the laptop a public HTTPS address with no port forwarding.
