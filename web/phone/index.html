@@ -15,23 +15,39 @@
         <h1>Pulse</h1>
         <p class="lead">Early warning for crowd crushes, using the phones already in the crowd.</p>
         <button id="joinBtn" class="big">Join</button>
-        <p class="fine">Shares only motion numbers and the spot you tap. No name, location, audio or photos.</p>
+        <p class="fine">
+          Shares motion numbers and where you are in the venue. GPS is turned into a spot on the venue map and
+          never stored. No name, contacts, audio or photos.
+        </p>
         <p id="joinErr" class="err" hidden></p>
       </section>
 
-      <!-- 2. Pick your spot -->
-      <section id="pick" class="screen" hidden>
-        <h2>Tap your spot</h2>
-        <p id="pickHint" class="fine"></p>
-        <div id="grid" class="grid"></div>
+      <!-- 2. Locating -->
+      <section id="locate" class="screen" hidden>
+        <div class="spinner"></div>
+        <h2>Finding you…</h2>
+        <p id="locateMsg" class="lead">Allow location access so the crowd map knows where you are.</p>
+        <button id="skipGps" class="small">Tap my spot on the map instead</button>
       </section>
 
-      <!-- 3. Streaming -->
+      <!-- 3. Place yourself on the venue map -->
+      <section id="place" class="screen" hidden>
+        <h2>Where are you?</h2>
+        <p id="placeHint" class="fine">Tap where you're standing. Drag to adjust.</p>
+        <div id="venue" class="venue" role="application" aria-label="Venue map">
+          <span class="stage">STAGE</span>
+          <span id="me" class="me" hidden></span>
+        </div>
+        <button id="placeDone" class="big" disabled>That's me</button>
+        <button id="tryGps" class="small" hidden>Use GPS instead</button>
+      </section>
+
+      <!-- 4. Streaming -->
       <section id="live" class="screen" hidden>
         <div class="top">
           <span id="dot" class="dot"></span>
           <span id="conn">Connecting…</span>
-          <span id="spot" class="spot"></span>
+          <span id="where" class="spot"></span>
         </div>
         <div class="centre">
           <div id="icon" class="icon">📱</div>
@@ -41,7 +57,8 @@
         <div class="bottom">
           <p id="stats" class="fine"></p>
           <p id="warn" class="err" hidden></p>
-          <button id="moveBtn" class="small">Change spot</button>
+          <p id="screenTip" class="fine" hidden></p>
+          <button id="moveBtn" class="small">I moved: place me again</button>
         </div>
       </section>
     </main>

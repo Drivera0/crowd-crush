@@ -1,5 +1,5 @@
 import './style.css';
-import type { Config, Hello, Motion, Pong, ToPhone } from '../../shared/protocol';
+import type { Config, FromPhone, Hello, Motion, Pong, ToPhone } from '../../shared/protocol';
 import { wsURL } from '../../shared/protocol';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -30,11 +30,6 @@ function save(key: string, v: string) {
 const id = load('pulse-id') ?? randomId();
 save('pulse-id', id);
 
-let spot: { row: number; col: number } | null = (() => {
-  const s = load('pulse-spot');
-  return s ? (JSON.parse(s) as { row: number; col: number }) : null;
-})();
-
 function deviceLabel(): string {
   const ua = navigator.userAgent;
   if (/iPhone/.test(ua)) return 'iPhone';
@@ -43,8 +38,208 @@ function deviceLabel(): string {
   return 'browser';
 }
 
-function show(screen: 'join' | 'pick' | 'live') {
-  for (const s of ['join', 'pick', 'live']) $(s).hidden = s !== screen;
+// iPhone and Android hide the same switches in different places, so every
+// "how do I fix this" message is per platform. iPadOS reports itself as a Mac.
+const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const isSamsung = /SamsungBrowser/.test(navigator.userAgent);
+
+const help = {
+  motionDenied: isIOS
+    ? 'Motion access was denied. Tap aA in the address bar → Website Settings → Motion & Orientation Access → Allow, then reload.'
+    : 'Motion sensors are blocked for this site. Tap the icon left of the address → Permissions → Motion sensors → Allow, then reload.',
+  noMotion: isIOS
+    ? 'No motion data. Tap aA → Website Settings → allow Motion & Orientation Access, then reload. Low Power Mode can also pause sensors.'
+    : isSamsung
+      ? 'No motion data. In Samsung Internet: ⋮ → Settings → Sites and downloads → Site permissions → Motion sensors → Allow, then reload.'
+      : 'No motion data. Tap the icon left of the address → Permissions → Motion sensors → Allow, then reload.',
+  locationDenied: isIOS
+    ? 'Location is off for this site. Settings → Privacy & Security → Location Services → Safari Websites → While Using, then try again.'
+    : 'Location is blocked for this site. Tap the icon left of the address → Permissions → Location → Allow, then try again.',
+  imprecise: isIOS
+    ? 'Your phone is only sharing an approximate location. Settings → Privacy & Security → Location Services → Safari Websites → turn on Precise Location.'
+    : 'Your phone is only sharing an approximate location. When the browser asks, choose “Precise”, or turn on Settings → Location → Use precise location.',
+  screen: isIOS
+    ? 'Keep this page open with the screen on. iPhones pause web pages when locked.'
+    : 'Keep this page open with the screen on.',
+};
+
+type Screen = 'join' | 'locate' | 'place' | 'live';
+function show(screen: Screen) {
+  for (const s of ['join', 'locate', 'place', 'live']) $(s).hidden = s !== screen;
+}
+
+// ---- where the phone is ----
+// GPS when the venue has a geo-anchor and the fix is good enough; otherwise
+// the attendee taps their spot on the venue map (metres).
+
+const GPS_MAX_ACC = 25; // m: worse fixes can't tell one part of the venue from another
+const GPS_TIMEOUT_MS = 12_000;
+
+let cfg: Config = { venueW: 24, venueH: 16, geo: false, yellow: 0.3, red: 0.6, neighbourRadius: 1 };
+let manual: { x: number; y: number } | null = (() => {
+  const s = load('pulse-spot-m');
+  return s ? (JSON.parse(s) as { x: number; y: number }) : null;
+})();
+let fix: { lat: number; lon: number; acc: number } | null = null;
+let mode: 'gps' | 'manual' = manual ? 'manual' : 'gps';
+let watchId: number | null = null;
+let lastSentFix: { lat: number; lon: number; t: number } | null = null;
+
+async function loadConfig() {
+  try {
+    const r = await fetch('/api/config');
+    if (r.ok) cfg = { ...cfg, ...((await r.json()) as Partial<Config>) };
+  } catch {
+    /* defaults */
+  }
+}
+
+/** Metres between two fixes (equirectangular; fine at venue scale). */
+function metres(a: { lat: number; lon: number }, b: { lat: number; lon: number }) {
+  const k = Math.PI / 180;
+  const x = (b.lon - a.lon) * k * Math.cos(((a.lat + b.lat) / 2) * k);
+  const y = (b.lat - a.lat) * k;
+  return Math.hypot(x, y) * 6_371_000;
+}
+
+function startGps(): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (!cfg.geo) return resolve(false);
+    if (!('geolocation' in navigator)) return resolve(false);
+    let settled = false;
+    const done = (ok: boolean) => {
+      if (!settled) {
+        settled = true;
+        resolve(ok);
+      }
+    };
+    const timer = setTimeout(() => {
+      locateNote = !fix
+        ? 'No GPS signal yet.'
+        : fix.acc > 500
+          ? help.imprecise
+          : `GPS is only accurate to ±${Math.round(fix.acc)} m here, too rough to place you.`;
+      done(false);
+    }, GPS_TIMEOUT_MS);
+    stopGps();
+    watchId = navigator.geolocation.watchPosition(
+      (p) => {
+        fix = { lat: p.coords.latitude, lon: p.coords.longitude, acc: p.coords.accuracy };
+        $('locateMsg').textContent = `Got a fix, ±${Math.round(fix.acc)} m…`;
+        if (fix.acc <= GPS_MAX_ACC) {
+          clearTimeout(timer);
+          done(true);
+        }
+        sendFix();
+        updateWhere();
+      },
+      (err) => {
+        clearTimeout(timer);
+        locateNote = err.code === err.PERMISSION_DENIED ? help.locationDenied : 'Couldn’t get a GPS fix.';
+        done(false);
+      },
+      { enableHighAccuracy: true, maximumAge: 1000, timeout: GPS_TIMEOUT_MS },
+    );
+  });
+}
+
+function stopGps() {
+  if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+  watchId = null;
+}
+
+/** Send a fix at most ~1/s, or straight away after moving more than a metre. */
+function sendFix() {
+  if (mode !== 'gps' || !fix || fix.acc > GPS_MAX_ACC) return;
+  const now = Date.now();
+  if (lastSentFix && now - lastSentFix.t < 1000 && metres(lastSentFix, fix) < 1) return;
+  lastSentFix = { lat: fix.lat, lon: fix.lon, t: now };
+  send({ type: 'gps', lat: fix.lat, lon: fix.lon, acc: Math.round(fix.acc * 10) / 10 });
+}
+
+/** Why GPS wasn't used, shown above the map so the attendee can fix it or just tap. */
+let locateNote = '';
+
+async function locate() {
+  show('locate');
+  locateNote = '';
+  const ok = await startGps();
+  if (ok) {
+    mode = 'gps';
+    startLive();
+  } else {
+    stopGps();
+    showPlace(cfg.geo ? `${locateNote || 'GPS can’t place you precisely here.'} For now, tap where you’re standing.` : undefined);
+  }
+}
+
+$('skipGps').addEventListener('click', () => {
+  stopGps();
+  showPlace();
+});
+$('tryGps').addEventListener('click', () => void locate());
+$('moveBtn').addEventListener('click', () => showPlace());
+
+// ---- the venue map: tap or drag your dot ----
+
+let draft: { x: number; y: number } | null = null;
+
+function showPlace(hint?: string) {
+  const v = $('venue');
+  v.style.aspectRatio = `${cfg.venueW} / ${cfg.venueH}`;
+  $('placeHint').textContent = hint ?? 'Tap where you’re standing. Drag to adjust.';
+  $('tryGps').hidden = !cfg.geo;
+  draft = manual;
+  drawMe();
+  show('place');
+}
+
+function drawMe() {
+  const me = $('me');
+  ($('placeDone') as HTMLButtonElement).disabled = !draft;
+  if (!draft) {
+    me.hidden = true;
+    return;
+  }
+  me.hidden = false;
+  me.style.left = `${(draft.x / cfg.venueW) * 100}%`;
+  me.style.top = `${(draft.y / cfg.venueH) * 100}%`;
+}
+
+function pointAt(e: PointerEvent) {
+  const r = $('venue').getBoundingClientRect();
+  const fx = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+  const fy = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+  return { x: Math.round(fx * cfg.venueW * 10) / 10, y: Math.round(fy * cfg.venueH * 10) / 10 };
+}
+
+let dragging = false;
+$('venue').addEventListener('pointerdown', (e) => {
+  dragging = true;
+  $('venue').setPointerCapture(e.pointerId);
+  draft = pointAt(e);
+  drawMe();
+});
+$('venue').addEventListener('pointermove', (e) => {
+  if (!dragging) return;
+  draft = pointAt(e);
+  drawMe();
+});
+$('venue').addEventListener('pointerup', () => (dragging = false));
+
+$('placeDone').addEventListener('click', () => {
+  if (!draft) return;
+  manual = draft;
+  save('pulse-spot-m', JSON.stringify(manual));
+  mode = 'manual';
+  stopGps();
+  startLive();
+  send({ type: 'pos', x: manual.x, y: manual.y });
+});
+
+function updateWhere() {
+  $('where').textContent =
+    mode === 'gps' && fix ? `GPS ±${Math.round(fix.acc)} m` : manual ? 'Placed on map' : '';
 }
 
 // ---- 1. Join: motion permission must be asked inside the tap handler ----
@@ -54,12 +249,18 @@ type PermissionFn = () => Promise<'granted' | 'denied'>;
 $('joinBtn').addEventListener('click', async () => {
   const err = $('joinErr');
   err.hidden = true;
+  // Both platforms only expose motion and GPS to HTTPS pages.
+  if (!window.isSecureContext) {
+    err.textContent = 'This page has to be opened over https:// (scan the QR code on the screen) for the sensors to work.';
+    err.hidden = false;
+    return;
+  }
   const req = (DeviceMotionEvent as unknown as { requestPermission?: PermissionFn }).requestPermission;
   if (typeof req === 'function') {
     try {
       const r = await req.call(DeviceMotionEvent);
       if (r !== 'granted') {
-        err.textContent = 'Motion access was denied. In Safari: aA menu → Website Settings → Motion & Orientation Access, then reload.';
+        err.textContent = help.motionDenied;
         err.hidden = false;
         return;
       }
@@ -75,49 +276,12 @@ $('joinBtn').addEventListener('click', async () => {
   }
   void keepAwake();
   startSensors();
-  if (spot) {
-    startLive();
-  } else {
-    await showPicker();
-  }
+  await loadConfig();
+  if (mode === 'manual' && manual) startLive();
+  else await locate();
 });
 
-// ---- 2. Grid picker ----
-
-async function showPicker() {
-  let cfg: Pick<Config, 'rows' | 'cols'> = { rows: 1, cols: 8 };
-  try {
-    const r = await fetch('/api/config');
-    if (r.ok) cfg = (await r.json()) as Config;
-  } catch {
-    /* use the default line */
-  }
-  const grid = $('grid');
-  grid.innerHTML = '';
-  grid.style.gridTemplateColumns = `repeat(${cfg.cols}, minmax(0, 1fr))`;
-  $('pickHint').textContent =
-    cfg.rows > 1
-      ? 'Row A is the front. Count spots from the left.'
-      : 'Stand in a line. Spot 1 is the left end as the dashboard sees it.';
-  for (let r = 0; r < cfg.rows; r++) {
-    for (let c = 0; c < cfg.cols; c++) {
-      const b = document.createElement('button');
-      b.textContent = cfg.rows > 1 ? `${String.fromCharCode(65 + r)}${c + 1}` : String(c + 1);
-      if (spot && spot.row === r && spot.col === c) b.classList.add('mine');
-      b.addEventListener('click', () => {
-        spot = { row: r, col: c };
-        save('pulse-spot', JSON.stringify(spot));
-        startLive();
-      });
-      grid.appendChild(b);
-    }
-  }
-  show('pick');
-}
-
-$('moveBtn').addEventListener('click', () => void showPicker());
-
-// ---- 3. Motion: summarise every 100 ms ----
+// ---- motion: summarise every 100 ms ----
 
 let sum = { x: 0, y: 0, z: 0, n: 0, rot: 0 };
 let gravity: { x: number; y: number; z: number } | null = null;
@@ -163,7 +327,7 @@ function startSensors() {
   setTimeout(() => {
     if (totalSamples === 0) {
       const w = $('warn');
-      w.textContent = 'No motion data from this phone. Check motion permission, or try Safari / Chrome.';
+      w.textContent = help.noMotion;
       w.hidden = false;
     }
   }, 2500);
@@ -192,7 +356,7 @@ let backoff = 500;
 let reconnectTimer = 0;
 let sent = 0;
 
-function send(msg: Motion | Pong | Hello) {
+function send(msg: FromPhone) {
   if (ws?.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(msg));
     if (msg.type === 'm') sent++;
@@ -200,7 +364,10 @@ function send(msg: Motion | Pong | Hello) {
 }
 
 function hello(): Hello {
-  return { type: 'hello', id, row: spot!.row, col: spot!.col, ua: deviceLabel() };
+  const h: Hello = { type: 'hello', id, ua: deviceLabel() };
+  if (mode === 'gps' && fix) Object.assign(h, { lat: fix.lat, lon: fix.lon, acc: Math.round(fix.acc * 10) / 10 });
+  else if (manual) Object.assign(h, { x: manual.x, y: manual.y });
+  return h;
 }
 
 function connect() {
@@ -211,6 +378,7 @@ function connect() {
   sock.onopen = () => {
     backoff = 500;
     sock.send(JSON.stringify(hello()));
+    lastSentFix = null;
     setConn('Syncing clock…', 'syncing');
   };
   sock.onmessage = (ev) => {
@@ -240,12 +408,10 @@ function setConn(text: string, cls: '' | 'on' | 'syncing') {
 
 function startLive() {
   show('live');
-  $('spot').textContent = spot ? `Spot ${spot.col + 1}${spot.row > 0 ? ` · row ${spot.row + 1}` : ''}` : '';
-  if (ws?.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(hello())); // moved spot
-  } else if (!ws) {
-    connect();
-  }
+  updateWhere();
+  $('moveBtn').textContent = mode === 'gps' ? 'GPS is off? Place me on the map' : 'I moved: place me again';
+  if (!ws) connect();
+  else if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(hello()));
 }
 
 // ---- feedback from the server ----
@@ -257,11 +423,11 @@ function applyState(node: string, zone: string) {
   b.classList.toggle('zone-red', zone === 'red');
   const [icon, head, sub] =
     zone === 'red'
-      ? ['⚠️', 'Crowd wave detected', 'Stay on your feet. Arms up in front of your chest. Move sideways, not against the push.']
+      ? ['⚠️', 'Crowd danger near you', 'Stay on your feet. Arms up in front of your chest. Move sideways, not against the push.']
       : node === 'handling'
         ? ['✋', 'Phone is moving around', 'Hold it flat against your chest so it can feel the crowd.']
         : zone === 'yellow'
-          ? ['👀', 'Sway building nearby', 'Keep your phone flat against your chest.']
+          ? ['👀', 'Pressure building nearby', 'Keep your phone flat against your chest.']
           : node === 'connecting'
             ? ['📡', 'Connecting…', 'Hang on a second.']
             : ['📱', 'Hold your phone flat against your chest', 'Screen facing out, top of the phone up. You are part of the network.'];
@@ -287,8 +453,12 @@ async function keepAwake() {
     const wl = (navigator as unknown as { wakeLock?: { request(t: 'screen'): Promise<{ release(): Promise<void> }> } }).wakeLock;
     if (wl) wakeLock = await wl.request('screen');
   } catch {
-    /* not supported or denied: the phone may dim, that's all */
+    /* denied (e.g. Low Power Mode): fall through to the tip */
   }
+  // Without a wake lock (older iPhones, Low Power Mode) the screen can lock and
+  // the page stops streaming, so say so.
+  $('screenTip').hidden = wakeLock !== null;
+  $('screenTip').textContent = help.screen;
 }
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && sensorsOn) {

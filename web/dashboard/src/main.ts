@@ -1,5 +1,5 @@
 import './style.css';
-import type { Alert, Config, Level, Node, NodeDetail, Snapshot, ToDash } from '../../shared/protocol';
+import type { Alert, Cluster, Config, Level, Node, NodeDetail, Snapshot, ToDash, Venue } from '../../shared/protocol';
 import { wsURL } from '../../shared/protocol';
 import { animate } from 'motion';
 import { Areas, type Tool } from './areas';
@@ -41,7 +41,7 @@ setInterval(() => {
 }, 250);
 
 // ---------------------------------------------------------------------------
-// watch areas: drawn by the operator, evaluated from the detector's node status
+// watch areas: drawn by staff, stored on the server, levels from the detector
 // ---------------------------------------------------------------------------
 
 const areas = new Areas($('mesh') as HTMLCanvasElement, mesh);
@@ -120,13 +120,15 @@ areas.onChange = () => {
   }
 };
 areas.onChange();
+areas.onError = (m) => toast(m, 'error');
 
+// The server raises the alert (timeline, briefing, voice, sign); this is the
+// operator's heads-up toast for their own area.
 areas.onEscalate = (a) => {
   const danger = a.level === 'danger';
   const text = danger
-    ? `${a.name}: ${a.wave} of ${a.phones} phones caught in a travelling push.`
-    : `${a.name}: ${a.wave + a.sway} of ${a.phones} phones swaying.`;
-  logEntry({ t: Date.now(), level: danger ? 'red' : 'yellow', text, area: a.name });
+    ? `${a.name} is in danger${a.wave ? `: ${a.wave} of ${a.phones} phones caught in a push` : ''}.`
+    : `${a.name}: pressure building${a.phones ? ` (${a.wave + a.sway} of ${a.phones} phones moving)` : ''}.`;
   toast(text, danger ? 'danger' : 'watch');
   if (danger) {
     beep();
@@ -138,12 +140,16 @@ areas.onEscalate = (a) => {
 // header status: one sentence anyone can read from across the room
 // ---------------------------------------------------------------------------
 
-function renderStatus(zone: Level, phones: number) {
+function renderStatus(zone: Level, phones: number, clusters: Cluster[]) {
   const danger = areas.list.filter((a) => a.level === 'danger');
   const watch = areas.list.filter((a) => a.level === 'watch');
+  const packed = clusters.filter((c) => c.level === 'red');
+  const tight = clusters.filter((c) => c.level === 'yellow');
   let cls: 'calm' | 'yellow' | 'red' = 'calm';
   let text = phones === 0 ? 'Waiting for attendees' : 'All clear';
-  const active = danger.length + watch.length + (zone !== 'calm' && !danger.length && !watch.length ? 1 : 0);
+  const active =
+    danger.length + watch.length + packed.length + tight.length +
+    (zone !== 'calm' && !danger.length && !watch.length ? 1 : 0);
   $('kAlerts').textContent = String(active);
   $('kAlerts').parentElement!.classList.toggle('hot', active > 0);
   $('kAlertsSub').textContent =
@@ -152,10 +158,23 @@ function renderStatus(zone: Level, phones: number) {
       : active
         ? `crowd-wide ${zone === 'red' ? 'danger' : 'warning'}`
         : 'nothing needs attention';
-  $('kAreas').textContent = String(areas.list.length);
+  const densest = clusters.reduce((m, c) => Math.max(m, c.density), 0);
+  $('kDense').textContent = clusters.length ? densest.toFixed(1) : '–';
+  $('kDenseSub').textContent = clusters.length
+    ? `people/m² · ${clusters.length} crowd${clusters.length === 1 ? '' : 's'}${clusters.some((c) => c.trend === 'forming') ? ', one forming' : ''}`
+    : 'no crowds packed together';
+  $('kDense').parentElement!.classList.toggle('hot', packed.length > 0);
+  if (tight.length) {
+    cls = 'yellow';
+    text = `Crowd packing tighter (${tight[0].density.toFixed(1)} people/m²)`;
+  }
   if (zone === 'yellow' || watch.length) {
     cls = 'yellow';
     text = watch.length ? `Pressure building in ${names(watch)}` : 'Pressure building in the crowd';
+  }
+  if (packed.length) {
+    cls = 'red';
+    text = `Danger: crowd too dense (${packed[0].density.toFixed(1)} people/m²)`;
   }
   if (zone === 'red' || danger.length) {
     cls = 'red';
@@ -214,7 +233,7 @@ function renderTooltip() {
   }
   tip.innerHTML =
     `<div class="tt-head"><b>${esc(n.id.slice(0, 8))}</b><span class="st ${n.status}">${statusText[n.status]}</span></div>` +
-    `<div class="tt-ua">${esc(deviceName(n.ua))} · spot ${n.col + 1}${n.row ? `, row ${n.row + 1}` : ''}</div>` +
+    `<div class="tt-ua">${esc(deviceName(n.ua))} · ${where(n)}</div>` +
     `<div class="tt-foot">Click for live telemetry</div>`;
   tip.hidden = false;
   const w = $('mesh').clientWidth;
@@ -230,6 +249,15 @@ const statusText: Record<Node['status'], string> = {
   connecting: 'Connecting',
   stale: 'Offline',
 };
+
+/** How the phone's position is known. */
+function where(n: Node) {
+  if (n.outside) return 'outside the venue';
+  return n.src === 'gps' || (n.acc ?? 0) > 0 ? `GPS ±${Math.round(n.acc ?? 0)} m` : 'placed on map';
+}
+
+/** Zone ids → names, from the latest snapshot (custom areas have random ids). */
+const zoneNames = new Map<string, string>();
 
 /** "iPhone · Safari" from a user agent string. */
 function deviceName(ua?: string): string {
@@ -291,8 +319,9 @@ async function refreshDrawer() {
   $('dSwayBar').style.width = `${Math.min(100, (sway / 1) * 100)}%`;
   $('dSwayBar').className = `meter-fill ${sway >= 0.25 ? 'over' : ''}`;
   $('dSway').textContent = `${sway.toFixed(2)} m/s²`;
-  $('dSpot').textContent = n ? `${n.col + 1}${n.row ? `, row ${n.row + 1}` : ''}` : '–';
-  $('dZone').textContent = d?.zone ?? '–';
+  $('dSpot').textContent = n ? `${n.x.toFixed(1)} m, ${n.y.toFixed(1)} m` : '–';
+  $('dSrc').textContent = n ? where(n) : '–';
+  $('dZone').textContent = zoneNames.get(d?.zone ?? '') ?? d?.zone ?? '–';
   $('dJoined').textContent = d?.joinedAt ? `${fmtTime(d.joinedAt)} (${ago(Date.now() - d.joinedAt)})` : '–';
   $('dMsgs').textContent = d ? d.messages.toLocaleString() : '–';
   $('dRtt').textContent = n ? `${n.rtt} ms` : '–';
@@ -429,6 +458,12 @@ function crowdRisk(s: Snapshot): { level: Level; score: number } {
   for (const z of s.zones) {
     score = Math.max(score, z.score);
     if (levelRank[z.level] > levelRank[level]) level = z.level;
+  }
+  // Packed clusters count too: density alerts work alongside push detection.
+  for (const c of s.clusters ?? []) {
+    if (c.level && levelRank[c.level] > levelRank[level]) level = c.level;
+    if (c.level === 'red') score = Math.max(score, 0.8);
+    else if (c.level === 'yellow') score = Math.max(score, 0.45);
   }
   return { level, score };
 }
@@ -634,12 +669,15 @@ function onSnapshot(s: Snapshot) {
     if (riskHist.length > 60) riskHist.shift();
   }
 
-  mesh.update(s.nodes, s.waves, s.rows, s.cols);
-  areas.evaluate(s.nodes);
+  zoneNames.clear();
+  for (const z of s.zones) zoneNames.set(z.id, z.name);
+  const clusters = s.clusters ?? [];
+  mesh.update(s.nodes, s.waves, s.links ?? [], clusters, s.venue ?? { w: 24, h: 16 });
+  areas.sync(s.zones, s.nodes);
   const worstArea = areas.worst();
   mesh.level = worstArea === 'danger' ? 'red' : risk.level === 'red' ? 'red' : worstArea === 'watch' ? 'yellow' : risk.level;
   renderRisk(risk.level, risk.score, s.waves.length);
-  renderStatus(risk.level, s.stats.phones);
+  renderStatus(risk.level, s.stats.phones, clusters);
   renderTooltip();
 
   setCounter('cPhones', s.stats.phones);
@@ -670,7 +708,9 @@ function onSnapshot(s: Snapshot) {
 }
 
 function onAlert(a: Alert, fresh: boolean) {
-  logEntry({ t: a.t, level: a.level, text: a.brief ?? `Crowd risk ${Math.round(a.score * 100)}.`, test: a.test }, fresh);
+  const where = zoneNames.get(a.zone) ?? a.zone;
+  const fallback = a.kind === 'density' ? `${where}: crowd too dense.` : `${where}: crowd risk ${Math.round(a.score * 100)}.`;
+  logEntry({ t: a.t, level: a.level, text: a.brief ?? fallback, test: a.test, area: a.kind === 'density' ? 'DENSITY' : undefined }, fresh);
   if (a.brief) {
     showBrief(a, fresh);
     if (fresh) playBrief(a);
@@ -873,7 +913,89 @@ async function init() {
     .then((u) => ($('qrUrl').textContent = u))
     .catch(() => {});
   await loadRecordings();
+  await areas.load();
+  await loadVenue();
   connect();
 }
 
 void init();
+
+// ---------------------------------------------------------------------------
+// venue: size and GPS anchor (phones' GPS is turned into metres on this map)
+// ---------------------------------------------------------------------------
+
+let venue: Venue = { w: 24, h: 16, geo: false };
+
+function renderVenue() {
+  ($('vW') as HTMLInputElement).value = String(venue.w);
+  ($('vH') as HTMLInputElement).value = String(venue.h);
+  ($('vBearing') as HTMLInputElement).value = String(venue.bearing ?? 0);
+  $('vGeo').textContent = venue.geo
+    ? `GPS on: map anchored at ${venue.lat?.toFixed(5)}, ${venue.lon?.toFixed(5)}`
+    : 'GPS off: attendees place themselves on the map';
+  $('vGeo').className = `small ${venue.geo ? 'ok-text' : 'muted'}`;
+}
+
+async function loadVenue() {
+  try {
+    const r = await fetch('/api/venue');
+    if (r.ok) venue = (await r.json()) as Venue;
+  } catch {
+    /* defaults */
+  }
+  renderVenue();
+}
+
+async function saveVenue(next: Venue) {
+  try {
+    const r = await fetch('/api/venue', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(next),
+    });
+    const j = (await r.json().catch(() => ({}))) as Venue & { error?: string };
+    if (!r.ok) throw new Error(j.error ?? r.statusText);
+    venue = j;
+    renderVenue();
+    toast('Venue saved');
+  } catch (e) {
+    toast(`Couldn't save venue: ${(e as Error).message}`, 'error');
+  }
+}
+
+function venueForm(): Venue {
+  const num = (id: string, d: number) => {
+    const v = Number(($(id) as HTMLInputElement).value);
+    return Number.isFinite(v) && v > 0 ? v : d;
+  };
+  return { ...venue, w: num('vW', venue.w), h: num('vH', venue.h), bearing: Number(($('vBearing') as HTMLInputElement).value) || 0 };
+}
+
+$('vSave').addEventListener('click', () => void saveVenue(venueForm()));
+
+// Centre the map on this laptop: its GPS fix becomes the middle of the venue,
+// and the top-left corner (the map origin) is worked out from the size.
+$('vAnchor').addEventListener('click', () => {
+  if (!('geolocation' in navigator)) return toast('This browser has no location access.', 'error');
+  toast('Getting this laptop’s location…');
+  navigator.geolocation.getCurrentPosition(
+    (p) => {
+      const v = venueForm();
+      const { latitude: lat, longitude: lon, accuracy } = p.coords;
+      const b = ((v.bearing ?? 0) * Math.PI) / 180;
+      // Map vector from the centre to the top-left corner, rotated into east/north.
+      const dx = -v.w / 2, dyDown = -v.h / 2;
+      const east = dx * Math.cos(b) - dyDown * Math.sin(b);
+      const north = -(dx * Math.sin(b) + dyDown * Math.cos(b));
+      const lat0 = lat + north / 110540;
+      const lon0 = lon + east / (111320 * Math.cos((lat * Math.PI) / 180));
+      void saveVenue({ ...v, lat: lat0, lon: lon0, geo: true }).then(() =>
+        toast(`Anchored (laptop GPS ±${Math.round(accuracy)} m)`),
+      );
+    },
+    (err) => toast(`Couldn't get location: ${err.message}`, 'error'),
+    { enableHighAccuracy: true, timeout: 15000 },
+  );
+});
+
+$('vClearGeo').addEventListener('click', () => void saveVenue({ ...venueForm(), lat: undefined, lon: undefined, geo: false }));
