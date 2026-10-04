@@ -213,7 +213,7 @@ func (c BeaconConfig) Valid() error {
 	return nil
 }
 
-// BeaconSign is the beacon name of the sign's beacon build (SIGN_BEACON in
+// BeaconSign is the beacon name of the sign in beacon mode (B 1 in
 // arduino/sign), used for the "sign" hardware key unless it reports another.
 const BeaconSign = "PULSE-S"
 

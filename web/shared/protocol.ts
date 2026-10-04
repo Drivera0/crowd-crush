@@ -115,6 +115,10 @@ export interface PhoneState {
   sim?: boolean;
   /** Demo spot: this phone's place in the row at the table (shared/join.ts). */
   row?: DemoRow;
+  /** Demo spot, while this phone is off the row (tapped a new spot, or beside a board): the place it goes back to with POST /api/demo/back (shared/demomove.ts). */
+  spot?: number;
+  /** Beside this board ("Zone light A"): the phone was walked up to it (Bluetooth snap). */
+  near?: string;
 }
 
 export type ToPhone = Ping | PhoneState | import('./demo').Shake;
@@ -154,6 +158,8 @@ export interface Node {
   unplaced?: boolean;
   /** Its place in the demo spot's row (1 = first), while the demo spot is on and it stands where the server lined it up. */
   slot?: number;
+  /** Beside this board ("Zone light A"): the phone was walked up to it (Bluetooth snap). */
+  near?: string;
   /**
    * How packed in this person is, next to the motion status (a still phone in a crush has status "ok").
    * dens: estimated people/m² around the phone; press: its level with the cluster thresholds, absent = calm;
@@ -684,6 +690,8 @@ export interface NodeDetail {
   joinedAt: number;
   messages: number;
   samples: Sample[];
+  /** PUT /api/node/{id}/pos dropped this phone on another phone's place in the demo row and the two swapped: the other one's name. */
+  swapped?: string;
 }
 
 /** WebSocket URL on the same host as the page. */

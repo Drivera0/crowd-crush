@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"sort"
 	"strings"
@@ -20,11 +21,16 @@ import (
 // boards 30 cm apart mean nothing, so the map positions come from one
 // action instead (POST /api/hardware/table):
 //
-//   - the boards and the laptop go in a tidy row, tableGap apart, at the
-//     demo spot if it is on, else the map centre (or a spot given as {x, y});
-//     zone light A on the left, B on the right, the sign and the laptop
-//     between them, so with the default left/right zones each light sits
-//     in its own half;
+//   - the boards and the laptop go in a row along the table at the demo
+//     spot if it is on, else the middle of zone A (or a spot given as
+//     {x, y}): zone light A at the left end, the sign in the middle with
+//     the laptop beside it, zone light B at the right end, the Bluetooth
+//     boards tableBeaconGap apart so a phone walked up to one can tell it
+//     from the next (beaconsnap.go);
+//   - with no areas drawn the whole table, phones included, is kept inside
+//     one default zone (tableZoneLocked): the table profile and the wave
+//     chain work per zone. That zone's light (A) shows the table; light B
+//     shows zone B, where nobody stands (drills, or a phone moved there);
 //   - the demo spot goes on just in front of the row, so phones that join
 //     line up beside the boards (and phones already connected move there);
 //   - each zone light gets something to show: with no drawn areas the
@@ -38,9 +44,13 @@ import (
 // what it shows, and restores the live level (preflight uses it).
 
 const (
-	tableGap      = 0.8 // m between markers in the board row
-	tableRowAhead = 1.0 // m from the board row to the phone row
-	tablePhones   = 4   // phones the row is centred for
+	// tableBeaconGap: m between the Bluetooth boards along the table. A
+	// phone walked up to one board must hear it far louder than the next
+	// (snapRatio × snapEnterM ≈ 1.2 m, beaconsnap.go); 1.5 m leaves a margin.
+	tableBeaconGap = 1.5
+	tableLaptopOff = 0.5 // m from the sign to this laptop (not a beacon)
+	tableRowAhead  = 1.0 // m from the board row to the phone row
+	tablePhones    = 4   // phones the row is centred for
 )
 
 // TableDemo places the boards for a table demo. x, y (both or neither) put
@@ -66,6 +76,26 @@ func (a *App) TableDemo(x, y *float64) (protocol.TableDemo, error) {
 		sp = DemoSpacing
 	}
 	half := float64(tablePhones-1) * sp / 2 // phone row: centred on the table
+	// Where each marker goes along the table, from its centre: zone light A
+	// at the left end, the sign in the middle with this laptop beside it,
+	// zone light B at the right end, any further lights beyond, every
+	// Bluetooth board tableBeaconGap from the next (beaconsnap.go).
+	offs := map[string]float64{towerLaptop: 0}
+	if hasSign {
+		offs["sign"], offs[towerLaptop] = 0, tableLaptopOff
+	}
+	for i, l := range lights {
+		switch i {
+		case 0:
+			offs[l] = -tableBeaconGap
+		default:
+			offs[l] = float64(i) * tableBeaconGap
+		}
+	}
+	lo, hi := -half, half
+	for _, o := range offs {
+		lo, hi = min(lo, o), max(hi, o)
+	}
 	var ax, ay float64
 	switch {
 	case x != nil:
@@ -74,29 +104,24 @@ func (a *App) TableDemo(x, y *float64) (protocol.TableDemo, error) {
 		ax, ay = d.X+half, d.Y-tableRowAhead/2
 	default:
 		ax, ay = cfg.VenueW/2, cfg.VenueH/2
+		if len(a.areas) == 0 {
+			// The middle of zone A, not the middle of the map (the line
+			// between zones A and B): see tableZoneLocked.
+			if z := detect.DefaultZones(cfg); len(z) > 0 {
+				ax, ay = polyCentre(z[0].Poly)
+			}
+		}
 	}
-	// The row: A, sign, laptop, B, then any further lights.
-	var row []string
-	if len(lights) > 0 {
-		row = append(row, lights[0])
-	}
-	if hasSign {
-		row = append(row, "sign")
-	}
-	row = append(row, towerLaptop)
-	if len(lights) > 1 {
-		row = append(row, lights[1:]...)
-	}
+	ax, ay = a.tableZoneLocked(ax, ay, lo, hi)
 	// Keep the whole row and the phones inside the venue.
-	span := float64(len(row)-1) * tableGap / 2
-	ax = clampTo(ax, max(span, half)+0.3, cfg.VenueW-max(span, half)-0.3)
+	ax = clampTo(ax, -lo+0.3, cfg.VenueW-hi-0.3)
 	ay = clampTo(ay, tableRowAhead/2+0.3, cfg.VenueH-tableRowAhead/2-0.3)
 	pos := map[string]protocol.Point{}
 	for k, v := range a.hwPos {
 		pos[k] = v
 	}
-	for i, k := range row {
-		bx, by := cfg.Clamp(ax-span+float64(i)*tableGap, ay-tableRowAhead/2)
+	for k, o := range offs {
+		bx, by := cfg.Clamp(ax+o, ay-tableRowAhead/2)
 		pos[k] = protocol.Point{r2(bx), r2(by)}
 	}
 	err := a.save(hardwareFile, pos)
@@ -123,13 +148,20 @@ func (a *App) TableDemo(x, y *float64) (protocol.TableDemo, error) {
 	if len(areas) == 0 {
 		// The default zones: light A shows zone A, and so on.
 		names := map[string]string{}
+		table := ""
 		for _, z := range detect.DefaultZones(cfg) {
 			names[z.ID] = z.Name
+			if x0, y0, x1, y1 := polyBox(z.Poly); table == "" && demo.X >= x0 && demo.X <= x1 && demo.Y >= y0 && demo.Y <= y1 {
+				table = z.ID
+			}
 		}
 		for _, l := range lights {
 			tl := protocol.TableLight{Key: l, Shows: names[l]}
-			if tl.Shows == "" {
+			switch {
+			case tl.Shows == "":
 				out.Notes = append(out.Notes, "Zone light "+l+" has no zone of its own: draw an area on Areas & alerts and choose this light for it.")
+			case table != "" && l != table:
+				out.Notes = append(out.Notes, "The phones at the table are all in "+names[table]+", so a push lights zone light "+table+". Zone light "+l+" shows "+tl.Shows+" (an alert drill there, or a phone dragged into it).")
 			}
 			out.Lights = append(out.Lights, tl)
 		}
@@ -176,6 +208,43 @@ func (a *App) TableDemo(x, y *float64) (protocol.TableDemo, error) {
 	}
 	out.Hardware = a.Hardware()
 	return out, nil
+}
+
+// tableZoneLocked moves the table centre (ax, ay) so that the whole table
+// (markers from lo to hi along it, the phone row in front, and the spots
+// beside the boards) lies inside one of the default zones: the one holding
+// (ax, ay). The table-demo profile and the wave chain work per zone (at most
+// Table.MaxPhones phones, three in a chain), so a row split between zones A
+// and B could only ever show yellow halves. With areas drawn the table goes
+// where it was asked: staff chose the zones. Caller holds mu.
+func (a *App) tableZoneLocked(ax, ay, lo, hi float64) (float64, float64) {
+	if len(a.areas) > 0 {
+		return ax, ay
+	}
+	const m = snapSpotM + 0.2 // m of zone left around the table
+	for _, z := range detect.DefaultZones(a.liveConfig()) {
+		x0, y0, x1, y1 := polyBox(z.Poly)
+		if ax < x0 || ax > x1 || ay < y0 || ay > y1 {
+			continue
+		}
+		ax = clampTo(ax, x0-lo+m, x1-hi-m)
+		ay = clampTo(ay, y0+tableRowAhead/2+m, y1-tableRowAhead/2-m)
+		return ax, ay
+	}
+	return ax, ay
+}
+
+func polyBox(p [][2]float64) (x0, y0, x1, y1 float64) {
+	x0, y0, x1, y1 = math.Inf(1), math.Inf(1), math.Inf(-1), math.Inf(-1)
+	for _, q := range p {
+		x0, y0, x1, y1 = min(x0, q[0]), min(y0, q[1]), max(x1, q[0]), max(y1, q[1])
+	}
+	return
+}
+
+func polyCentre(p [][2]float64) (float64, float64) {
+	x0, y0, x1, y1 := polyBox(p)
+	return (x0 + x1) / 2, (y0 + y1) / 2
 }
 
 func clampTo(v, lo, hi float64) float64 {

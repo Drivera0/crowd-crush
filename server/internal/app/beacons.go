@@ -607,7 +607,10 @@ func (a *App) beaconUpdateLocked(id string, m *nodeMeta, now int64) {
 	fix, nearKey := a.beaconFixLocked(a.beaconObsLocked(id, scan, now))
 	mine := m.bcn.owns(m)
 	m.bcn.fix, m.bcn.at = fix, now
-	if !fix.OK || (fix.Dims < 2 && !m.unplaced && !mine) {
+	if a.snapUpdateLocked(id, m, fix, now) {
+		return // beside a board it walked up to (beaconsnap.go)
+	}
+	if !fix.OK || (fix.Dims < 2 && !m.unplaced && !mine) || a.heldLocked(m) {
 		return // no position, or a weaker one than the phone already has
 	}
 	x, y := fix.X, fix.Y

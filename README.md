@@ -46,6 +46,8 @@ The dashboard header shows which services are live.
 
 ## Demo script (~60 s)
 
+**For judges at a table** (boards on USB, judges' phones in a numbered row, push down the row, then "Surge around the real phones"): the pitch is [docs/PITCH.md](docs/PITCH.md), the run sheet [docs/DEMO.md](docs/DEMO.md), board setup [docs/TABLE-DEMO.md](docs/TABLE-DEMO.md), judge questions [docs/QA.md](docs/QA.md), slide content [docs/DECK.md](docs/DECK.md). The steps below are the original line demo.
+
 1. Open `/dash/` full-screen (⛶). The QR shows while nobody has joined. Click **Enable sound** once (browsers block audio until a click).
 2. People join, drag their dot to where they stand (a line works well), phones flat on chest. Nodes appear green; hover one for RTT and clock offset.
 3. Someone checks their phone → that node goes **blue** (handling: readings ignored).

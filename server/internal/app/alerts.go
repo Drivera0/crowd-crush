@@ -173,7 +173,8 @@ func (a *App) raiseLocked(source, kind, zone, from, to string, score float64, no
 
 func (a *App) detectTick(now int64) {
 	a.mu.Lock()
-	a.tableSyncLocked() // table demo profile follows the demo spot (table.go)
+	a.tableSyncLocked()   // table demo profile follows the demo spot (table.go)
+	a.snapTickLocked(now) // phones that walked away from a board go back (beaconsnap.go)
 	res, cch := a.live.step(now)
 	rch := a.stepRules(a.live, now)
 	a.packedLocked(a.live, now, false)

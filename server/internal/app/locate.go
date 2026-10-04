@@ -349,7 +349,7 @@ func (l *locState) step(p *pipeline, now int64) {
 		if m == nil {
 			continue
 		}
-		if m.pinned {
+		if a.heldLocked(m) {
 			// Lined up at the demo spot (demo.go): staff put it exactly
 			// there and the person stands there; steps, neighbours or a
 			// shake must not drift it out of the row.

@@ -4,8 +4,9 @@
 #   pwsh scripts/flash-sign.ps1 -Port COM7 # pick the port yourself
 #   pwsh scripts/flash-sign.ps1 -NoUpload  # just read the IP from a board that is already flashed
 #   pwsh scripts/flash-sign.ps1 -NoEnv     # don't touch .env
-#   pwsh scripts/flash-sign.ps1 -Beacon    # Bluetooth beacon "PULSE-S" instead of Wi-Fi: the sign is then driven over USB only
-#                                          # (set SIGN_URL=serial:auto yourself; .env is not touched)
+#   pwsh scripts/flash-sign.ps1 -Beacon    # then switch on Bluetooth beacon "PULSE-S" (no Wi-Fi: the sign is driven over USB only;
+#                                          # set SIGN_URL=serial:auto yourself; .env is not touched). Same firmware either way:
+#                                          # the mode is a switch in the sign's flash, see pwsh scripts/boards.ps1 beacon on|off
 #
 # Needs the Arduino IDE 2 (its bundled arduino-cli is used) or arduino-cli on PATH.
 # arduino/sign/arduino_secrets.h holds the Wi-Fi name and password (optional: without it the sign
@@ -55,44 +56,48 @@ if (-not $NoUpload) {
   $b = New-SketchBuildDir $sketch 'sign' $root
   & $cli core install arduino:renesas_uno | Out-Null
   Write-Host "Compiling and uploading firmware $($b.Fw)…"
-  if ($Beacon) {
-    & $cli lib install ArduinoBLE | Out-Null
-    & $cli compile --fqbn $fqbn --build-property 'compiler.cpp.extra_flags=-DSIGN_BEACON=1' --upload --port $Port $b.Dir
-  } else {
-    & $cli compile --fqbn $fqbn --upload --port $Port $b.Dir
-  }
+  & $cli lib install ArduinoBLE | Out-Null # beacon mode (always built in; off unless switched on)
+  & $cli compile --fqbn $fqbn --upload --port $Port $b.Dir
   if ($LASTEXITCODE -ne 0) { throw 'Upload failed. Close the Arduino IDE serial monitor (and stop Pulse if it drives the sign over USB), and try again. Still stuck: double-tap the RESET button and retry.' }
   Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue
   Start-Sleep -Seconds 2 # board resets after upload
 }
 
 if ($Beacon) {
-  Write-Host 'Sign flashed as Bluetooth beacon PULSE-S (no Wi-Fi). Drive it over USB: SIGN_URL=serial:auto, with the server running natively on this machine.'
-  exit 0
+  & "$PSScriptRoot/boards.ps1" beacon on
+  exit $LASTEXITCODE
 }
 
 # ---- ask the sign over USB for its status until it has joined Wi-Fi
 Write-Host "Waiting up to $TimeoutSec s for the sign to join Wi-Fi…"
-$sp = Open-BoardPort $Port $true
 $url = $null
 $st = $null
 $deadline = (Get-Date).AddSeconds($TimeoutSec)
-try {
-  while (-not $url -and (Get-Date) -lt $deadline) {
+# The port is opened per try: a sign in beacon mode restarts its radio module at boot and the port drops for a moment.
+while (-not $url -and (Get-Date) -lt $deadline) {
+  $s = $null
+  $sp = $null
+  try {
+    $sp = Open-BoardPort $Port $true
     $s = Get-BoardStatus $sp 3
-    if ($s) {
-      $st = $s
-      if ($s.wifi -and $s.ip) { $url = "http://$($s.ip)" }
-      elseif ($s.wifi) {
-        # Older firmware has no "ip": fall back to its boot line.
-        $line = Wait-BoardLine $sp 'Sign ready:' 2
-        if ($line -match 'SIGN_URL=(http://[0-9.]+)') { $url = $Matches[1] }
-      }
+    if ($s -and $s.wifi -and -not $s.ip) {
+      # Older firmware has no "ip": fall back to its boot line.
+      $line = Wait-BoardLine $sp 'Sign ready:' 2
+      if ($line -match 'SIGN_URL=(http://[0-9.]+)') { $url = $Matches[1] }
     }
-    if (-not $url) { Start-Sleep -Seconds 1 }
+  } catch {
+  } finally {
+    if ($sp -and $sp.IsOpen) { $sp.Close() }
   }
-} finally {
-  if ($sp.IsOpen) { $sp.Close() }
+  if ($s) {
+    $st = $s
+    if ($s.mode -eq 'beacon') {
+      Write-Host "The sign is in Bluetooth beacon mode ($($s.name), no Wi-Fi; kept across flashing). Drive it over USB (SIGN_URL=serial:auto), or: pwsh scripts/boards.ps1 beacon off"
+      exit 0
+    }
+    if ($s.wifi -and $s.ip) { $url = "http://$($s.ip)" }
+  }
+  if (-not $url) { Start-Sleep -Seconds 1 }
 }
 if ($st) { Write-Host "  sign: firmware $($st.fw), level $($st.level), Wi-Fi $(if ($st.wifi) { $st.ssid } else { "not joined (trying $($st.ssid))" })" }
 if (-not $url) {

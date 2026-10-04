@@ -111,6 +111,8 @@ type nodeMeta struct {
 	// it, and it keeps its place in the row while it reconnects. Cleared
 	// when the phone places itself (tap, GPS, tower check-in).
 	pinned bool
+
+	dm demoMove // moving about at the table demo: tapped spot, kept place, beside a board (demomove.go, beaconsnap.go)
 }
 
 func (m *nodeMeta) src() string {
@@ -447,6 +449,9 @@ func (a *App) PhonePos(id string, x, y float64) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.demoTapLocked(hub.Now(), id, x, y) {
+		return // demo spot on: it left its place in the row (demomove.go)
+	}
 	if m := a.live.meta[id]; m != nil {
 		m.pinned = false // the phone placed itself
 	}
@@ -842,7 +847,7 @@ func (a *App) snapshotLocked(now int64) protocol.Snapshot {
 		n := protocol.Node{ID: id, X: r2(m.x), Y: r2(m.y), RTT: m.rtt, Offset: m.offset, AgeMs: max(0, pnow-m.lastRecv),
 			UA: m.ua, Acc: m.acc, Src: m.src(), Outside: m.outside,
 			Name: m.name, Color: m.color, Real: m.real, Shake: m.connected && m.shake.active(now), Unplaced: m.unplaced,
-			Slot: slots[id]}
+			Slot: slots[id], Near: m.dm.nearLabel(m)}
 		if !m.outside && !m.unplaced {
 			n.Zone = p.det.ZoneOf(m.x, m.y)
 		}

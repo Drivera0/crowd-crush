@@ -20,8 +20,10 @@ func TestTableDemo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Default 24 × 16 m venue: the row is centred on the map, A left, B right.
-	want := map[string]protocol.Point{"A": {10.8, 7.5}, "sign": {11.6, 7.5}, "laptop": {12.4, 7.5}, "B": {13.2, 7.5}}
+	// Default 24 × 16 m venue: the table is centred in zone A (the left
+	// half), A at the left end, B at the right end, the sign in the middle
+	// with the laptop beside it; the Bluetooth boards 1.5 m apart.
+	want := map[string]protocol.Point{"A": {4.5, 7.5}, "sign": {6, 7.5}, "laptop": {6.5, 7.5}, "B": {7.5, 7.5}}
 	a.mu.Lock()
 	got := a.hwPos
 	a.mu.Unlock()
@@ -30,7 +32,7 @@ func TestTableDemo(t *testing.T) {
 			t.Errorf("%s at %v, want %v", k, got[k], p)
 		}
 	}
-	if d := res.Demo; !d.On || d.X != 11.1 || d.Y != 8.5 || d.Spacing != DemoSpacing {
+	if d := res.Demo; !d.On || d.X != 5.1 || d.Y != 8.5 || d.Spacing != DemoSpacing {
 		t.Errorf("demo spot %+v", d)
 	}
 	if len(res.Lights) != 2 || res.Lights[0] != (protocol.TableLight{Key: "A", Shows: "Zone A"}) || res.Lights[1].Shows != "Zone B" {

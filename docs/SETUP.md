@@ -33,7 +33,7 @@ Run `make env` (Mac / Git Bash). It explains each value, asks for it, writes `.e
 | `ELEVENLABS_API_KEY` | https://elevenlabs.io/app/settings/api-keys → Create key with Text to Speech access |
 | `ELEVENLABS_VOICE_ID` | optional: Voice library → ⋯ → Copy voice ID |
 | `SIGN_URL` | after step 4: `serial:auto,A=serial:auto,B=serial:auto` for boards plugged into this laptop (`scripts/boards.sh env --write` writes it), or their Wi-Fi URLs |
-| `PUBLIC_URL` | after step 3: `https://pulse.yourname.tech` |
+| `PUBLIC_URL` | after step 3: `https://pulsecrowd.tech` |
 
 `./bin/pulse -check` (or `make doctor`) re-tests at any time. Never commit `.env`.
 
@@ -48,10 +48,10 @@ Phones need HTTPS for motion sensors; the tunnel gives you that with no port for
    ```sh
    cloudflared tunnel login                       # browser opens, pick the domain
    cloudflared tunnel create pulse
-   cloudflared tunnel route dns pulse pulse.yourname.tech
+   cloudflared tunnel route dns pulse pulsecrowd.tech
    cloudflared tunnel run --url http://localhost:8080 pulse
    ```
-5. Open `https://pulse.yourname.tech/dash/` and set `PUBLIC_URL=https://pulse.yourname.tech` in `.env`.
+5. Open `https://pulsecrowd.tech/dash/` and set `PUBLIC_URL=https://pulsecrowd.tech` in `.env` (or paste it into the dashboard's QR window).
 
 Until DNS is ready: `cloudflared tunnel --url http://localhost:8080` gives a random `https://….trycloudflare.com` URL that works the same way.
 
@@ -122,7 +122,7 @@ Wi-Fi is optional and never blocks anything: a board boots, answers USB, scans B
 Arduino IDE → Boards Manager → **Arduino UNO R4 Boards** (sign, `arduino/sign/sign.ino`) and **esp32 by Espressif** (zone lights, board "ESP32 Dev Module", Tools → Partition Scheme → **Huge APP**, `arduino/zone-light/zone-light.ino`; hold **BOOT** if it sticks at "Connecting…"). The build id is then `dev`. Optional extras on the zone lights: LEDs on GPIO 25/26/27, a buzzer on 14.
 
 - **WSL can't see USB ports** (unless attached with `usbipd`), so a server inside WSL uses the boards' Wi-Fi URLs. USB mode is for the Mac, or a native Windows/Linux build, at the demo.
-- The sign's Bluetooth beacon build (`flash-sign.ps1 -Beacon`) hung one R4 whose radio firmware was too old: leave it alone unless you've updated the radio firmware.
+- The sign's Bluetooth beacon (`PULSE-S`, a third position anchor) is a switch, not a build: `scripts/boards.sh beacon on|off` (Windows: `pwsh scripts/boards.ps1 beacon on|off`). While on, the sign has no Wi-Fi and must be driven over USB, so keep it off for a server in WSL. Details: [BEACONS.md](BEACONS.md#the-sign-as-a-third-anchor). (The old separate beacon build hung an R4. Not the radio firmware: it is 0.6.0, the latest. Most likely Bluetooth was started on a radio module still set up for Wi-Fi. The switch restarts the radio module before starting Bluetooth and falls back to Wi-Fi if it fails.)
 
 ## 5. Before judging
 
