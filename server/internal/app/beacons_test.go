@@ -439,6 +439,7 @@ func TestPhoneBeacons(t *testing.T) {
 // hand or by GPS, and GPS doesn't pull it back while the fix is fresh.
 func TestPhoneBeacons2D(t *testing.T) {
 	a := beaconApp(t)
+	a.SetLocate(protocol.LocateConfig{}) // the position estimator off: this test pins the GPS path it replaces (locate_test.go covers that path with it on)
 	if _, err := a.SetHardwarePos("C", boardC.x, boardC.y); err != nil {
 		t.Fatal(err)
 	}

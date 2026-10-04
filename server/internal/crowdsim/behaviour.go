@@ -476,6 +476,7 @@ func (w *World) frame() {
 
 // behave runs the concert routine and moves groups between purposes.
 func (w *World) behave() {
+	w.enter()
 	w.frame()
 	if w.routine() && w.periodic == 0 {
 		rate := float64(len(w.agents)) * churnPerSec

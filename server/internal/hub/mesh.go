@@ -224,7 +224,7 @@ func (hb *Hub) yield(pc *phoneConn, now int64) {
 
 var relayable = map[string]bool{
 	protocol.TypeHello: true, protocol.TypeMotion: true, protocol.TypePos: true, // never gps: raw coordinates do not pass through other phones
-	protocol.TypeNear: true, protocol.TypeSignal: true, protocol.TypeRTC: true, protocol.TypeMPos: true, protocol.TypeBeacons: true,
+	protocol.TypeNear: true, protocol.TypeSignal: true, protocol.TypeRTC: true, protocol.TypeMPos: true, protocol.TypeBeacons: true, protocol.TypeDR: true,
 }
 
 // relayIn handles a relay envelope delivered by pc.

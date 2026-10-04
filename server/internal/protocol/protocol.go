@@ -65,6 +65,9 @@ const (
 const (
 	SrcManual = "manual"
 	SrcGPS    = "gps"
+	// SrcEst: placed by the position estimator without GPS (the entry
+	// spot, dead reckoning, motion neighbours); see locate.go.
+	SrcEst = "est"
 )
 
 // ---- Phone → server ----
@@ -212,6 +215,17 @@ type Node struct {
 	// GPS fix, not lined up at the demo spot). x, y are 0 and mean nothing;
 	// like an outside phone it counts toward no zone, cluster or neighbour.
 	Unplaced bool `json:"unplaced,omitempty"`
+	// The position estimator (locate.go). With it on, X, Y are its
+	// estimate and Acc its uncertainty (the 68 % radius in metres; 0 = as
+	// good as placed by hand). Raw: where the phone would be shown without
+	// it (the smoothed GPS fix or the hand placement), when that differs.
+	// Loc: the sources that went into the estimate (entry, gps, steps,
+	// fix, beacon, mesh, near, map). Lost: the estimate is too vague to
+	// say where in the venue the phone is; it counts toward no cluster or
+	// density.
+	Raw  *Point   `json:"raw,omitempty"`
+	Loc  []string `json:"loc,omitempty"`
+	Lost bool     `json:"lost,omitempty"`
 }
 
 // Point is [x, y] in venue metres.
@@ -578,6 +592,9 @@ type SimFrame struct {
 	Bodies [][4]float64 `json:"bodies"`
 	T      float64      `json:"t"`
 	Action string       `json:"action"`
+	// Loc: how far the positions Pulse uses for the simulated phones are
+	// from where their owners stand (locate.go), refreshed once a second.
+	Loc *LocError `json:"loc,omitempty"`
 }
 
 // SimExit is an exit gap in the simulated venue's wall.

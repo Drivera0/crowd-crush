@@ -348,7 +348,9 @@ func (hb *Hub) phoneMsg(id, ua, typ string, b []byte, now int64, correct func(in
 	case protocol.TypeBeacons:
 		hb.beacons(id, b) // Bluetooth beacon report (beacons.go)
 	default:
-		hb.meshMsg(id, typ, b, now)
+		if !hb.dr(id, typ, b) { // the phone's own dead reckoning (locate.go)
+			hb.meshMsg(id, typ, b, now)
+		}
 	}
 }
 

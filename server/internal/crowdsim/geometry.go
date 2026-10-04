@@ -104,6 +104,18 @@ func (g *Geometry) inStage(x, y float64) bool {
 	return y < g.BarrierY && x > g.BarrierX0 && x < g.BarrierX1
 }
 
+// StageOutline is the area nobody may stand in: the layout's stage
+// outline, or the default stage pit.
+func (g *Geometry) StageOutline() [][2]float64 {
+	if len(g.Stage) >= 3 {
+		return g.Stage
+	}
+	if g.custom || g.BarrierY <= 0 {
+		return nil
+	}
+	return [][2]float64{{g.BarrierX0, 0}, {g.BarrierX1, 0}, {g.BarrierX1, g.BarrierY}, {g.BarrierX0, g.BarrierY}}
+}
+
 // closest is the closest point of segment s to (x, y).
 func closest(s Seg, x, y float64) (cx, cy float64) {
 	dx, dy := s.X1-s.X0, s.Y1-s.Y0

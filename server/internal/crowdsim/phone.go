@@ -59,6 +59,9 @@ const (
 	// venue metres, not clamped, with the accuracy radius Acc (m). The
 	// receiver smooths and gates it as the server does a live fix.
 	EvGPS
+	// EvDR is the phone's own dead reckoning (protocol "dr", see dr.go):
+	// Steps counted and metres walked East and North, running totals.
+	EvDR
 )
 
 // Event is one phone message.
@@ -73,6 +76,8 @@ type Event struct {
 	// cell) until a usable fix arrives.
 	Auto        bool
 	Offset, RTT int64           // sync
+	Steps       int             // dr
+	East, North float64         // dr
 	M           protocol.Motion // motion
 }
 
@@ -250,6 +255,7 @@ func (w *World) phones() {
 		w.env.Common.Step(Dt, w.realism.GPS, w.envRng)
 	}
 	w.env.StartMs = w.StartMs
+	w.env.Bearing = w.bearing
 	for _, a := range w.agents {
 		p := a.phone
 		if p == nil {
@@ -303,7 +309,7 @@ func (w *World) phones() {
 		}
 		if p.dev != nil {
 			// A messy phone: the device decides what is sent, and when.
-			w.events = p.dev.Tick(Raw{T: w.T, X: a.X, Y: a.Y, BX: bx, BY: by, BZ: bz, Rot: rot, Gait: g, Step: p.step}, w.env, w.events)
+			w.events = p.dev.Tick(Raw{T: w.T, X: a.X, Y: a.Y, BX: bx, BY: by, BZ: bz, Rot: rot, Gait: g, Step: p.step, Face: a.face, Speed: speed, Dir: math.Atan2(a.VY, a.VX)}, w.env, w.events)
 			continue
 		}
 		p.ax += bx
