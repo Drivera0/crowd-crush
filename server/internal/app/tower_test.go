@@ -128,6 +128,7 @@ func TestTowerCheckIn(t *testing.T) {
 // check-in calibrates nothing.
 func TestTowerGPSBias(t *testing.T) {
 	a := demoApp(t)
+	a.SetLocate(protocol.LocateConfig{}) // the position estimator off: this test pins the GPS path it replaces (locate_test.go covers that path with it on)
 	anchor := geo.Anchor{Lat: 49.2781, Lon: -122.9199, Bearing: 30}
 	if _, err := a.SetVenue(protocol.Venue{W: 24, H: 16, Lat: anchor.Lat, Lon: anchor.Lon, Bearing: anchor.Bearing, Geo: true}); err != nil {
 		t.Fatal(err)

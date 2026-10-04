@@ -191,7 +191,7 @@ func TestVenueAPI(t *testing.T) {
 func TestGPS(t *testing.T) {
 	anchor := geo.Anchor{Lat: 49.2781, Lon: -122.9199, Bearing: 0}
 	recDir := t.TempDir()
-	a, _ := testServer(t, Options{RecordingsDir: recDir})
+	a, _ := testServer(t, Options{RecordingsDir: recDir, NoLocate: true}) // the position estimator off: this test pins the GPS path it replaces (locate_test.go covers that path with it on)
 	a.PhoneHello("p1", 1, 1, "test")
 
 	// No anchor yet: ignored.

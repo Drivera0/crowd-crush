@@ -330,7 +330,8 @@ func TestSimRealism(t *testing.T) {
 	}
 	run := func(req SimStart) res {
 		t.Helper()
-		a := New(Options{Detect: detect.DefaultConfig(), RecordingsDir: t.TempDir()})
+		// The position estimator off: this test pins the GPS path it replaces (locate_test.go covers that path with it on).
+		a := New(Options{Detect: detect.DefaultConfig(), RecordingsDir: t.TempDir(), NoLocate: true})
 		req.People, req.Participation, req.Seed = 200, 0.6, 3
 		if err := a.startSimAt(req, simT0); err != nil {
 			t.Fatal(err)

@@ -42,6 +42,11 @@ type SimStart struct {
 	Seed          int64             `json:"seed,omitempty"` // 0 = random
 	Realism       string            `json:"realism,omitempty"`
 	Imperfections *SimImperfections `json:"imperfections,omitempty"`
+	// WalkIn: the venue starts empty and everyone comes in at the entry
+	// spot of the position estimator (PUT /api/locate) over WalkInS
+	// seconds (0 = 60), as with one shared QR code at the door.
+	WalkIn  bool    `json:"walkIn,omitempty"`
+	WalkInS float64 `json:"walkInS,omitempty"`
 }
 
 // SimImperfections are per-imperfection strengths; nil = the preset's.
@@ -49,6 +54,13 @@ type SimImperfections struct {
 	GPS     *float64 `json:"gps,omitempty"`
 	Carry   *float64 `json:"carry,omitempty"`
 	Dropout *float64 `json:"dropout,omitempty"`
+	// For the position estimator (crowdsim/heading.go, dr.go): Heading =
+	// the phones report a compass heading (strength of its error); NoPos =
+	// they never say where they are; PhoneDR = they report their own step
+	// count and displacement (a model).
+	Heading *float64 `json:"heading,omitempty"`
+	PhoneDR *float64 `json:"phoneDR,omitempty"`
+	NoPos   *bool    `json:"noPos,omitempty"`
 }
 
 // realism resolves the preset and the overrides.
@@ -61,11 +73,14 @@ func (r SimStart) realism() (crowdsim.Realism, error) {
 		for _, f := range []struct {
 			v   *float64
 			dst *float64
-		}{{o.GPS, &rl.GPS}, {o.Carry, &rl.Carry}, {o.Dropout, &rl.Dropout}} {
+		}{{o.GPS, &rl.GPS}, {o.Carry, &rl.Carry}, {o.Dropout, &rl.Dropout}, {o.Heading, &rl.Heading}, {o.PhoneDR, &rl.PhoneDR}} {
 			if f.v != nil {
 				*f.dst = *f.v
 			}
 		}
+	}
+	if o := r.Imperfections; o != nil && o.NoPos != nil {
+		rl.NoPos = *o.NoPos
 	}
 	return rl, rl.Validate()
 }
@@ -112,12 +127,16 @@ func (a *App) startSimAt(req SimStart, now int64) error {
 	running := a.sim != nil
 	cfg := a.liveConfig()
 	layout := a.venue.Layout
+	bearing, entry := a.locSimSetup(req)
 	a.mu.Unlock()
 	if running {
 		return errSimRunning
 	}
+	if req.WalkIn && entry == nil {
+		return errors.New("walkIn needs an entry spot: PUT /api/locate {on: true, entry: {on: true, x, y}}")
+	}
 	w, err := crowdsim.New(crowdsim.Config{W: cfg.VenueW, H: cfg.VenueH, People: req.People,
-		Participation: req.Participation, Scenario: req.Scenario, Seed: req.Seed, StartMs: now, Layout: layout, Realism: rl})
+		Participation: req.Participation, Scenario: req.Scenario, Seed: req.Seed, StartMs: now, Layout: layout, Realism: rl, Bearing: bearing, Entry: entry})
 	if err != nil {
 		return err
 	}
@@ -131,6 +150,7 @@ func (a *App) startSimAt(req SimStart, now int64) error {
 		return errSimRunning
 	}
 	a.applyZones(s.p)
+	a.locAttach(s.p, true, now)
 	a.replay = nil
 	a.sim = s
 	a.feedSim(s, w.Events(), now)
@@ -227,7 +247,7 @@ func (a *App) simTick(now int64) {
 	}
 	s.startMs, s.simT = s.w.StartMs, s.w.T
 	a.feedSim(s, ev, now)
-	s.frame = protocol.SimFrame{Bodies: bodies, T: math.Round(s.w.T*10) / 10, Action: s.w.Action}
+	s.frame = protocol.SimFrame{Bodies: bodies, T: math.Round(s.w.T*10) / 10, Action: s.w.Action, Loc: a.locSimError(s, now)}
 }
 
 // feedSim delivers simulated phone messages exactly as the hub delivers
@@ -260,6 +280,10 @@ func (a *App) feedSim(s *simRun, ev []crowdsim.Event, now int64) {
 			if _, _, _, ok := a.motionIn(s.p, e.ID, e.M, recv); ok {
 				a.simMsgs++
 			}
+		case crowdsim.EvDR:
+			if l := s.p.loc; l != nil {
+				l.est.DR(e.ID, now, e.Steps, e.East, e.North)
+			}
 		case crowdsim.EvGone:
 			a.goneIn(s.p, now, e.ID)
 		}
@@ -280,6 +304,9 @@ func (a *App) simGPSIn(p *pipeline, now int64, id string, x, y, acc float64) {
 	cfg := p.cfg()
 	if !(acc > 0 && acc <= cfg.GPSMaxAcc) {
 		return
+	}
+	if a.locGPS(p, now, id, m, x, y, acc) {
+		return // the position estimator takes the fix as it is (locate.go)
 	}
 	x, y = m.gps.Add(x, y, acc)
 	m.acc = math.Max(0.1, math.Round(m.gps.Acc*10)/10)
