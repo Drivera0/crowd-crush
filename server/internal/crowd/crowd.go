@@ -6,7 +6,10 @@
 // Density is phones per m² of the cluster's disc (centre = centroid,
 // radius = farthest member + 0.5 m, area at least 1 m²). Not everyone has
 // the page open, so people = phones / Participation and the level uses the
-// estimated density = phones/m² ÷ Participation.
+// estimated density = max(disc density, peak local density) ÷ Participation,
+// where the peak local density is the phones within LocalR (1.5 m) of a
+// member ÷ that disc's area, at the 90th percentile of the members: a
+// large crowd with a packed front reads as packed, not as its thin average.
 package crowd
 
 import (
@@ -48,6 +51,10 @@ const (
 	MatchDist = 2.0
 	GraceMs   = 2000
 	padM      = 0.5 // added to the farthest member for the radius
+	// LocalR is the radius (m) of the local density around each member.
+	LocalR = 1.5
+	// PeakQuantile picks the local density that counts for the cluster.
+	PeakQuantile = 0.9
 )
 
 // Point is one phone position.
@@ -83,6 +90,9 @@ type Cluster struct {
 	R       float64 // m
 	Count   int     // phones
 	Density float64 // phones per m²
+	Peak    float64 // phones per m² within LocalR of a member, 90th percentile over members
+	PeakX   float64 // where that member stands
+	PeakY   float64
 	People  int     // estimated head count (Count / Participation)
 	Est     float64 // estimated people per m²
 	Trend   string
@@ -288,11 +298,35 @@ func describe(pts []Point, idx []int, participation float64) Cluster {
 	c.R = far + padM
 	c.Count = len(idx)
 	c.Density = n / c.Area()
+	// Peak local density: phones within LocalR of a member, at the
+	// PeakQuantile of the members (the max of many noisy counts would be
+	// biased high). A big crowd (say 20 m of people pressed against a
+	// barrier) is one cluster whose disc is mostly thin crowd, so the disc
+	// average hides a packed front; the local peak does not.
+	r2 := LocalR * LocalR
+	type local struct {
+		k    int
+		x, y float64
+	}
+	loc := make([]local, 0, len(idx))
+	for _, i := range idx {
+		k := 0
+		for _, j := range idx {
+			dx, dy := pts[i].X-pts[j].X, pts[i].Y-pts[j].Y
+			if dx*dx+dy*dy <= r2 {
+				k++
+			}
+		}
+		loc = append(loc, local{k, pts[i].X, pts[i].Y})
+	}
+	sort.SliceStable(loc, func(a, b int) bool { return loc[a].k < loc[b].k })
+	q := loc[min(len(loc)-1, int(PeakQuantile*float64(len(loc))))]
+	c.Peak, c.PeakX, c.PeakY = float64(q.k)/(math.Pi*r2), q.x, q.y
 	if participation <= 0 {
 		participation = 1
 	}
 	c.People = int(math.Round(n / participation))
-	c.Est = c.Density / participation
+	c.Est = math.Max(c.Density, c.Peak) / participation
 	sort.Strings(c.Members)
 	return c
 }

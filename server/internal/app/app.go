@@ -188,6 +188,8 @@ type App struct {
 	areas     []protocol.Area
 	live      *pipeline
 	replay    *replayState
+	sim       *simRun // in-process crowd simulation, see sim.go
+	simMsgs   int64   // simulated motion messages fed so far
 	rec       *recordingState
 	alerts    []protocol.Alert
 	lastBrief map[string]int64
@@ -286,21 +288,28 @@ func (a *App) LegacyPos(row, col int) (x, y float64) {
 }
 
 func (a *App) PhoneHello(id string, x, y float64, ua string) {
-	now := hub.Now()
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	x, y = a.liveConfig().Clamp(x, y)
-	m := a.live.meta[id]
+	a.helloIn(a.live, hub.Now(), id, x, y, ua)
+}
+
+// helloIn places a phone in pipeline p. Live phones and simulated phones
+// (crowdsim) take the same path. Caller holds mu.
+func (a *App) helloIn(p *pipeline, now int64, id string, x, y float64, ua string) {
+	x, y = p.cfg().Clamp(x, y)
+	m := p.meta[id]
 	if m == nil {
 		m = &nodeMeta{joinedAt: now}
-		a.live.meta[id] = m
-		log.Printf("phone %s joined at %.1f, %.1f m (%s)", short(id), x, y, ua)
+		p.meta[id] = m
+		if p == a.live {
+			log.Printf("phone %s joined at %.1f, %.1f m (%s)", short(id), x, y, ua)
+		}
 	}
 	m.x, m.y, m.acc, m.outside = x, y, 0, false
 	m.gps.Reset()
 	m.ua, m.connected, m.goneAt = ua, true, 0
 	m.lastRecv = now
-	a.live.place(id, m)
+	p.place(id, m)
 	a.record(store.Record{K: store.KindHello, T: now, ID: id, X: store.F(r2(x)), Y: store.F(r2(y)), UA: ua})
 }
 
@@ -308,17 +317,21 @@ func (a *App) PhonePos(id string, x, y float64) {
 	if math.IsNaN(x) || math.IsNaN(y) || math.IsInf(x, 0) || math.IsInf(y, 0) {
 		return
 	}
-	now := hub.Now()
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	m := a.live.meta[id]
+	a.posIn(a.live, hub.Now(), id, x, y)
+}
+
+// posIn moves a phone placed by hand in pipeline p. Caller holds mu.
+func (a *App) posIn(p *pipeline, now int64, id string, x, y float64) {
+	m := p.meta[id]
 	if m == nil {
 		return
 	}
-	x, y = a.liveConfig().Clamp(x, y)
+	x, y = p.cfg().Clamp(x, y)
 	m.x, m.y, m.acc, m.outside = x, y, 0, false
 	m.gps.Reset()
-	a.live.place(id, m)
+	p.place(id, m)
 	a.record(store.Record{K: store.KindPos, T: now, ID: id, X: store.F(r2(x)), Y: store.F(r2(y))})
 }
 
@@ -356,46 +369,62 @@ func (a *App) PhoneGPS(id string, lat, lon, acc float64) {
 func (a *App) PhoneSync(id string, offset, rtt int64) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	m := a.live.meta[id]
+	a.syncIn(a.live, hub.Now(), id, offset, rtt)
+}
+
+// syncIn stores a phone's clock sync in pipeline p. Caller holds mu.
+func (a *App) syncIn(p *pipeline, now int64, id string, offset, rtt int64) {
+	m := p.meta[id]
 	if m == nil {
 		return
 	}
 	m.synced, m.offset, m.rtt = true, offset, rtt
-	a.record(store.Record{K: store.KindSync, T: hub.Now(), ID: id, RTT: rtt, Offset: offset})
+	a.record(store.Record{K: store.KindSync, T: now, ID: id, RTT: rtt, Offset: offset})
 }
 
 func (a *App) PhoneMotion(id string, mo protocol.Motion, recv int64) {
 	a.mu.Lock()
-	m := a.live.meta[id]
-	if m == nil {
-		a.mu.Unlock()
+	zone, x, y, ok := a.motionIn(a.live, id, mo, recv)
+	a.mu.Unlock()
+	if !ok {
 		return
 	}
-	m.lastRecv = recv
-	m.addSample(protocol.Sample{T: mo.T, AX: mo.AX, AY: mo.AY, AZ: mo.AZ, Rot: mo.Rot})
-	a.live.det.Add(id, detect.Sample{T: mo.T, AX: mo.AX, AY: mo.AY, AZ: mo.AZ, Rot: mo.Rot})
-	a.record(store.Record{K: store.KindM, T: recv, ID: id, CT: mo.T, AX: mo.AX, AY: mo.AY, AZ: mo.AZ, Rot: mo.Rot})
-	zone := ""
-	if !m.outside {
-		zone = a.live.det.ZoneOf(m.x, m.y)
-	}
-	x, y := m.x, m.y
-	a.mu.Unlock()
 	a.opt.Sink.Reading(store.Reading{Time: time.UnixMilli(mo.T), PhoneID: id, Zone: zone, X: r2(x), Y: r2(y),
 		AX: mo.AX, AY: mo.AY, AZ: mo.AZ, Rot: mo.Rot})
 }
 
+// motionIn feeds one clock-corrected reading to pipeline p and the labelled
+// run being recorded. Caller holds mu.
+func (a *App) motionIn(p *pipeline, id string, mo protocol.Motion, recv int64) (zone string, x, y float64, ok bool) {
+	m := p.meta[id]
+	if m == nil {
+		return "", 0, 0, false
+	}
+	m.lastRecv = recv
+	m.addSample(protocol.Sample{T: mo.T, AX: mo.AX, AY: mo.AY, AZ: mo.AZ, Rot: mo.Rot})
+	p.det.Add(id, detect.Sample{T: mo.T, AX: mo.AX, AY: mo.AY, AZ: mo.AZ, Rot: mo.Rot})
+	a.record(store.Record{K: store.KindM, T: recv, ID: id, CT: mo.T, AX: mo.AX, AY: mo.AY, AZ: mo.AZ, Rot: mo.Rot})
+	if !m.outside {
+		zone = p.det.ZoneOf(m.x, m.y)
+	}
+	return zone, m.x, m.y, true
+}
+
 func (a *App) PhoneGone(id string) {
-	now := hub.Now()
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if m := a.live.meta[id]; m != nil {
-		m.connected, m.goneAt = false, now
-	}
+	a.goneIn(a.live, hub.Now(), id)
 	delete(a.sentState, id)
 	delete(a.sentAt, id)
-	a.record(store.Record{K: store.KindBye, T: now, ID: id})
 	log.Printf("phone %s left", short(id))
+}
+
+// goneIn marks a phone disconnected in pipeline p. Caller holds mu.
+func (a *App) goneIn(p *pipeline, now int64, id string) {
+	if m := p.meta[id]; m != nil {
+		m.connected, m.goneAt = false, now
+	}
+	a.record(store.Record{K: store.KindBye, T: now, ID: id})
 }
 
 func (a *App) DashWelcome() [][]byte {
@@ -432,10 +461,12 @@ func (a *App) Run(ctx context.Context) {
 	det := time.NewTicker(DetectEvery)
 	snap := time.NewTicker(SnapshotEvery)
 	st := time.NewTicker(PhoneStateEvery)
+	simT := time.NewTicker(SimTickEvery)
+	defer simT.Stop()
 	defer det.Stop()
 	defer snap.Stop()
 	defer st.Stop()
-	lastCount, lastCountT := a.Hub.MotionCount(), hub.Now()
+	lastCount, lastCountT := a.motionCount(), hub.Now()
 	for {
 		select {
 		case <-ctx.Done():
@@ -444,7 +475,7 @@ func (a *App) Run(ctx context.Context) {
 		case <-det.C:
 			now := hub.Now()
 			if now-lastCountT >= 1000 {
-				c := a.Hub.MotionCount()
+				c := a.motionCount()
 				a.mu.Lock()
 				a.msgRate = float64(c-lastCount) * 1000 / float64(now-lastCountT)
 				if a.rec != nil {
@@ -461,6 +492,17 @@ func (a *App) Run(ctx context.Context) {
 			a.Hub.BroadcastJSON(s)
 		case <-st.C:
 			a.phoneStates(hub.Now())
+		case <-simT.C:
+			// Physics runs off the loop so a slow tick never delays detection.
+			a.mu.Lock()
+			s := a.sim
+			a.mu.Unlock()
+			if s != nil && s.busy.CompareAndSwap(false, true) {
+				go func() {
+					defer s.busy.Store(false)
+					a.simTick(hub.Now())
+				}()
+			}
 		}
 	}
 }
@@ -475,13 +517,8 @@ type pendingAlert struct {
 func (a *App) detectTick(now int64) {
 	a.mu.Lock()
 	res, cch := a.live.step(now)
-	for id, m := range a.live.meta {
-		if !m.connected && now-m.goneAt > ForgetAfterMs {
-			delete(a.live.meta, id)
-			a.live.det.RemovePhone(id)
-		}
-	}
-	active, pnow, isReplay := a.live, now, false
+	forget(a.live, now)
+	active, pnow, isReplay, src := a.live, now, false, ""
 	changes := res.Changes
 	if r := a.replay; r != nil {
 		pnow = r.now(now)
@@ -489,10 +526,28 @@ func (a *App) detectTick(now int64) {
 		var rres detect.Result
 		rres, cch = r.p.step(pnow)
 		changes = rres.Changes
-		active, isReplay = r.p, true
+		active, isReplay, src = r.p, true, " [replay]"
 		if pnow > r.recEnd+3000 {
 			log.Printf("replay %s finished, back to live", r.name)
 			a.replay = nil
+		}
+	}
+	if s := a.sim; s != nil {
+		var sres detect.Result
+		sres, cch = s.p.step(now)
+		changes = sres.Changes
+		active, isReplay, src = s.p, true, " [sim]"
+		forget(s.p, now)
+		// Pulse's first red alert of the run (wave or density), for the lead time.
+		for _, ch := range changes {
+			if ch.To == protocol.LevelRed && s.alertAt < 0 {
+				s.alertAt = s.seconds(now)
+			}
+		}
+		for _, ch := range cch {
+			if ch.To == protocol.LevelRed && s.alertAt < 0 {
+				s.alertAt = s.seconds(now)
+			}
 		}
 	}
 	var pend []pendingAlert
@@ -524,7 +579,7 @@ func (a *App) detectTick(now int64) {
 	a.mu.Unlock()
 
 	for _, pa := range pend {
-		log.Printf("%s %s: %s (score %.2f)%s", pa.al.Kind, pa.al.Zone, pa.al.Level, pa.al.Score, map[bool]string{true: " [replay]"}[pa.replay])
+		log.Printf("%s %s: %s (score %.2f)%s", pa.al.Kind, pa.al.Zone, pa.al.Level, pa.al.Score, src)
 		a.pushAlert(pa.al)
 		if !pa.replay {
 			a.opt.Sink.Alert(store.AlertRow{Time: time.UnixMilli(now), Zone: pa.al.Zone, Level: pa.al.Level, Score: pa.al.Score})
@@ -655,6 +710,9 @@ func (a *App) TestAlert() string {
 }
 
 func (a *App) active() *pipeline {
+	if a.sim != nil {
+		return a.sim.p
+	}
 	if a.replay != nil {
 		return a.replay.p
 	}
@@ -662,7 +720,7 @@ func (a *App) active() *pipeline {
 }
 
 func (a *App) pnowLocked(now int64) int64 {
-	if a.replay != nil {
+	if a.replay != nil && a.sim == nil {
 		return a.replay.now(now)
 	}
 	return now
@@ -718,6 +776,18 @@ func zoneName(p *pipeline, zone string) string {
 func densityInfo(p *pipeline, c crowd.Cluster, zone string) brief.Info {
 	in := brief.Info{Kind: protocol.KindDensity, Zone: zone, Where: zoneName(p, zone), Level: c.Level, Density: round2(c.Est),
 		People: c.People, AreaM2: math.Round(c.Area()*10) / 10, Trend: c.Trend, X: math.Round(c.X), Y: math.Round(c.Y)}
+	if c.Peak > c.Density {
+		// The level comes from the packed spot, not the cluster as a whole:
+		// describe that spot.
+		area := math.Pi * crowd.LocalR * crowd.LocalR
+		part := p.cfg().Participation
+		if part <= 0 {
+			part = 1
+		}
+		in.People = int(math.Round(c.Peak * area / part))
+		in.AreaM2 = math.Round(area*10) / 10
+		in.X, in.Y = math.Round(c.PeakX), math.Round(c.PeakY)
+	}
 	for _, ph := range p.last.Phones {
 		if ph.Status != protocol.StatusStale && inZone(p, ph, zone) {
 			in.Phones++
@@ -750,6 +820,11 @@ func (a *App) snapshotLocked(now int64) protocol.Snapshot {
 		if d := a.replay.recEnd - a.replay.recStart; d > 0 {
 			s.Progress = round2(math.Min(1, float64(pnow-a.replay.recStart)/float64(d)))
 		}
+	}
+	if a.sim != nil {
+		s.Mode, s.Replay, s.Progress = "sim", "", 0
+		f := a.sim.frame
+		s.Sim = &f
 	}
 	if a.rec != nil {
 		s.Recording = a.rec.label
@@ -869,4 +944,33 @@ func short(id string) string {
 		return id[:8]
 	}
 	return id
+}
+
+// forget drops phones that left more than ForgetAfterMs ago. Caller holds mu.
+func forget(p *pipeline, now int64) {
+	for id, m := range p.meta {
+		if !m.connected && now-m.goneAt > ForgetAfterMs {
+			delete(p.meta, id)
+			p.det.RemovePhone(id)
+		}
+	}
+}
+
+// motionCount is every motion message received: real phones plus the simulation's.
+func (a *App) motionCount() int64 {
+	a.mu.Lock()
+	n := a.simMsgs
+	a.mu.Unlock()
+	return a.Hub.MotionCount() + n
+}
+
+// modeLocked is the data source on screen: live, replay or sim. Caller holds mu.
+func (a *App) modeLocked() string {
+	switch {
+	case a.sim != nil:
+		return "sim"
+	case a.replay != nil:
+		return "replay"
+	}
+	return "live"
 }

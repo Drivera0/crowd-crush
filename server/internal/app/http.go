@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/Drivera0/crowd-crush/server/internal/brief"
+	"github.com/Drivera0/crowd-crush/server/internal/crowdsim"
 	"github.com/Drivera0/crowd-crush/server/internal/hub"
 	"github.com/Drivera0/crowd-crush/server/internal/protocol"
 	"github.com/Drivera0/crowd-crush/server/internal/store"
@@ -143,6 +145,46 @@ func (a *App) Routes(mux *http.ServeMux) {
 		a.StopReplay()
 		writeJSON(w, map[string]string{"mode": "live"})
 	})
+	mux.HandleFunc("GET /api/sim", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, a.SimStatus())
+	})
+	mux.HandleFunc("POST /api/sim/start", func(w http.ResponseWriter, r *http.Request) {
+		var req SimStart
+		if r.ContentLength != 0 {
+			if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+				httpError(w, errors.New("want {people, participation, scenario}"), http.StatusBadRequest)
+				return
+			}
+		}
+		if err := a.StartSim(req); err != nil {
+			code := http.StatusBadRequest
+			if errors.Is(err, errSimRunning) {
+				code = http.StatusConflict
+			}
+			httpError(w, err, code)
+			return
+		}
+		writeJSON(w, map[string]string{"mode": "sim"})
+	})
+	mux.HandleFunc("POST /api/sim/stop", func(w http.ResponseWriter, r *http.Request) {
+		if err := a.StopSim(); err != nil {
+			httpError(w, err, http.StatusConflict)
+			return
+		}
+		writeJSON(w, map[string]string{"mode": "live"})
+	})
+	mux.HandleFunc("POST /api/sim/action", func(w http.ResponseWriter, r *http.Request) {
+		var act crowdsim.Action
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&act); err != nil {
+			httpError(w, errors.New("want {type, ...}"), http.StatusBadRequest)
+			return
+		}
+		if err := a.SimAction(act); err != nil {
+			httpError(w, err, http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, map[string]bool{"ok": true})
+	})
 	mux.HandleFunc("POST /api/test-alert", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"zone": a.TestAlert()})
 	})
@@ -176,7 +218,7 @@ func (a *App) History() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "Now: %s. Mode: %s.\n", time.UnixMilli(now).Format("15:04:05"), map[bool]string{true: "replay", false: "live"}[a.replay != nil])
+	fmt.Fprintf(&sb, "Now: %s. Mode: %s.\n", time.UnixMilli(now).Format("15:04:05"), a.modeLocked())
 	sb.WriteString("Alerts (oldest first):\n")
 	n := 0
 	for _, al := range a.alerts {
