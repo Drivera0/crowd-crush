@@ -781,6 +781,9 @@ func densityInfo(p *pipeline, c crowd.Cluster, zone string) brief.Info {
 	if c.Early && c.Level == protocol.LevelYellow {
 		in.Early, in.ETA, in.Rate = true, math.Round(c.ETA), round2(c.Rate)
 	}
+	// Why the density is at this level: packed and still, packing in, or
+	// dense but flowing (crowd/flow.go); "" when positions can't tell.
+	in.Motion, in.Leaving = crowd.MotionText(c.Motion()), round2(c.Flow)
 	if c.Peak > c.Density {
 		// The level comes from the packed spot, not the cluster as a whole:
 		// describe that spot.
@@ -903,7 +906,8 @@ func (a *App) snapshotLocked(now int64) protocol.Snapshot {
 	for _, c := range p.clusters {
 		s.Clusters = append(s.Clusters, protocol.Cluster{ID: c.ID, X: r2(c.X), Y: r2(c.Y), R: r2(c.R), Count: c.Count,
 			Density: round2(c.Density), People: c.People, Trend: c.Trend, Level: c.Level, Est: round2(c.Est),
-			Rate: round2(c.Rate), ETA: math.Round(c.ETA*10) / 10, Acc: math.Round(c.Acc*10) / 10})
+			Rate: round2(c.Rate), ETA: math.Round(c.ETA*10) / 10, Acc: math.Round(c.Acc*10) / 10,
+			Motion: c.Motion(), Flow: round2(c.Flow), Speed: round2(c.Speed)})
 	}
 	st := a.statusLocked(p)
 	s.Status = &st

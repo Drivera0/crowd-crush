@@ -428,6 +428,15 @@ type Cluster struct {
 	// when they were placed by hand. Several metres = est is the density
 	// averaged over a disc about that wide: a lower bound on the tightest spot.
 	Acc float64 `json:"acc,omitempty"`
+	// Motion of the crowd at the densest spot (crowd/flow.go), omitted when
+	// the positions can't tell (too rough, too few phones): "flowing" (dense
+	// but people are getting out: not on watch below the danger density, no
+	// early warning), "packing" (people arriving, nobody getting out) or
+	// "still" (packed and barely moving). Flow: people per metre per second
+	// leaving that spot; Speed: the net speed of the crowd there (m/s).
+	Motion string  `json:"motion,omitempty"`
+	Flow   float64 `json:"flow,omitempty"`
+	Speed  float64 `json:"speed,omitempty"`
 }
 
 // Venue is the venue's size and geo-anchor (GET/PUT /api/venue). Lat/Lon
