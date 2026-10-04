@@ -10,6 +10,11 @@
 //    "peers":[{"name":"PULSE-B","rssi":-63,"dist":2.4,"age":3}]}
 //   mac  = last 4 hex digits of the Wi-Fi MAC
 //   dist = rough distance estimate in metres (0.3–30), age = seconds since last heard
+// and, while phones are connected over Bluetooth (connect mode, below),
+//   "links":[{"id":"<session id>","rssi":-57,"age":1}]
+// and the phones running the Pulse Android app that this board hears advertising (below),
+//   "heard":[{"id":"1a2b3c4d","rssi":-63,"age":1}]
+// GET /links → {"links":[...],"heard":[...]}: just those two, cheap enough for the server to poll every second.
 //
 // Onboard blue LED (GPIO 2), no wiring needed:
 //   joining Wi-Fi = quick double flash (stays like this if Wi-Fi is wrong)
@@ -31,7 +36,7 @@
 // how many devices are around, not a list of who. Pulse boards are not counted.
 //
 // Pulse beacon: each zone light also advertises itself as "PULSE-<zone>"
-// (non-connectable), with manufacturer data FF FF 'P' 'L' 'S' <zone> so boards
+// (connectable, see connect mode), with manufacturer data FF FF 'P' 'L' 'S' <zone> so boards
 // are recognised even if the name is cut off. The zone is learned from
 // /level?...&zone=X and kept in flash (Preferences), so it survives reboots;
 // until one is known the name is PULSE-<last 4 hex of the MAC>. Every board
@@ -39,6 +44,30 @@
 // readings per board, forgets boards not heard for 30 s, and estimates distance
 // with the log-distance model d = 10^((TX_POWER_1M − RSSI) / (10·n)).
 // Calibrate TX_POWER_1M: put two boards 1 m apart and read "rssi" in /pulse.
+//
+// Connect mode: a phone's browser can't measure Bluetooth signal strength
+// without a hidden flag, but any Android Chrome can connect. So the board
+// also runs a tiny GATT server: one service with one writable characteristic.
+// The Pulse phone page connects and writes its random session id (≤ 36
+// characters; only letters, digits and '-' are kept). The board reads the
+// signal strength of each connection about once a second and reports it in
+// "links", so the server knows how far that phone is from this board. At
+// most MAX_LINKS phones at a time (the Bluetooth stack's limit); a further
+// one is disconnected at once, and so is a connection that hasn't written an
+// id within 5 s. The beacon keeps advertising while phones are connected.
+// Nothing else about the phone is read or kept.
+//
+// App phones: the Pulse Android app advertises the phone's identity itself, so
+// no connection is needed and there is no cap of three. Its advert is a legacy
+// non-connectable one with manufacturer data FF FF 'P' 'L' 'S' '1' followed by
+// the first 8 hex characters of the phone's session id, and no name. The scan
+// that already runs for the crowd counter picks these up as they arrive (every
+// advert, not once per scan), keeps a smoothed signal strength for up to
+// MAX_HEARD phones and reports them in "heard"; a phone not heard for 10 s is
+// dropped. They still count as ordinary devices in the crowd counter.
+// Scanning: passive, 50 ms window every 100 ms (half the airtime, the rest is
+// for Wi-Fi), 5 s on and 1 s off, so a phone advertising every 100–250 ms is
+// heard many times a second and the longest gap is about a second.
 //
 // Arduino IDE: install "esp32 by Espressif", board "ESP32 Dev Module",
 // Tools → Partition Scheme → "Huge APP" (Wi-Fi + Bluetooth don't fit the default).
@@ -51,6 +80,8 @@
 #include <BLEDevice.h>
 #include <BLEScan.h>
 #include <BLEAdvertising.h>
+#include <BLEServer.h>
+#include <esp_gap_ble_api.h>
 #include "arduino_secrets.h"
 
 #ifndef TX_POWER_1M
@@ -66,6 +97,17 @@ const unsigned long PEER_TIMEOUT_MS = 30000;
 const int MAX_PEERS = 8, RSSI_SAMPLES = 5, TAG_LEN = 6;
 // Manufacturer data marker: company ID 0xFFFF (reserved for testing) + "PLS", then the zone tag.
 const uint8_t PULSE_MAGIC[5] = {0xFF, 0xFF, 'P', 'L', 'S'};
+
+// Connect mode (the same UUIDs are in server/internal/protocol/beacons.go and web/phone/src/beacons.ts).
+#define PULSE_SERVICE_UUID "7b1e0001-52c4-4f6a-9d6b-50554c534500"
+#define PULSE_ID_CHAR_UUID "7b1e0002-52c4-4f6a-9d6b-50554c534500"
+const int MAX_LINKS = 3, LINK_ID_LEN = 36;
+const unsigned long LINK_ID_TIMEOUT_MS = 5000, LINK_RSSI_MS = 1000;
+// App phones heard advertising: company ID 0xFFFF + "PLS1" + 8 hex characters of the session id.
+const uint8_t APP_MAGIC[6] = {0xFF, 0xFF, 'P', 'L', 'S', '1'};
+const int MAX_HEARD = 24, ID8_LEN = 8, MAX_SCAN_DEVICES = 400;
+const unsigned long HEARD_TIMEOUT_MS = 10000;
+const float HEARD_EMA = 0.3f; // weight of a new reading in the smoothed signal strength
 
 WebServer server(80);
 Preferences prefs;
@@ -95,6 +137,34 @@ Peer peers[MAX_PEERS];
 int peerCount = 0;
 portMUX_TYPE peerMux = portMUX_INITIALIZER_UNLOCKED;
 volatile unsigned long peerBlip = 0; // when a new peer was first heard
+
+// Phones connected over Bluetooth. Written by the Bluetooth stack's callbacks, read by the web handler and loop().
+struct Link {
+  bool used;
+  uint16_t conn;
+  esp_bd_addr_t addr;
+  char id[LINK_ID_LEN + 1]; // the session id the phone wrote; "" until it does
+  int8_t rssi;              // 0 = not measured yet
+  unsigned long since, rssiAt;
+};
+Link links[MAX_LINKS];
+portMUX_TYPE linkMux = portMUX_INITIALIZER_UNLOCKED;
+BLEServer* gatt = nullptr;
+
+// App phones heard advertising. Written by the scan callback, read by the web handler.
+struct Heard {
+  char id[ID8_LEN + 1];
+  float rssi; // smoothed
+  unsigned long seen;
+};
+Heard heard[MAX_HEARD];
+int heardCount = 0;
+portMUX_TYPE heardMux = portMUX_INITIALIZER_UNLOCKED;
+
+// The devices of the scan in progress (addresses only, forgotten when it ends), so each counts once.
+uint8_t scanSeen[MAX_SCAN_DEVICES][6];
+int scanSeenCount = 0, scanDevices = 0, scanNear = 0;
+volatile bool advRestart = false; // a phone connected or left: the controller stopped advertising
 
 const char* levelName(Level l) { return l == DANGER ? "red" : l == WARN ? "yellow" : "calm"; }
 
@@ -142,6 +212,57 @@ float estimateDistance(int rssi) {
   return d < 0.3f ? 0.3f : d > 30.0f ? 30.0f : d;
 }
 
+// Writes the links that have an id as a JSON array; returns the length.
+int linksJson(char* buf, size_t size) {
+  Link snap[MAX_LINKS];
+  portENTER_CRITICAL(&linkMux);
+  memcpy(snap, links, sizeof links);
+  portEXIT_CRITICAL(&linkMux);
+  unsigned long now = millis();
+  int len = snprintf(buf, size, "[");
+  bool first = true;
+  for (int i = 0; i < MAX_LINKS && len < (int)size - 80; i++) {
+    if (!snap[i].used || !snap[i].id[0]) continue;
+    len += snprintf(buf + len, size - len, "%s{\"id\":\"%s\",\"rssi\":%d,\"age\":%lu}", first ? "" : ",", snap[i].id, snap[i].rssi,
+                    snap[i].rssiAt ? (now - snap[i].rssiAt) / 1000 : 0UL);
+    first = false;
+  }
+  len += snprintf(buf + len, size - len, "]");
+  return len;
+}
+
+// Writes the app phones heard in the last HEARD_TIMEOUT_MS as a JSON array; returns the length.
+int heardJson(char* buf, size_t size) {
+  static Heard snap[MAX_HEARD]; // only the web handler calls this
+  int n;
+  portENTER_CRITICAL(&heardMux);
+  n = heardCount;
+  memcpy(snap, heard, n * sizeof(Heard));
+  portEXIT_CRITICAL(&heardMux);
+  unsigned long now = millis();
+  int len = snprintf(buf, size, "[");
+  bool first = true;
+  for (int i = 0; i < n && len < (int)size - 60; i++) {
+    unsigned long age = now - snap[i].seen;
+    if (age > HEARD_TIMEOUT_MS) continue;
+    len += snprintf(buf + len, size - len, "%s{\"id\":\"%s\",\"rssi\":%d,\"age\":%lu}", first ? "" : ",", snap[i].id, (int)lroundf(snap[i].rssi), age / 1000);
+    first = false;
+  }
+  len += snprintf(buf + len, size - len, "]");
+  return len;
+}
+
+void handleLinks() {
+  static char buf[1600]; // 3 links × ~70 bytes + 24 heard × ~45 bytes
+  int len = snprintf(buf, sizeof buf, "{\"links\":");
+  len += linksJson(buf + len, 320);
+  len += snprintf(buf + len, sizeof buf - len, ",\"heard\":");
+  len += heardJson(buf + len, sizeof buf - len - 2);
+  snprintf(buf + len, sizeof buf - len, "}");
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.send(200, "application/json", buf);
+}
+
 void handlePulse() {
   Peer snap[MAX_PEERS];
   int n;
@@ -152,7 +273,7 @@ void handlePulse() {
   char name[16];
   copyBeaconName(name, sizeof name);
 
-  char buf[1280]; // 8 peers × ~55 bytes + ~300 bytes of status
+  static char buf[2900]; // 8 peers × ~55 bytes + ~300 bytes of status + 3 links × ~70 bytes + 24 heard × ~45 bytes
   unsigned long now = millis();
   int len = snprintf(buf, sizeof buf,
            "{\"kind\":\"zone-light\",\"name\":\"%s\",\"mac\":\"%s\",\"zone\":\"%s\",\"level\":\"%s\",\"ip\":\"%s\","
@@ -160,16 +281,66 @@ void handlePulse() {
            name, macTag, zone.c_str(), levelName(level), WiFi.localIP().toString().c_str(), WiFi.RSSI(), now / 1000,
            bleDevices, bleNear, bleScans, bleLastScan ? (now - bleLastScan) / 1000 : 0UL);
   bool first = true;
-  for (int i = 0; i < n && len < (int)sizeof buf - 80; i++) {
+  for (int i = 0; i < n && len < (int)sizeof buf - 1700; i++) {
     unsigned long age = now - snap[i].seen;
     if (age > PEER_TIMEOUT_MS) continue;
     len += snprintf(buf + len, sizeof buf - len, "%s{\"name\":\"%s\",\"rssi\":%d,\"dist\":%.1f,\"age\":%lu}",
                     first ? "" : ",", snap[i].name, snap[i].rssi, estimateDistance(snap[i].rssi), age / 1000);
     first = false;
   }
-  snprintf(buf + len, sizeof buf - len, "]}");
+  len += snprintf(buf + len, sizeof buf - len, "],\"links\":");
+  len += linksJson(buf + len, 320);
+  len += snprintf(buf + len, sizeof buf - len, ",\"heard\":");
+  len += heardJson(buf + len, sizeof buf - len - 2);
+  snprintf(buf + len, sizeof buf - len, "}");
   server.sendHeader("Access-Control-Allow-Origin", "*");
   server.send(200, "application/json", buf);
+}
+
+// If the advert is from the Pulse Android app, writes the 8 hex characters of its id (lower case) to out and returns true.
+bool appPhoneId(BLEAdvertisedDevice& d, char* out) {
+  if (!d.haveManufacturerData()) return false;
+  String m = d.getManufacturerData();
+  if (m.length() != sizeof APP_MAGIC + ID8_LEN || memcmp(m.c_str(), APP_MAGIC, sizeof APP_MAGIC) != 0) return false;
+  for (int i = 0; i < ID8_LEN; i++) {
+    char c = m[sizeof APP_MAGIC + i];
+    if (!isxdigit((unsigned char)c)) return false;
+    out[i] = tolower((unsigned char)c);
+  }
+  out[ID8_LEN] = 0;
+  return true;
+}
+
+// Records one advert of an app phone: a moving average of its signal strength.
+void noteHeard(const char* id, int rssi, unsigned long now) {
+  portENTER_CRITICAL(&heardMux);
+  int i = 0;
+  while (i < heardCount && strcmp(heard[i].id, id) != 0) i++;
+  if (i == heardCount) {
+    if (heardCount == MAX_HEARD) { // full: replace the stalest
+      i = 0;
+      for (int j = 1; j < heardCount; j++)
+        if (heard[j].seen < heard[i].seen) i = j;
+    } else {
+      heardCount++;
+    }
+    strlcpy(heard[i].id, id, sizeof heard[i].id);
+    heard[i].rssi = rssi;
+  } else if (now - heard[i].seen > 3000) {
+    heard[i].rssi = rssi; // back after a gap: don't drag the old value along
+  } else {
+    heard[i].rssi += HEARD_EMA * (rssi - heard[i].rssi);
+  }
+  heard[i].seen = now;
+  portEXIT_CRITICAL(&heardMux);
+}
+
+void expireHeard(unsigned long now) {
+  portENTER_CRITICAL(&heardMux);
+  for (int i = 0; i < heardCount;)
+    if (now - heard[i].seen > HEARD_TIMEOUT_MS) heard[i] = heard[--heardCount];
+    else i++;
+  portEXIT_CRITICAL(&heardMux);
 }
 
 // If the advert is from a Pulse board, writes its name ("PULSE-B") to out and returns true.
@@ -231,6 +402,114 @@ void expirePeers(unsigned long now) {
   portEXIT_CRITICAL(&peerMux);
 }
 
+// ---- connect mode: these run on the Bluetooth stack's task ----
+
+class LinkServerCallbacks : public BLEServerCallbacks {
+  void onConnect(BLEServer* s, esp_ble_gatts_cb_param_t* p) override {
+    bool kept = false;
+    portENTER_CRITICAL(&linkMux);
+    for (int i = 0; i < MAX_LINKS && !kept; i++) {
+      if (links[i].used) continue;
+      memset(&links[i], 0, sizeof(Link));
+      links[i].used = true;
+      links[i].conn = p->connect.conn_id;
+      memcpy(links[i].addr, p->connect.remote_bda, sizeof(esp_bd_addr_t));
+      links[i].since = millis();
+      kept = true;
+    }
+    portEXIT_CRITICAL(&linkMux);
+    if (!kept) s->disconnect(p->connect.conn_id); // full
+    advRestart = true;                            // connecting stops the advert: keep the beacon on air
+  }
+  void onDisconnect(BLEServer*, esp_ble_gatts_cb_param_t* p) override {
+    portENTER_CRITICAL(&linkMux);
+    for (int i = 0; i < MAX_LINKS; i++)
+      if (links[i].used && links[i].conn == p->disconnect.conn_id) links[i].used = false;
+    portEXIT_CRITICAL(&linkMux);
+    advRestart = true;
+  }
+};
+
+class LinkIdCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* c, esp_ble_gatts_cb_param_t* p) override {
+    String v = c->getValue().c_str();
+    char id[LINK_ID_LEN + 1];
+    int n = 0;
+    for (unsigned i = 0; i < v.length() && n < LINK_ID_LEN; i++) {
+      char ch = v[i];
+      if (isalnum((unsigned char)ch) || ch == '-') id[n++] = ch; // nothing that could break JSON
+    }
+    id[n] = 0;
+    portENTER_CRITICAL(&linkMux);
+    for (int i = 0; i < MAX_LINKS; i++)
+      if (links[i].used && links[i].conn == p->write.conn_id) strlcpy(links[i].id, id, sizeof links[i].id);
+    portEXIT_CRITICAL(&linkMux);
+    c->setValue(""); // the id is nobody else's business
+  }
+};
+
+// Signal strength of a connection, asked for in loop() with esp_ble_gap_read_rssi.
+void linkGapEvent(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* p) {
+  if (event != ESP_GAP_BLE_READ_RSSI_COMPLETE_EVT || p->read_rssi_cmpl.status != ESP_BT_STATUS_SUCCESS) return;
+  unsigned long now = millis();
+  portENTER_CRITICAL(&linkMux);
+  for (int i = 0; i < MAX_LINKS; i++)
+    if (links[i].used && memcmp(links[i].addr, p->read_rssi_cmpl.remote_addr, sizeof(esp_bd_addr_t)) == 0) {
+      links[i].rssi = p->read_rssi_cmpl.rssi;
+      links[i].rssiAt = now;
+    }
+  portEXIT_CRITICAL(&linkMux);
+}
+
+// Called from loop(): asks for each connection's signal strength about once a second, drops
+// connections that never said who they are, and restarts the advert after a connect or disconnect.
+void serviceLinks(unsigned long now) {
+  static unsigned long last = 0;
+  if (!gatt) return;
+  if (advRestart) {
+    advRestart = false;
+    BLEDevice::startAdvertising();
+  }
+  if (now - last < LINK_RSSI_MS) return;
+  last = now;
+  Link snap[MAX_LINKS];
+  portENTER_CRITICAL(&linkMux);
+  memcpy(snap, links, sizeof links);
+  portEXIT_CRITICAL(&linkMux);
+  for (int i = 0; i < MAX_LINKS; i++) {
+    if (!snap[i].used) continue;
+    if (!snap[i].id[0] && now - snap[i].since > LINK_ID_TIMEOUT_MS) gatt->disconnect(snap[i].conn);
+    else esp_ble_gap_read_rssi(snap[i].addr);
+  }
+}
+
+// Every advert the scan hears lands here (on the Bluetooth stack's task). App phones are noted each
+// time; for the crowd counter and the peers each device counts once per scan, as before.
+class ScanCallbacks : public BLEAdvertisedDeviceCallbacks {
+  void onResult(BLEAdvertisedDevice d) override {
+    int rssi = d.getRSSI();
+    char id[ID8_LEN + 1];
+    bool app = appPhoneId(d, id);
+    if (app) noteHeard(id, rssi, millis());
+    uint8_t addr[6];
+    memcpy(addr, d.getAddress().getNative(), sizeof addr);
+    for (int i = 0; i < scanSeenCount; i++)
+      if (memcmp(scanSeen[i], addr, sizeof addr) == 0) return; // already counted in this scan
+    if (scanSeenCount == MAX_SCAN_DEVICES) return;             // more than the table holds: not counted
+    memcpy(scanSeen[scanSeenCount++], addr, sizeof addr);
+    char peer[16];
+    if (!app && pulseBoardName(d, peer, sizeof peer)) {
+      if (notePeer(peer, rssi, millis())) {
+        peerBlip = millis();
+        Serial.printf("ble: found %s (%d dBm)\n", peer, rssi);
+      }
+      return; // Pulse boards aren't crowd
+    }
+    scanDevices++; // an app phone is a phone like any other here
+    if (rssi >= NEAR_RSSI) scanNear++;
+  }
+};
+
 // (Re)publishes the beacon: flags, manufacturer marker + zone, and the full name (≤ 30 of 31 bytes).
 void updateAdvert(BLEAdvertising* adv, bool running) {
   char name[16];
@@ -253,45 +532,44 @@ void bleTask(void*) {
   BLEDevice::init(name);
   BLEAdvertising* adv = BLEDevice::getAdvertising();
   adv->setScanResponse(false); // everything fits in the advert itself
-  adv->setAdvertisementType(ADV_TYPE_NONCONN_IND); // beacon only: nobody can connect
+  adv->setAdvertisementType(ADV_TYPE_IND); // connectable: a phone page can connect and say who it is (connect mode)
   adv->setMinInterval(0xA0); // 100–200 ms, in 0.625 ms units
   adv->setMaxInterval(0x140);
   bool advertising = false;
+
+  // Connect mode: one service, one writable characteristic (the phone's session id).
+  BLEDevice::setCustomGapHandler(linkGapEvent);
+  BLEServer* srv = BLEDevice::createServer();
+  srv->setCallbacks(new LinkServerCallbacks());
+  BLEService* svc = srv->createService(PULSE_SERVICE_UUID);
+  BLECharacteristic* idChar = svc->createCharacteristic(PULSE_ID_CHAR_UUID, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
+  idChar->setCallbacks(new LinkIdCallbacks());
+  svc->start();
+  gatt = srv;
 
   BLEScan* scan = BLEDevice::getScan();
   scan->setActiveScan(false); // listen only: never ask devices for more data
   scan->setInterval(160);
   scan->setWindow(80); // half duty cycle leaves airtime for Wi-Fi
+  scan->setAdvertisedDeviceCallbacks(new ScanCallbacks(), true); // true: every advert, so app phones are heard as they come
   for (;;) {
     if (advDirty) {
       advDirty = false;
       updateAdvert(adv, advertising);
       advertising = true;
     }
-    BLEScanResults* r = scan->start(SCAN_SECONDS, false);
+    scanSeenCount = scanDevices = scanNear = 0;
+    scan->start(SCAN_SECONDS, false); // ScanCallbacks does the counting
     unsigned long now = millis();
-    int n = r->getCount(), devices = 0, near = 0;
-    for (int i = 0; i < n; i++) {
-      BLEAdvertisedDevice d = r->getDevice(i);
-      int rssi = d.getRSSI();
-      char peer[16];
-      if (pulseBoardName(d, peer, sizeof peer)) {
-        if (notePeer(peer, rssi, now)) {
-          peerBlip = millis();
-          Serial.printf("ble: found %s (%d dBm)\n", peer, rssi);
-        }
-        continue; // Pulse boards aren't crowd
-      }
-      devices++;
-      if (rssi >= NEAR_RSSI) near++;
-    }
+    int devices = scanDevices, near = scanNear;
     scan->clearResults();
     expirePeers(now);
+    expireHeard(now);
     bleDevices = devices;
     bleNear = near;
     bleScans++;
     bleLastScan = millis();
-    Serial.printf("ble: %d devices, %d near, %d Pulse boards\n", devices, near, peerCount);
+    Serial.printf("ble: %d devices, %d near, %d Pulse boards, %d app phones\n", devices, near, peerCount, heardCount);
     vTaskDelay(pdMS_TO_TICKS(1000));
   }
 }
@@ -319,7 +597,8 @@ void setup() {
   Serial.printf("\nZone light ready: http://%s\n", WiFi.localIP().toString().c_str());
   server.on("/level", handleLevel);
   server.on("/pulse", handlePulse);
-  server.onNotFound([] { server.send(404, "text/plain", "try /level?v=red or /pulse\n"); });
+  server.on("/links", handleLinks);
+  server.onNotFound([] { server.send(404, "text/plain", "try /level?v=red, /pulse or /links\n"); });
   server.begin();
   xTaskCreatePinnedToCore(bleTask, "ble", 8192, nullptr, 1, nullptr, 0);
 }
@@ -334,6 +613,7 @@ int breathe(unsigned long t, unsigned long period, int lo, int hi) {
 void loop() {
   server.handleClient();
   unsigned long t = millis();
+  serviceLinks(t);
 
   if (WiFi.status() != WL_CONNECTED) {
     WiFi.reconnect();

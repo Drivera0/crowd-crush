@@ -193,6 +193,9 @@ void setup() {
 #if SIGN_BEACON
   beginBeacon();
 #else
+  // The radio module's firmware version (Bluetooth beacon mode needs 0.2.0 or newer).
+  Serial.print("radio firmware ");
+  Serial.println(WiFi.firmwareVersion());
   WiFi.setTimeout(1000);
   wifiSince = millis();
   beginWiFi();
