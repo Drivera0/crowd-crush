@@ -1,10 +1,11 @@
 import './style.css';
-import { onPage, page } from './shell';
+import { onPage } from './shell';
 import type { Alert, AlertRules, Cluster, Config, EdgeExplain, EvalReport, FloorplanSuggestion, Hardware, Level, Node, NodeDetail, SimAction, SimState, Snapshot, ToDash, Venue } from '../../shared/protocol';
 import { wsURL } from '../../shared/protocol';
 import { animate } from 'motion';
-import { Areas, type Tool } from './areas';
+import { Areas, inPoly, type Tool } from './areas';
 import { Mesh } from './mesh';
+import { Setup } from './setup';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -24,10 +25,18 @@ interface LogItem {
   text: string;
   area?: string;
   test?: boolean;
+  /** The alert this entry belongs to (for "Clear"). */
+  id?: string;
 }
 let timeline: LogItem[] = [];
 let soundOn = false;
 let lastBrief: Alert | null = null;
+/** Guided event setup; created at the end of the file, once everything it reads exists. */
+let setup: Setup | null = null;
+/** Re-check the setup steps (cheap; safe to call before setup exists). */
+function refreshSetup() {
+  setup?.refresh();
+}
 
 // ---------------------------------------------------------------------------
 // mesh view
@@ -66,7 +75,35 @@ areas.onTool = (t) => {
 };
 
 const areaEls = new Map<string, HTMLLIElement>();
-const areaLevelText = { calm: 'calm', watch: 'watch', danger: 'danger' } as const;
+const areaLevelText = { calm: 'Calm', watch: 'Pressure building', danger: 'Danger' } as const;
+
+/** Rules that actually change something (the form always fills in push + notify). */
+function rulesCount(r?: AlertRules): number {
+  if (!r) return 0;
+  const n = r.notify ?? {};
+  return [
+    !!r.density,
+    !!r.maxPhones,
+    r.push === false,
+    !!r.message,
+    n.sign === false || n.light === false || n.voice === false,
+  ].filter(Boolean).length;
+}
+/** An area's rules were set by staff (any non-empty rules object). */
+const hasRules = (r?: AlertRules) => !!r && Object.values(r).some((v) => v !== undefined && v !== null);
+
+/** Open (or toggle) the "Alert when…" box of one area. */
+function toggleRules(id: string, open?: boolean) {
+  const li = areaEls.get(id);
+  if (!li) return;
+  const box = li.querySelector<HTMLElement>('.rules')!;
+  const show = open ?? box.hidden;
+  box.hidden = !show;
+  li.querySelector('.rules-toggle')!.setAttribute('aria-expanded', String(show));
+  li.classList.toggle('rules-open', show);
+  if (show && !box.childElementCount) buildRules(box, id);
+  if (show) animate(box, { opacity: [0, 1], y: [-4, 0] }, { duration: 0.2 });
+}
 
 areas.onChange = () => {
   const ul = $('areas');
@@ -81,60 +118,93 @@ areas.onChange = () => {
     let li = areaEls.get(a.id);
     if (!li) {
       li = document.createElement('li');
+      // Two lines that fit any rail width: name + delete, then live status,
+      // then the controls; rules fold out below.
       li.innerHTML =
-        `<span class="swatch"></span>` +
-        `<input class="name" maxlength="32" aria-label="Area name" />` +
-        `<span class="lvl"></span>` +
-        `<button class="sens sm" data-tip="High-risk areas alert on the first push"></button>` +
-        `<select class="light sm" aria-label="Zone light for this area" data-tip="Which zone light shows this area"></select>` +
-        `<button class="del sm ghost" data-tip="Delete area" aria-label="Delete area">✕</button>` +
-        `<div class="meta"></div>` +
-        `<div class="rules-wrap" style="grid-area: rules"><button class="rules-toggle">Alert rules ▾</button><div class="rules" hidden></div></div>`;
+        `<div class="a-top"><span class="swatch"></span>` +
+        `<input class="name" maxlength="40" aria-label="Area name" />` +
+        `<button class="del icon-btn sm-icon" data-tip="Delete area" aria-label="Delete area">✕</button></div>` +
+        `<div class="a-status"><span class="lvl"></span><span class="a-live"></span></div>` +
+        `<div class="a-controls">` +
+        `<div class="a-field"><span>Priority</span><div class="seg2 sens" role="radiogroup" aria-label="Priority">` +
+        `<button type="button" role="radio" data-sens="normal" data-tip="Standard thresholds, for open floor">Standard</button>` +
+        `<button type="button" role="radio" data-sens="high" data-tip="Lower thresholds: alerts sooner at spots where trouble starts fast">High (alerts sooner)</button>` +
+        `</div></div>` +
+        `<label class="a-field light-field"><span>Zone light</span><select class="light" aria-label="Zone light for this area"></select></label>` +
+        `</div>` +
+        `<button class="rules-toggle sm" aria-expanded="false"><span class="rt-label">Alert when…</span><span class="rt-sum"></span><span class="rt-chev">▾</span></button>` +
+        `<div class="rules" hidden></div>`;
       const id = a.id;
       const name = li.querySelector<HTMLInputElement>('.name')!;
       name.value = a.name;
       name.addEventListener('change', () => areas.rename(id, name.value));
       name.addEventListener('keydown', (e) => e.key === 'Enter' && name.blur());
-      li.querySelector('.sens')!.addEventListener('click', () => areas.toggleSens(id));
+      name.addEventListener('focus', () => areas.selected !== id && areas.select(id));
+      for (const b of li.querySelectorAll<HTMLButtonElement>('[data-sens]')) {
+        b.addEventListener('click', () => areas.setSens(id, b.dataset.sens as 'normal' | 'high'));
+      }
       li.querySelector<HTMLSelectElement>('.light')!.addEventListener('change', (e) =>
         areas.setLight(id, (e.target as HTMLSelectElement).value),
       );
       li.querySelector('.del')!.addEventListener('click', () => areas.remove(id));
-      const rulesBox = li.querySelector<HTMLElement>('.rules')!;
       li.querySelector('.rules-toggle')!.addEventListener('click', (e) => {
         e.stopPropagation();
-        rulesBox.hidden = !rulesBox.hidden;
-        (e.target as HTMLElement).textContent = rulesBox.hidden ? 'Alert rules ▾' : 'Alert rules ▴';
-        if (!rulesBox.hidden && !rulesBox.childElementCount) buildRules(rulesBox, id);
+        toggleRules(id);
       });
       li.addEventListener('click', (e) => {
-        if (!(e.target as HTMLElement).closest('button, input, select, .rules')) areas.select(id);
+        if (!(e.target as HTMLElement).closest('button, input, select, label, .rules')) areas.select(id);
       });
       ul.append(li);
       areaEls.set(a.id, li);
       animate(li, { opacity: [0, 1], y: [12, 0], scale: [0.96, 1] }, { type: 'spring', bounce: 0.4, duration: 0.5 });
-      if (areas.selected === a.id) setTimeout(() => name.select(), 50);
     }
     const prev = li.dataset.level;
-    li.className = `area ${a.level}${areas.selected === a.id ? ' sel' : ''}`;
+    li.className = `area ${a.level}${areas.selected === a.id ? ' sel' : ''}${li.querySelector<HTMLElement>('.rules')!.hidden ? '' : ' rules-open'}`;
     li.dataset.level = a.level;
     li.querySelector<HTMLElement>('.swatch')!.style.background = a.color;
+    const name = li.querySelector<HTMLInputElement>('.name')!;
+    if (document.activeElement !== name && name.value !== a.name) name.value = a.name;
+    name.title = a.name;
     li.querySelector('.lvl')!.textContent = areaLevelText[a.level];
-    const sens = li.querySelector<HTMLButtonElement>('.sens')!;
-    sens.textContent = a.sens === 'high' ? '⚑ High risk' : 'Normal';
-    sens.classList.toggle('hi', a.sens === 'high');
+    const liveEl = li.querySelector<HTMLElement>('.a-live')!;
+    liveEl.textContent =
+      (a.phones === 0 ? 'nobody inside yet' : `${a.phones} ${a.phones === 1 ? 'person' : 'people'} inside`) +
+      (a.wave ? ` · ${a.wave} in a push` : '') +
+      (a.sway ? ` · ${a.sway} swaying` : '');
+    liveEl.title = 'Counted from phones running Pulse inside this area';
+    for (const b of li.querySelectorAll<HTMLButtonElement>('[data-sens]')) {
+      const on = b.dataset.sens === a.sens;
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-checked', String(on));
+    }
     fillLightPicker(li.querySelector<HTMLSelectElement>('.light')!, a.light ?? '');
-    li.querySelector('.meta')!.textContent =
-      a.phones === 0
-        ? 'No phones inside yet'
-        : `${a.phones} phone${a.phones === 1 ? '' : 's'}` +
-          (a.wave ? ` · ${a.wave} in a push` : '') +
-          (a.sway ? ` · ${a.sway} swaying` : '');
+    li.querySelector<HTMLElement>('.light-field')!.hidden = lightKeys.length === 0 && !a.light;
+    const n = rulesCount(a.rules);
+    li.querySelector('.rt-sum')!.textContent = n ? `${n} set` : 'standard alerts';
     if (prev && prev !== a.level) animate(li, { scale: [1.04, 1] }, { type: 'spring', bounce: 0.5, duration: 0.5 });
   }
+  refreshSetup();
 };
 areas.onChange();
 areas.onError = (m) => toast(m, 'error');
+
+// A freshly drawn area: put the cursor in its name so typing names it straight away.
+// The pointerup that finished the shape can still move focus, so retry until it sticks.
+areas.onCreated = (a) => {
+  const focusName = (tries: number) => {
+    const name = areaEls.get(a.id)?.querySelector<HTMLInputElement>('.name');
+    if (!name) return;
+    if (document.activeElement !== name) {
+      name.focus({ preventScroll: true });
+      name.select();
+      name.closest('li')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+    if (tries > 0) window.setTimeout(() => document.activeElement !== name && focusName(tries - 1), 80);
+  };
+  // Straight away (the row exists: onChange ran first), then re-check on timers;
+  // not requestAnimationFrame, which never fires while the window is in the background.
+  focusName(4);
+};
 
 // The server raises the alert (timeline, briefing, voice, sign); this is the
 // operator's heads-up toast for their own area.
@@ -154,70 +224,167 @@ areas.onEscalate = (a) => {
 // header status: one sentence anyone can read from across the room
 // ---------------------------------------------------------------------------
 
-function renderStatus(zone: Level, phones: number, clusters: Cluster[]) {
-  const danger = areas.list.filter((a) => a.level === 'danger');
-  const watch = areas.list.filter((a) => a.level === 'watch');
+/**
+ * What is happening, worked out once per snapshot. The sidebar status, the
+ * risk panel, the KPIs and Home all read this, so they can never disagree.
+ */
+interface Situation {
+  cls: Level;
+  /** "Stage front", "Stage front +1", or "" when crowd-wide / calm. */
+  place: string;
+  /** "crowd push" | "crowding" | "over the limit" | "" */
+  kind: string;
+  /** The one sentence for the sidebar. */
+  text: string;
+  /** For the risk panel. */
+  detail: string;
+}
+let situation: Situation = { cls: 'calm', place: '', kind: '', text: 'Waiting for attendees', detail: 'No pushes travelling through the crowd.' };
+
+const kindText = (k?: Alert['kind']) => (k === 'density' ? 'crowding' : k === 'rule' ? 'over the limit' : 'crowd push');
+
+/** Name of the area or zone a point lies in (areas first: they are what staff drew). */
+function placeAt(s: Snapshot, x: number, y: number): string {
+  const a = [...areas.list].reverse().find((a) => inPoly(a.poly, x, y));
+  if (a) return a.name;
+  const z = s.zones.find((z) => z.poly?.length >= 3 && inPoly(z.poly, x, y));
+  return z?.name ?? '';
+}
+
+function computeSituation(s: Snapshot): Situation {
+  // The server's one overall status, when it sends it (newer servers).
+  const st = s.status;
+  if (st) {
+    const waves = s.waves.length;
+    if (st.level === 'calm') {
+      return {
+        cls: 'calm', place: '', kind: '',
+        text: s.stats.phones === 0 ? 'Waiting for attendees' : 'All clear',
+        detail: waves
+          ? `Small movements between ${waves} pair${waves === 1 ? '' : 's'} of neighbours; not enough to raise an alert.`
+          : 'No pushes travelling through the crowd.',
+      };
+    }
+    const place = st.where || (st.zone ? (areas.get(st.zone)?.name ?? zoneNames.get(st.zone) ?? '') : '');
+    const kind = st.kind === 'density' ? 'crowding' : st.kind === 'rule' ? 'over the limit' : st.kind === 'early' ? 'crowding fast' : 'crowd push';
+    const where = place ? ` in ${place}` : ' in the crowd';
+    const dens = st.density != null ? ` (about ${st.density.toFixed(1)} people/m²)` : '';
+    const detail =
+      kind === 'crowd push'
+        ? `${st.level === 'red' ? 'A crowd push is travelling' : 'Pressure is building'}${where}${waves ? `, passing between ${waves} pair${waves === 1 ? '' : 's'} of neighbours` : ''}.`
+        : kind === 'over the limit'
+          ? `An alert rule was crossed${where}${dens}.`
+          : kind === 'crowding fast'
+            ? `Getting crowded fast${where}${dens}: dangerous soon at this rate.`
+            : `${st.level === 'red' ? 'Dangerously crowded' : 'Getting crowded'}${where}${dens}.`;
+    return { cls: st.level, place, kind, text: [st.level === 'red' ? 'DANGER' : 'WARNING', place || 'whole crowd', kind].join(' · '), detail };
+  }
+  // Older server: work it out from zones and clusters.
+  const clusters = s.clusters ?? [];
+  const openAlerts = [...alertsById.values()].filter((a) => a.status !== 'resolved' && a.level !== 'calm' && !a.test);
+  type Hit = { level: Level; place: string; kind: string };
+  const hits: Hit[] = [];
+  for (const z of s.zones) {
+    if (z.level === 'calm') continue;
+    const area = areas.get(z.id);
+    const al = openAlerts.filter((a) => a.zone === z.id).sort((x, y) => y.t - x.t)[0];
+    const kind = al ? kindText(al.kind) : area && area.wave === 0 && rulesCount(area.rules) ? 'over the limit' : 'crowd push';
+    hits.push({ level: z.level, place: area?.name ?? z.name, kind });
+  }
+  for (const c of clusters) {
+    if (c.level !== 'red' && c.level !== 'yellow') continue;
+    hits.push({ level: c.level, place: placeAt(s, c.x, c.y), kind: 'crowding' });
+  }
+  const worst: Level = hits.some((h) => h.level === 'red') ? 'red' : hits.length ? 'yellow' : 'calm';
+  if (worst === 'calm') {
+    const waves = s.waves.length;
+    return {
+      cls: 'calm', place: '', kind: '',
+      text: s.stats.phones === 0 ? 'Waiting for attendees' : 'All clear',
+      detail: waves
+        ? `Small movements between ${waves} pair${waves === 1 ? '' : 's'} of neighbours; not enough to raise an alert.`
+        : 'No pushes travelling through the crowd.',
+    };
+  }
+  const top = hits.filter((h) => h.level === worst);
+  // A push outranks crowding in the headline; name the places.
+  const lead = top.find((h) => h.kind === 'crowd push') ?? top[0];
+  const places = [...new Set(top.map((h) => h.place).filter(Boolean))];
+  const place = places.length ? places[0] + (places.length > 1 ? ` +${places.length - 1}` : '') : '';
+  const word = worst === 'red' ? 'DANGER' : 'WARNING';
+  const text = [word, place || 'whole crowd', lead.kind].join(' · ');
+  const where = place ? ` in ${place}` : ' in the crowd';
+  const detail =
+    lead.kind === 'crowd push'
+      ? `${worst === 'red' ? 'A crowd push is travelling' : 'Pressure is building'}${where}${s.waves.length ? `, passing between ${s.waves.length} pair${s.waves.length === 1 ? '' : 's'} of neighbours` : ''}.`
+      : lead.kind === 'crowding'
+        ? `${worst === 'red' ? 'Dangerously crowded' : 'Getting crowded'}${where}.`
+        : `An alert rule was crossed${where}.`;
+  return { cls: worst, place, kind: lead.kind, text, detail };
+}
+
+function renderStatus(clusters: Cluster[]) {
+  const sit = situation;
+  const cls = sit.cls;
+  const text = sit.text;
+  renderAlertSummary();
   const packed = clusters.filter((c) => c.level === 'red');
-  const tight = clusters.filter((c) => c.level === 'yellow');
-  let cls: 'calm' | 'yellow' | 'red' = 'calm';
-  let text = phones === 0 ? 'Waiting for attendees' : 'All clear';
-  const active =
-    danger.length + watch.length + packed.length + tight.length +
-    (zone !== 'calm' && !danger.length && !watch.length ? 1 : 0);
-  $('kAlerts').textContent = String(active);
-  $('kAlerts').parentElement!.classList.toggle('hot', active > 0);
-  $('kAlertsSub').textContent =
-    danger.length || watch.length
-      ? `${danger.length} danger · ${watch.length} watch area${watch.length === 1 ? '' : 's'}`
-      : active
-        ? `crowd-wide ${zone === 'red' ? 'danger' : 'warning'}`
-        : 'nothing needs attention';
-  const densest = clusters.reduce((m, c) => Math.max(m, c.density), 0);
+  // est = people/m² at the densest spot (what alerts use); density on older servers.
+  const densest = clusters.reduce((m, c) => Math.max(m, c.est ?? c.density), 0);
+  const top = clusters.reduce<Cluster | null>((m, c) => ((c.est ?? c.density) >= (m ? (m.est ?? m.density) : -1) ? c : m), null);
+  const topPlace = top && snap ? placeAt(snap, top.x, top.y) : '';
   $('kDense').textContent = clusters.length ? densest.toFixed(1) : '–';
   $('kDenseSub').textContent = clusters.length
-    ? `people/m² · ${clusters.length} crowd${clusters.length === 1 ? '' : 's'}${clusters.some((c) => c.trend === 'forming') ? ', one forming' : ''}`
+    ? `people/m²${topPlace ? ` · ${topPlace}` : ''} · ${clusters.length} crowd${clusters.length === 1 ? '' : 's'}${clusters.some((c) => c.trend === 'forming') ? ', one forming' : ''}`
     : 'no crowds packed together';
   $('kDense').parentElement!.classList.toggle('hot', packed.length > 0);
-  if (tight.length) {
-    cls = 'yellow';
-    const soon = tight.filter((c) => c.eta != null).sort((a, b) => a.eta! - b.eta!)[0];
-    text = soon
-      ? `Crowd packing fast: dangerous in ~${Math.round(soon.eta!)} s`
-      : `Crowd packing tighter (${tight[0].density.toFixed(1)} people/m²)`;
-  }
-  if (zone === 'yellow' || watch.length) {
-    cls = 'yellow';
-    text = watch.length ? `Pressure building in ${names(watch)}` : 'Pressure building in the crowd';
-  }
-  if (packed.length) {
-    cls = 'red';
-    text = `Danger: crowd too dense (${packed[0].density.toFixed(1)} people/m²)`;
-  }
-  if (zone === 'red' || danger.length) {
-    cls = 'red';
-    text = danger.length ? `Danger: push travelling through ${names(danger)}` : 'Danger: push travelling through the crowd';
-  }
   const el = $('status');
-  if (!el.classList.contains(cls)) {
-    el.className = `status ${cls}`;
+  const statusCls = cls === 'calm' ? 'calm' : cls;
+  if (!el.classList.contains(statusCls)) {
+    el.className = `status ${statusCls}`;
     animate(el, { scale: [1.08, 1] }, { type: 'spring', bounce: 0.5, duration: 0.6 });
   }
   $('statusText').textContent = text;
+  el.title = text;
 }
 
-function names(list: { name: string }[]) {
-  const n = list.map((a) => a.name);
-  return n.length <= 2 ? n.join(' and ') : `${n.slice(0, 2).join(', ')} +${n.length - 2}`;
+/** Active alerts KPI and its summary line: open alerts, so ack/resolve shows straight away. */
+function renderAlertSummary() {
+  const open = [...alertsById.values()].filter((a) => a.status !== 'resolved' && a.level !== 'calm');
+  const real = open.filter((a) => !a.test);
+  const unacked = real.filter((a) => a.status !== 'ack').length;
+  const drills = open.length - real.length;
+  // Something is wrong but no alert has arrived yet: still count it.
+  const active = real.length || (situation.cls !== 'calm' ? 1 : 0);
+  $('kAlerts').textContent = String(active);
+  $('kAlerts').parentElement!.classList.toggle('hot', active > 0);
+  $('kAlertsSub').textContent = real.length
+    ? unacked
+      ? `${unacked} need${unacked === 1 ? 's' : ''} acknowledging`
+      : 'all acknowledged'
+    : situation.cls !== 'calm'
+      ? `${situation.place || 'crowd-wide'} · ${situation.kind}`
+      : drills
+        ? `${drills} drill${drills === 1 ? '' : 's'} open, nothing real`
+        : 'nothing needs attention';
 }
 
 // ---------------------------------------------------------------------------
 // toasts
 // ---------------------------------------------------------------------------
 
-function toast(text: string, kind: 'info' | 'watch' | 'danger' | 'error' = 'info') {
+function toast(text: string, kind: 'info' | 'ok' | 'watch' | 'danger' | 'error' = 'info') {
   const el = document.createElement('div');
   el.className = `toast ${kind}`;
-  el.textContent = text;
+  if (kind === 'ok') {
+    // A tick that draws itself: the "step done" confirmation.
+    el.innerHTML = `<svg class="toast-tick" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" /><path d="M7 12.5l3.2 3.2L17 9" /></svg><span></span>`;
+    el.querySelector('span')!.textContent = text;
+    const path = el.querySelector('path')!;
+    animate(path, { pathLength: [0, 1] }, { duration: 0.45, delay: 0.15, ease: 'easeOut' });
+  } else {
+    el.textContent = text;
+  }
   $('toasts').append(el);
   animate(el, { opacity: [0, 1], y: [20, 0], scale: [0.95, 1] }, { type: 'spring', bounce: 0.35, duration: 0.5 });
   setTimeout(() => {
@@ -485,16 +652,19 @@ function crowdRisk(s: Snapshot): { level: Level; score: number } {
   return { level, score };
 }
 
-function renderRisk(level: Level, score: number, waves: number) {
+function renderRisk(level: Level, score: number) {
+  // One number, one level, one sentence: the tile and the panel show the same
+  // value (the gauge arc eases, the digits don't), and the sentence comes from
+  // the same situation as the sidebar.
+  if (levelRank[situation.cls] > levelRank[level]) level = situation.cls;
+  const n = Math.round(score * 100);
   targetScore = score;
   $('riskPanel').className = `card risk ${level}`;
-  $('kRisk').textContent = String(Math.round(score * 100));
+  $('kRisk').textContent = String(n);
+  $('riskNum').textContent = String(n);
   $('kRiskSub').textContent = `of 100 · ${levelText[level].toLowerCase()}`;
   $('riskLevel').textContent = levelText[level];
-  $('riskSub').textContent =
-    waves === 0
-      ? 'No pushes travelling through the crowd.'
-      : `A push is passing between ${waves} pair${waves === 1 ? '' : 's'} of neighbours.`;
+  $('riskSub').textContent = situation.detail;
   const pts = riskHist.map((v, i) => `${i + 60 - riskHist.length - 1},${1 - Math.min(1, Math.max(0, v))}`);
   $('riskLine').setAttribute('points', pts.join(' '));
   if (pts.length) {
@@ -514,7 +684,6 @@ function setThresholdLines() {
 function tickGauge() {
   shownScore += (targetScore - shownScore) * 0.12;
   $('gaugeArc').setAttribute('stroke-dasharray', `${ARC * Math.min(1, shownScore)} ${ARC}`);
-  $('riskNum').textContent = String(Math.round(shownScore * 100));
   requestAnimationFrame(tickGauge);
 }
 requestAnimationFrame(tickGauge);
@@ -560,7 +729,7 @@ function fmtTime(t: number) {
 
 function logEntry(e: LogItem, fresh = true) {
   timeline.push(e);
-  if (timeline.length > 60) timeline.shift();
+  if (timeline.length > 200) timeline.shift();
   renderLog(fresh);
 }
 
@@ -572,37 +741,92 @@ function fillLightPicker(sel: HTMLSelectElement, current: string) {
   const want = ['', ...keys].join('|');
   if (sel.dataset.keys !== want) {
     sel.dataset.keys = want;
-    sel.replaceChildren(new Option('No light', ''), ...keys.map((k) => new Option(`Light ${k}`, k)));
+    sel.replaceChildren(new Option('No zone light', ''), ...keys.map((k) => new Option(`Zone light ${k}`, k)));
   }
   sel.value = current;
   sel.hidden = keys.length === 0;
 }
 
+/**
+ * The timeline only shows the current event: entries before `timelineFrom`
+ * (set by "Clear", or when the event is renamed) stay on the server but are
+ * hidden here. Drills can be filtered out.
+ */
+let timelineFrom = Number(lsGet('pulse.timelineFrom') ?? 0) || 0;
+let hideDrills = lsGet('pulse.hideDrills') === '1';
+function lsGet(k: string) {
+  try {
+    return localStorage.getItem(k);
+  } catch {
+    return null;
+  }
+}
+function lsSet(k: string, v: string) {
+  try {
+    localStorage.setItem(k, v);
+  } catch {
+    /* fine */
+  }
+}
+function startTimelineAt(t: number) {
+  timelineFrom = t;
+  lsSet('pulse.timelineFrom', String(t));
+  renderLog();
+}
+
 function renderLog(fresh = false) {
   const ol = $('log');
-  $('logEmpty').hidden = timeline.length > 0;
+  const shown = timeline.filter((e) => e.t >= timelineFrom && !(hideDrills && e.test)).sort((x, y) => x.t - y.t);
+  const hiddenDrills = hideDrills ? timeline.filter((e) => e.t >= timelineFrom && e.test).length : 0;
+  $('logEmpty').hidden = shown.length > 0;
+  $('logEmpty').textContent = hiddenDrills
+    ? `No incidents for this event (${hiddenDrills} drill${hiddenDrills === 1 ? '' : 's'} hidden).`
+    : 'No incidents for this event yet.';
   ol.replaceChildren(
-    ...timeline
+    ...shown
       .slice()
       .reverse()
       .map((e, i) => {
         const li = document.createElement('li');
-        li.className = `lv-${e.level}`;
+        li.className = `lv-${e.level}${e.test ? ' drill' : ''}`;
         if (fresh && i === 0) li.classList.add('new');
         li.innerHTML =
           `<time>${fmtTime(e.t)}</time><span class="lv ${e.level}">${levelText[e.level]}</span>` +
-          `<span class="txt">${e.test ? '<span class="tag">TEST</span>' : ''}${e.area ? '<span class="tag area">AREA</span>' : ''}${esc(e.text)}</span>`;
+          `<span class="txt">${e.test ? '<span class="tag">DRILL</span>' : ''}${e.area ? '<span class="tag area">AREA</span>' : ''}${esc(e.text)}</span>`;
         return li;
       }),
   );
 }
+$('logClear').addEventListener('click', async () => {
+  // The server drops resolved and drill alerts; open real alerts stay (they still need handling).
+  try {
+    const r = await fetch('/api/alerts/clear', { method: 'POST' });
+    if (!r.ok) throw new Error(String(r.status));
+    for (const [id, a] of alertsById) if (a.status === 'resolved' || a.test) alertsById.delete(id);
+    timeline = timeline.filter((e) => e.id && alertsById.has(e.id));
+    renderAlertCards();
+    renderLog();
+    toast('Timeline cleared. Open alerts are kept until they are resolved.');
+  } catch {
+    // Older server: hide everything before now, on this console only.
+    startTimelineAt(Date.now());
+    toast('Timeline cleared on this console.');
+  }
+});
+($('logHideDrills') as HTMLInputElement).checked = hideDrills;
+$('logHideDrills').addEventListener('change', (e) => {
+  hideDrills = (e.target as HTMLInputElement).checked;
+  lsSet('pulse.hideDrills', hideDrills ? '1' : '0');
+  renderLog();
+});
 
 function showBrief(a: Alert, fresh = false) {
   lastBrief = a;
   const el = $('brief');
   el.classList.remove('muted');
-  $('briefMeta').textContent = `· ${fmtTime(a.t)}${a.test ? ' · test' : ''}`;
-  $('briefPanel').classList.toggle('red', a.level === 'red');
+  $('briefMeta').textContent = `· ${fmtTime(a.t)}${a.test ? ' · drill' : ''}`;
+  $('briefPanel').classList.toggle('red', a.level === 'red' && !a.test);
+  $('briefPanel').classList.toggle('drill', !!a.test);
   ($('replayAudioBtn') as HTMLButtonElement).disabled = false;
   if (!fresh) {
     el.textContent = a.brief ?? '';
@@ -696,7 +920,8 @@ function onSnapshot(s: Snapshot) {
   nodesById.clear();
   for (const n of s.nodes) nodesById.set(n.id, n);
 
-  const risk = crowdRisk(s);
+  // The server's overall status is the one source for level and score; older servers: worked out here.
+  const risk = s.status ? { level: s.status.level, score: s.status.score } : crowdRisk(s);
   if (s.t - lastHistAt >= 1000) {
     lastHistAt = s.t;
     riskHist.push(risk.score);
@@ -708,15 +933,28 @@ function onSnapshot(s: Snapshot) {
   const clusters = s.clusters ?? [];
   mesh.update(s.nodes, s.waves, s.links ?? [], clusters, s.venue ?? { w: 24, h: 16 });
   areas.sync(s.zones, s.nodes);
+  // People each phone stands for (for the "Max people" hint).
+  const ppl = clusters.reduce((n, c) => n + (c.people ?? 0), 0);
+  const cnt = clusters.reduce((n, c) => n + (c.people != null ? c.count : 0), 0);
+  const ratio = cnt > 0 ? ppl / cnt : null;
+  if (ratio && Math.round(ratio) !== Math.round(peoplePerPhone ?? 0)) {
+    peoplePerPhone = ratio;
+    renderShareHint();
+  }
+  situation = computeSituation(s);
   const worstArea = areas.worst();
   mesh.level = worstArea === 'danger' ? 'red' : risk.level === 'red' ? 'red' : worstArea === 'watch' ? 'yellow' : risk.level;
-  renderRisk(risk.level, risk.score, s.waves.length);
-  renderStatus(risk.level, s.stats.phones, clusters);
+  renderRisk(risk.level, risk.score);
+  renderStatus(clusters);
   renderTooltip();
 
   setCounter('cPhones', s.stats.phones);
   setCounter('cRate', Math.round(s.stats.msgPerSec));
-  setCounter('cRtt', s.stats.medianRtt || null);
+  // Connection quality in words; the milliseconds stay in the small print.
+  const rtt = s.stats.medianRtt;
+  $('cRtt').textContent = !rtt ? '–' : rtt < 150 ? 'Good' : rtt < 400 ? 'Fair' : 'Poor';
+  $('cRttSub').textContent = rtt ? `phones answer in about ${Math.round(rtt)} ms` : 'no phones connected';
+  $('cRtt').parentElement!.classList.toggle('hot', rtt >= 400);
   setCounter('cWaves', s.waves.length);
   $('cDetect').textContent = s.stats.detectMs != null ? s.stats.detectMs.toFixed(2) : '–';
   $('cSnap').textContent = s.stats.snapshotBytes != null ? (s.stats.snapshotBytes / 1024).toFixed(1) : '–';
@@ -755,18 +993,35 @@ function onSnapshot(s: Snapshot) {
   if (drawerId && !nodesById.has(drawerId)) openDrawer(null);
 
   updateQR();
+  // Setup's last step: a real phone joined (simulated and replayed ones don't count).
+  if (s.mode === 'live' && s.stats.phones > 0 && !flag('pulse.joined')) setFlag('pulse.joined');
+  refreshSetup();
+}
+
+/** A zone id as staff know it: the area's name, the zone's name, never a raw id. */
+function placeName(zone: string): string {
+  return areas.get(zone)?.name ?? zoneNames.get(zone) ?? (/^[A-Z]$/.test(zone) ? `Zone ${zone}` : 'the venue');
 }
 
 function onAlert(a: Alert, fresh: boolean) {
   if (a.id && alertsById.has(a.id)) {
     // An update to an alert we already have (briefing arrived, acknowledged, resolved, escalated).
     const prev = alertsById.get(a.id)!;
-    alertsById.set(a.id, { ...prev, ...a });
+    const next = { ...prev, ...a };
+    alertsById.set(a.id, next);
+    // The audit trail goes into the timeline too.
+    if (a.status === 'ack' && prev.status !== 'ack') {
+      logEntry({ id: a.id, t: a.ackAt ?? Date.now(), level: 'calm', test: next.test, text: `${placeName(next.zone)}: acknowledged${next.ackBy ? ` by ${next.ackBy}` : ''}.` }, fresh);
+    }
+    if (a.status === 'resolved' && prev.status !== 'resolved') {
+      logEntry({ id: a.id, t: a.resolvedAt ?? Date.now(), level: 'calm', test: next.test, text: `${placeName(next.zone)}: resolved${next.resolvedBy ? ` by ${next.resolvedBy}` : ''}${next.note ? `: “${next.note}”` : '.'}` }, fresh);
+    }
     renderAlertCards();
     if (fresh && a.escalated && !prev.escalated) {
-      toast(`Escalated: ${zoneNames.get(a.zone) ?? a.zone} still unacknowledged`, 'danger');
+      toast(`Escalated: ${placeName(a.zone)} still unacknowledged`, 'danger');
       if (a.brief) playBrief(a);
     }
+    if (fresh && next.test && a.brief && !prev.brief) noteDrillOutput('briefing', true);
     if (fresh && a.brief && !prev.brief) {
       showBrief(a, fresh);
       playBrief(a);
@@ -777,9 +1032,19 @@ function onAlert(a: Alert, fresh: boolean) {
     alertsById.set(a.id, a);
     renderAlertCards();
   }
-  const where = zoneNames.get(a.zone) ?? a.zone;
-  const fallback = a.kind === 'density' ? `${where}: crowd too dense.` : `${where}: crowd risk ${Math.round(a.score * 100)}.`;
-  logEntry({ t: a.t, level: a.level, text: a.brief ?? fallback, test: a.test, area: a.kind === 'density' ? 'DENSITY' : undefined }, fresh);
+  const where = placeName(a.zone);
+  const fallback = a.test
+    ? `Drill at ${where}: not a real incident.`
+    : a.kind === 'density' ? `${where}: crowd too dense.` : a.kind === 'rule' ? `${where}: alert rule crossed.` : `${where}: crowd push detected.`;
+  if (fresh && a.test && a.brief) noteDrillOutput('briefing', true);
+  logEntry({ id: a.id, t: a.t, level: a.level, text: a.brief ?? fallback, test: a.test, area: a.kind === 'density' ? 'DENSITY' : undefined }, fresh);
+  // History from the server: its acknowledgement and resolution too.
+  if (a.ackAt && (a.status === 'ack' || a.status === 'resolved')) {
+    logEntry({ id: a.id, t: a.ackAt, level: 'calm', test: a.test, text: `${where}: acknowledged${a.ackBy ? ` by ${a.ackBy}` : ''}.` }, false);
+  }
+  if (a.status === 'resolved') {
+    logEntry({ id: a.id, t: a.resolvedAt ?? a.t, level: 'calm', test: a.test, text: `${where}: resolved${a.resolvedBy ? ` by ${a.resolvedBy}` : ''}${a.note ? `: “${a.note}”` : '.'}` }, false);
+  }
   if (a.brief) {
     showBrief(a, fresh);
     if (fresh) playBrief(a);
@@ -804,8 +1069,10 @@ function connect() {
     if (msg.type === 'snapshot') onSnapshot(msg);
     else if (msg.type === 'alert') onAlert(msg, true);
     else if (msg.type === 'alerts') {
-      timeline = timeline.filter((e) => e.area);
+      timeline = [];
+      alertsById.clear(); // a full history: rebuild, so every alert gets its timeline entry
       for (const a of msg.alerts) onAlert(a, false);
+      renderAlertCards();
       timeline.sort((x, y) => x.t - y.t);
       renderLog();
     }
@@ -914,10 +1181,72 @@ $('recBtn').addEventListener('click', async () => {
     msg((e as Error).message, true);
   }
 });
+// ---- drill: fire the chain, then report what each output did ----
+type DrillOut = { label: string; state: 'ok' | 'bad' | 'off' | 'wait'; note?: string };
+let drillOuts: Record<string, DrillOut> = {};
+let drillTimer = 0;
+
+function renderDrillResult(where: string) {
+  const box = $('drillResult');
+  box.hidden = false;
+  const icon = { ok: '✓', bad: '✗', off: '–', wait: '…' };
+  box.innerHTML =
+    `<b>Drill sent · ${esc(where)}</b><ul>` +
+    Object.values(drillOuts)
+      .map((o) => `<li class="${o.state}"><span>${icon[o.state]}</span>${esc(o.label)}${o.note ? ` <span class="muted">(${esc(o.note)})</span>` : ''}</li>`)
+      .join('') +
+    `</ul>`;
+}
+
+/** An output reported back (e.g. the briefing arrived for the drill). */
+function noteDrillOutput(key: string, ok: boolean) {
+  const o = drillOuts[key];
+  if (!o || o.state !== 'wait') return;
+  o.state = ok ? 'ok' : 'bad';
+  if (key === 'briefing' && ok && drillOuts.voice?.state === 'wait') {
+    const latest = [...alertsById.values()].filter((a) => a.test && a.brief).sort((x, y) => y.t - x.t)[0];
+    drillOuts.voice.state = latest?.audioUrl || soundOn ? 'ok' : 'off';
+    drillOuts.voice.note = latest?.audioUrl ? undefined : soundOn ? 'browser voice' : 'spoken alerts are off on this console';
+  }
+  renderDrillResult($('drillResult').dataset.where ?? '');
+}
+
 $('testBtn').addEventListener('click', async () => {
   try {
     const r = await post<{ zone: string }>('/api/test-alert');
-    msg(`Test alert sent (${r.zone})`);
+    const where = placeName(r.zone);
+    msg(`Drill sent to ${where}`);
+    setFlag('pulse.drill');
+    refreshSetup();
+    // What should have fired, from the area's rules and the boards' last known state.
+    const area = areas.get(r.zone);
+    const notify = area?.rules?.notify ?? {};
+    drillOuts = {
+      briefing: { label: 'Briefing', state: 'wait' },
+      voice: notify.voice === false ? { label: 'Voice', state: 'off', note: 'off for this area' } : { label: 'Voice', state: 'wait' },
+    };
+    const signs = hwList.filter((h) => !h.zone);
+    if (notify.sign === false) drillOuts.sign = { label: 'Sign', state: 'off', note: 'off for this area' };
+    else if (!signs.length) drillOuts.sign = { label: 'Sign', state: 'off', note: 'none connected' };
+    else signs.forEach((h, i) => (drillOuts[`sign${i}`] = { label: signs.length > 1 ? h.name : 'Sign', state: h.online ? 'ok' : 'bad', note: h.online ? undefined : 'offline' }));
+    const letter = area?.light;
+    if (letter) {
+      const l = hwList.find((h) => h.zone === letter);
+      drillOuts.light = notify.light === false
+        ? { label: `Light ${letter}`, state: 'off', note: 'off for this area' }
+        : { label: `Light ${letter}`, state: l?.online ? 'ok' : 'bad', note: l?.online ? undefined : 'offline' };
+    }
+    $('drillResult').dataset.where = where;
+    renderDrillResult(where);
+    // No briefing within 20 s: say so instead of waiting forever.
+    window.clearTimeout(drillTimer);
+    drillTimer = window.setTimeout(() => {
+      if (drillOuts.briefing?.state === 'wait') {
+        drillOuts.briefing = { label: 'Briefing', state: 'bad', note: 'none arrived; check Settings → services' };
+        if (drillOuts.voice?.state === 'wait') drillOuts.voice = { label: 'Voice', state: 'bad', note: 'nothing to read out' };
+        renderDrillResult(where);
+      }
+    }, 20000);
   } catch (e) {
     msg((e as Error).message, true);
   }
@@ -942,24 +1271,114 @@ $('fsBtn').addEventListener('click', () => {
 });
 
 // QR overlay: shown automatically while nobody has joined, or on demand.
+// "shown" = the modal from the top-bar button (any page); "auto" = inside the
+// Live map while nobody has joined; "hidden" = dismissed.
 let qrMode: 'auto' | 'shown' | 'hidden' = 'auto';
 let onLivePage = false;
 onPage((p) => {
   onLivePage = p === 'live';
-  if (p !== 'live' && qrMode === 'shown') qrMode = 'auto';
   updateQR();
 });
 $('qrBtn').addEventListener('click', () => {
-  qrMode = $('qr').hidden ? 'shown' : 'hidden';
+  qrMode = qrMode === 'shown' ? 'hidden' : 'shown';
   updateQR();
 });
-$('qr').addEventListener('click', () => {
+const closeQR = () => {
   qrMode = 'hidden';
   updateQR();
+};
+$('qrClose').addEventListener('click', closeQR);
+// Click on the backdrop (not the card) closes; Esc closes.
+$('qr').addEventListener('click', (e) => e.target === $('qr') && closeQR());
+window.addEventListener('keydown', (e) => e.key === 'Escape' && !$('qr').hidden && closeQR());
+$('qrCopy').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText($('qrUrl').textContent ?? '');
+    toast('Join link copied');
+  } catch {
+    toast('Copy failed: select the link and copy it by hand', 'error');
+  }
 });
+$('qrPrint').addEventListener('click', () => {
+  // A clean page with just the code and the caption.
+  const w = window.open('', '_blank', 'width=720,height=900');
+  if (!w) return toast('The browser blocked the print window', 'error');
+  const img = ($('qrImg') as HTMLImageElement).src;
+  w.document.write(
+    `<!doctype html><title>Join Pulse</title><body style="font-family:Inter,system-ui,sans-serif;text-align:center;padding:40px">` +
+      `<h1 style="font-size:44px;margin:0 0 12px">Scan to join</h1>` +
+      `<img src="${esc(img)}" style="width:420px;image-rendering:pixelated" onload="setTimeout(()=>print(),200)"/>` +
+      `<p style="font-size:22px;max-width:520px;margin:16px auto">${esc($('qrUrl').closest('.qr-text')!.querySelector('.qr-caption')!.textContent ?? '')}</p>` +
+      `<p style="font-size:16px;color:#555">${esc($('qrUrl').textContent ?? '')}</p></body>`,
+  );
+  w.document.close();
+});
+
 function updateQR() {
-  const show = qrMode === 'shown' || (qrMode === 'auto' && onLivePage && snap?.mode === 'live' && snap.stats.phones === 0);
-  $('qr').hidden = !show;
+  const auto = qrMode === 'auto' && onLivePage && snap?.mode === 'live' && snap.stats.phones === 0;
+  const show = qrMode === 'shown' || auto;
+  const qr = $('qr');
+  // Modal on top of everything, or tucked inside the Live map.
+  const stage = document.querySelector('#mapWrap .stage');
+  if (qrMode === 'shown') {
+    if (qr.parentElement !== document.body) document.body.append(qr);
+  } else if (auto && stage && qr.parentElement !== stage) {
+    stage.append(qr);
+  }
+  qr.classList.toggle('modal', qrMode === 'shown');
+  const wasHidden = qr.hidden;
+  qr.hidden = !show;
+  $('qrBtn').classList.toggle('on', qrMode === 'shown');
+  if (show && wasHidden && qrMode === 'shown') {
+    animate(qr.querySelector('.qr-card')!, { opacity: [0, 1], scale: [0.96, 1] }, { duration: 0.2 });
+    $('qrClose').focus();
+  }
+  if (show && !flag('pulse.qrShown')) {
+    setFlag('pulse.qrShown');
+    refreshSetup();
+  }
+}
+
+/** The join link and whether phones can reach it (GET /api/join; /api/phone-url on older servers). */
+async function loadJoinInfo() {
+  let url = '';
+  let reach: 'public' | 'lan' | 'local' | '' = '';
+  try {
+    const r = await fetch('/api/join');
+    if (!r.ok) throw new Error();
+    const j = (await r.json()) as { url: string; reachable?: 'public' | 'lan' | 'local' };
+    url = j.url;
+    reach = j.reachable ?? '';
+  } catch {
+    try {
+      url = (await (await fetch('/api/phone-url')).text()).trim();
+    } catch {
+      return;
+    }
+  }
+  if (!reach) {
+    // Work it out from the address ourselves.
+    const host = (() => {
+      try {
+        return new URL(url).hostname;
+      } catch {
+        return '';
+      }
+    })();
+    reach = /^(localhost|127\.|\[?::1\]?$)/.test(host)
+      ? 'local'
+      : /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)|\.local$/.test(host)
+        ? 'lan'
+        : 'public';
+  }
+  $('qrUrl').textContent = url;
+  const warn = $('qrWarn');
+  warn.hidden = reach === 'public';
+  warn.textContent =
+    reach === 'local'
+      ? 'Phones can’t open this address: it only works on this computer. Start the tunnel or set PUBLIC_URL.'
+      : 'This address only works for phones on the same Wi-Fi as this computer. For attendees on mobile data, start the tunnel or set PUBLIC_URL.';
+  warn.classList.toggle('bad', reach === 'local');
 }
 
 async function init() {
@@ -972,13 +1391,21 @@ async function init() {
   }
   try {
     const st = (await (await fetch('/api/status')).json()) as Record<string, boolean>;
-    const names: Record<string, string> = { tiger: 'Tiger Data', gemini: 'Gemini', elevenlabs: 'ElevenLabs', sign: 'Sign' };
+    const names: Record<string, string> = {
+      tiger: 'Incident history · Tiger Data',
+      gemini: 'AI briefings · Gemini',
+      elevenlabs: 'Voice · ElevenLabs',
+      sign: 'Signs & lights',
+    };
     $('services').replaceChildren(
       ...Object.entries(names).map(([k, label]) => {
         const s = document.createElement('span');
-        s.className = `svc ${st[k] ? 'on' : ''}`;
+        // Signs follow the boards' real online state (loadHardware), not just "configured".
+        const on = k === 'sign' ? (hwLoaded ? hwOnline > 0 : !!st[k]) : !!st[k];
+        s.className = `svc ${on ? 'on' : ''}`;
+        s.dataset.svc = k;
         s.textContent = label;
-        s.title = st[k] ? 'connected' : 'not configured: falling back';
+        s.title = k === 'sign' && hwLoaded ? `${hwOnline} of ${hwTotal} boards online` : on ? 'connected' : 'not configured: falling back';
         return s;
       }),
     );
@@ -986,15 +1413,17 @@ async function init() {
     /* ignore */
   }
   ($('qrImg') as HTMLImageElement).src = '/api/qr.png';
-  fetch('/api/phone-url')
-    .then((r) => r.text())
-    .then((u) => ($('qrUrl').textContent = u))
-    .catch(() => {});
+  void loadJoinInfo();
   await loadRecordings();
   await areas.load();
   await loadVenue();
+  areasLoaded = venueLoaded = true;
+  refreshSetup();
   connect();
 }
+/** Setup only celebrates steps once the state they depend on has loaded. */
+let areasLoaded = false;
+let venueLoaded = false;
 
 void init();
 
@@ -1015,6 +1444,7 @@ function renderVenue() {
   renderTemplates();
   loadPlanImage();
   mesh.setLayout(venue.layout ?? null);
+  refreshSetup();
 }
 
 async function loadVenue() {
@@ -1027,7 +1457,17 @@ async function loadVenue() {
   renderVenue();
 }
 
-async function saveVenue(next: Venue) {
+/**
+ * Save the venue. Only explicit actions call this (Save size, a template, Apply,
+ * GPS buttons); `sized` marks the size as chosen by staff for the setup checklist.
+ */
+async function saveVenue(next: Venue, opts: { sized?: boolean; quiet?: boolean } = {}) {
+  const resized = next.w !== venue.w || next.h !== venue.h;
+  if (resized && lastMode === 'sim') {
+    toast('Stop the simulation to change the venue size.', 'error');
+    renderVenue();
+    return;
+  }
   try {
     const r = await fetch('/api/venue', {
       method: 'PUT',
@@ -1037,8 +1477,16 @@ async function saveVenue(next: Venue) {
     const j = (await r.json().catch(() => ({}))) as Venue & { error?: string };
     if (!r.ok) throw new Error(j.error ?? r.statusText);
     venue = j;
+    if (opts.sized) setFlag('pulse.sizeChosen');
     renderVenue();
-    toast('Venue saved');
+    if (!opts.quiet) toast(resized ? `Venue size saved: ${venue.w} × ${venue.h} m` : 'Venue saved');
+    if (resized) {
+      // Areas drawn for the old size may now hang off the edge.
+      const out = areas.list.filter((a) => a.poly.some(([x, y]) => x < 0 || y < 0 || x > venue.w + 0.01 || y > venue.h + 0.01));
+      if (out.length) {
+        toast(`${out.length === 1 ? `“${out[0].name}” lies` : `${out.length} areas lie`} partly outside the new venue size. Move or redraw ${out.length === 1 ? 'it' : 'them'} on Areas & alerts.`, 'watch');
+      }
+    }
   } catch (e) {
     toast(`Couldn't save venue: ${(e as Error).message}`, 'error');
   }
@@ -1052,7 +1500,11 @@ function venueForm(): Venue {
   return { ...venue, w: num('vW', venue.w), h: num('vH', venue.h), bearing: Number(($('vBearing') as HTMLInputElement).value) || 0 };
 }
 
-$('vSave').addEventListener('click', () => void saveVenue(venueForm()));
+$('vSave').addEventListener('click', () => {
+  const f = venueForm();
+  const tpl = TEMPLATES.find((t) => t.w === f.w && t.h === f.h);
+  void saveVenue({ ...f, template: tpl?.id ?? 'custom' }, { sized: true });
+});
 
 // Centre the map on this laptop: its GPS fix becomes the middle of the venue,
 // and the top-left corner (the map origin) is worked out from the size.
@@ -1070,7 +1522,7 @@ $('vAnchor').addEventListener('click', () => {
       const north = -(dx * Math.sin(b) + dyDown * Math.cos(b));
       const lat0 = lat + north / 110540;
       const lon0 = lon + east / (111320 * Math.cos((lat * Math.PI) / 180));
-      void saveVenue({ ...v, lat: lat0, lon: lon0, geo: true }).then(() =>
+      void saveVenue({ ...v, lat: lat0, lon: lon0, geo: true }, { quiet: true }).then(() =>
         toast(`Anchored (laptop GPS ±${Math.round(accuracy)} m)`),
       );
     },
@@ -1105,21 +1557,39 @@ async function loadHardware() {
     return;
   }
   lightKeys = list.filter((h) => h.zone).map((h) => h.zone!);
+  hwList = list;
   hwOnline = list.filter((h) => h.online).length;
+  hwTotal = list.length;
+  hwLoaded = true;
   mesh.setBoards(list);
   areas.onChange();
+  // Settings' "Sign" chip follows what Hardware sees, not just "configured".
+  const signChip = document.querySelector<HTMLElement>('.svc[data-svc="sign"]');
+  if (signChip) {
+    signChip.classList.toggle('on', hwOnline > 0);
+    signChip.classList.toggle('warn', hwOnline > 0 && hwOnline < hwTotal);
+    signChip.title = !hwTotal ? 'no boards configured' : `${hwOnline} of ${hwTotal} boards online`;
+  }
   $('hwEmpty').hidden = list.length > 0;
   const on = list.filter((h) => h.online).length;
   $('hwSummary').textContent = list.length ? `${on} of ${list.length} online` : '';
   const heard = list.reduce((n, h) => n + (h.ble?.devices ?? 0), 0);
+  const openDetails = new Set([...$('hw').querySelectorAll<HTMLDetailsElement>('details[open]')].map((d) => d.dataset.url));
   $('hw').replaceChildren(
     ...list.map((h) => {
       const li = document.createElement('li');
       li.className = `hw-row ${h.online ? 'on' : 'off'}`;
       const host = h.url.replace(/^https?:\/\//, '');
+      const lastAt = h.seenAgo != null ? fmtTime(Date.now() - h.seenAgo * 1000).slice(0, 5) : '';
       const status = h.online
-        ? `${bars(h.rssi)}${h.uptime ? `<span class="muted">up ${ago2(h.uptime * 1000)}</span>` : ''}`
-        : `<span class="off-text">offline${h.seenAgo != null ? ` · last answered ${ago2(h.seenAgo * 1000)} ago` : ' · not answering'}</span>`;
+        ? `<span class="ok-text">Online</span>${bars(h.rssi)}${h.uptime ? `<span class="muted">on for ${ago2(h.uptime * 1000)}</span>` : ''}`
+        : `<span class="off-text">Offline${lastAt ? ` · last answered ${lastAt}` : ' · has not answered yet'}</span>`;
+      const fix = h.online
+        ? ''
+        : `<div class="hw-fix">Check its power and that it’s on the venue Wi-Fi (or plugged in by USB).${lastAt ? ` Last answered ${lastAt}.` : ''}</div>`;
+      const details =
+        `<details class="hw-details" data-url="${esc(h.url)}"${openDetails.has(h.url) ? ' open' : ''}><summary>Details</summary>` +
+        `<div class="mono small">${esc(host)}</div>${h.error && !h.online ? `<div class="small muted">${esc(h.error)}</div>` : ''}</details>`;
       const lvl = h.online && h.level ? `<span class="st ${h.level === 'red' ? 'wave' : h.level === 'yellow' ? 'swaying' : 'ok'}">${esc(h.level)}</span>` : '';
       const ble = h.ble
         ? `<div class="hw-ble">📶 Bluetooth: <b>${h.ble.devices}</b> devices nearby · ${h.ble.near} close</div>`
@@ -1130,11 +1600,11 @@ async function loadHardware() {
             .join(', ')}</div>`
         : '';
       const shows = h.zone
-        ? `<div class="hw-areas">${h.areas?.length ? `Shows ${h.areas.map(esc).join(', ')}` : 'No area assigned yet: pick “Light ' + esc(h.zone) + '” on a watch area'}</div>`
+        ? `<div class="hw-areas">${h.areas?.length ? `Shows ${h.areas.map(esc).join(', ')}` : 'No area assigned yet: choose “Zone light ' + esc(h.zone) + '” on a watch area'}</div>`
         : '<div class="hw-areas">Shows the worst alert anywhere</div>';
       li.innerHTML =
         `<span class="hw-dot"></span><div class="hw-main"><div class="hw-top"><b>${esc(h.name)}</b>${lvl}</div>` +
-        `<div class="hw-sub"><span class="mono">${esc(host)}</span>${status}</div>${ble}${peers}${shows}</div>`;
+        `<div class="hw-sub">${status}</div>${fix}${ble}${peers}${shows}${details}</div>`;
       return li;
     }),
   );
@@ -1168,17 +1638,40 @@ for (const [id, out, fmt] of [
   ['simPart', 'simPartV', (v: string) => `${v}%`],
 ] as const) {
   const input = $(id) as HTMLInputElement;
-  const show = () => ($(out).textContent = fmt(input.value));
+  const show = () => {
+    $(out).textContent = fmt(input.value);
+    renderSimApply();
+  };
   input.addEventListener('input', show);
   show();
 }
 
+/** The running simulation's real numbers vs the sliders: "Restart to apply" when they differ. */
+function renderSimApply() {
+  const st = simState;
+  const running = !!st?.running && lastMode === 'sim';
+  const now = $('simNow');
+  now.hidden = !running;
+  if (!running || !st) {
+    $('simRestart').hidden = true;
+    return;
+  }
+  const people = st.people ?? 0;
+  const part = Math.round((st.participation ?? 0) * 100);
+  now.textContent = `Running now: ${people} people · ${part}% carry Pulse (${st.phones ?? Math.round(people * part / 100)} phones)`;
+  const wantPeople = Number(($('simPeople') as HTMLInputElement).value);
+  const wantPart = Number(($('simPart') as HTMLInputElement).value);
+  $('simRestart').hidden = wantPeople === people && Math.abs(wantPart - part) < 1;
+}
 
 function renderSimRunning(running: boolean) {
   $('simStart').hidden = running;
   $('simStop').hidden = !running;
   $('simControls').hidden = !running;
+  renderSimApply();
 }
+
+$('simRestart').addEventListener('click', () => $('simStart').click());
 
 $('simStart').addEventListener('click', async () => {
   const people = Number(($('simPeople') as HTMLInputElement).value);
@@ -1279,7 +1772,7 @@ function renderSimState(st: SimState) {
   $('simTruth').innerHTML =
     `<h4>Ground truth (only the simulator knows this)</h4>` +
     `<div class="truth-grid"><div><b>${t.maxDensity.toFixed(1)}</b><span>people/m² at the densest spot</span></div>` +
-    `<div><b>${Math.round(t.maxPressure)}</b><span>N/m peak body pressure</span></div>` +
+    `<div><b>${Math.round(t.maxPressure)}</b><span>peak crush pressure (N/m)</span></div>` +
     `<div><b>${t.crushing}</b><span>people at crush level</span></div></div>${verdict}`;
 }
 
@@ -1289,6 +1782,7 @@ async function pollSim() {
     if (!r.ok) return;
     simState = (await r.json()) as SimState;
     renderSimState(simState);
+    renderSimApply();
   } catch {
     /* server busy */
   }
@@ -1310,43 +1804,132 @@ function splitBrief(a: Alert): { head: string; action: string } {
   return { head: parts[0] ?? '', action: parts.slice(1).join(' ') };
 }
 
+/** The alert whose "Resolve" form is open, and what has been typed in it (kept across re-renders). */
+let resolving: { id: string; note: string } | null = null;
+
+/** The operator's name for the audit trail: asked once, remembered on this console. */
+function operator(): string {
+  return lsGet('pulse.operator') ?? '';
+}
+
+/** Is the place this alert is about still alerting right now? */
+function stillAlerting(a: Alert) {
+  const z = snap?.zones.find((z) => z.id === a.zone);
+  return (z && z.level !== 'calm') || areas.get(a.zone)?.level === 'danger' || (snap?.status?.zone === a.zone && snap.status.level !== 'calm');
+}
+
 function renderAlertCards() {
-  const open = [...alertsById.values()]
-    .filter((a) => a.status !== 'resolved' && a.level !== 'calm')
-    .sort((x, y) => y.t - x.t)
-    .slice(0, 4);
+  const all = [...alertsById.values()].filter((a) => a.status !== 'resolved' && a.level !== 'calm');
+  const open = all.sort((x, y) => y.t - x.t).slice(0, 4);
   const badge = $('navAlert');
-  const reds = open.filter((a) => a.level === 'red' && a.status !== 'ack').length;
+  const reds = open.filter((a) => a.level === 'red' && a.status !== 'ack' && !a.test).length;
   badge.hidden = reds === 0;
   badge.textContent = String(reds);
+  // Drill banner while any drill is still open.
+  const drill = all.find((a) => a.test);
+  $('drillBanner').hidden = !drill;
+  if (drill) $('drillWhere').textContent = placeName(drill.zone);
   $('alertCards').replaceChildren(
     ...open.map((a) => {
       const { head, action } = splitBrief(a);
       const el = document.createElement('div');
-      el.className = `alert-card ${a.level} ${a.status === 'ack' ? 'ack' : ''}`;
-      const where = zoneNames.get(a.zone) ?? a.zone;
-      const kind = a.early ? 'Early warning' : a.kind === 'density' ? 'Crowding' : a.kind === 'rule' ? 'Rule' : 'Crowd push';
+      el.className = `alert-card ${a.level} ${a.status === 'ack' ? 'ack' : ''} ${a.test ? 'drill' : ''}`;
+      const where = placeName(a.zone);
+      const kind = a.test ? 'Drill' : a.early ? 'Early warning' : a.kind === 'density' ? 'Crowding' : a.kind === 'rule' ? 'Alert rule' : 'Crowd push';
+      const label = a.test ? 'DRILL · not a real incident' : a.level === 'red' ? 'Danger' : 'Watch';
+      const acked = a.status === 'ack'
+        ? `<span class="muted small">Acknowledged ${a.ackAt ? fmtTime(a.ackAt) : ''}${a.ackBy ? ` by ${esc(a.ackBy)}` : ''}</span>`
+        : '<button class="sm primary" data-ack>Acknowledge</button>';
+      const form = resolving?.id === a.id;
+      const danger = form && !a.test && stillAlerting(a);
       el.innerHTML =
-        `<div class="ac-top"><b>${a.level === 'red' ? 'Danger' : 'Watch'}</b><span>${esc(kind)} · ${esc(where)} · ${fmtTime(a.t)}</span>` +
-        `${a.test ? '<span class="tag">TEST</span>' : ''}${a.escalated ? '<span class="esc">escalated</span>' : ''}</div>` +
-        `<div class="ac-head">${esc(head || `${where}: ${kind.toLowerCase()} detected`)}</div>` +
+        `<div class="ac-top"><b>${label}</b><span>${esc(kind)} · ${esc(where)} · ${fmtTime(a.t)}</span>` +
+        `${a.escalated ? '<span class="esc">escalated</span>' : ''}</div>` +
+        `<div class="ac-head">${esc(head || (a.test ? `Drill at ${where}` : `${where}: ${kind.toLowerCase()} detected`))}</div>` +
         (action ? `<div class="ac-action">${esc(action)}</div>` : '') +
-        `<div class="ac-btns">${a.status === 'ack' ? `<span class="muted small">Acknowledged ${a.ackAt ? fmtTime(a.ackAt) : ''}</span>` : '<button class="sm primary" data-ack>Acknowledge</button>'}` +
-        `<button class="sm ghost" data-resolve>Resolve</button></div>`;
+        (form
+          ? `<form class="ac-resolve">` +
+            (danger ? `<p class="ac-warn">The crowd here is still in danger. Resolve anyway?</p>` : '') +
+            `<label>Outcome <span class="muted">(optional)</span><input name="note" maxlength="200" placeholder="e.g. Opened side gate, crowd eased" /></label>` +
+            `<label>Your name <span class="muted">(for the log)</span><input name="by" maxlength="40" placeholder="e.g. Maya, safety lead" /></label>` +
+            `<div class="ac-btns"><button class="sm ${danger ? 'danger-btn' : 'primary'}" type="submit">${danger ? 'Resolve anyway' : 'Resolve'}</button><button class="sm ghost" type="button" data-cancel>Cancel</button></div></form>`
+          : `<div class="ac-btns">${acked}<button class="sm ghost" data-resolve>Resolve…</button></div>`);
       el.querySelector('[data-ack]')?.addEventListener('click', () => void alertAction(a, 'ack'));
-      el.querySelector('[data-resolve]')!.addEventListener('click', () => void alertAction(a, 'resolve'));
+      el.querySelector('[data-resolve]')?.addEventListener('click', () => {
+        resolving = { id: a.id!, note: '' };
+        renderAlertCards();
+        el.isConnected || $('alertCards').querySelector<HTMLInputElement>('.ac-resolve [name=note]')?.focus();
+      });
+      const f = el.querySelector<HTMLFormElement>('.ac-resolve');
+      if (f) {
+        const note = f.querySelector<HTMLInputElement>('[name=note]')!;
+        const by = f.querySelector<HTMLInputElement>('[name=by]')!;
+        note.value = resolving!.note;
+        by.value = operator();
+        note.addEventListener('input', () => resolving && (resolving.note = note.value));
+        f.querySelector('[data-cancel]')!.addEventListener('click', () => {
+          resolving = null;
+          renderAlertCards();
+        });
+        f.addEventListener('submit', (e) => {
+          e.preventDefault();
+          if (by.value.trim()) lsSet('pulse.operator', by.value.trim());
+          resolving = null;
+          void alertAction(a, 'resolve', note.value.trim());
+        });
+      }
       return el;
     }),
   );
+  renderAlertSummary();
+  renderBriefAfterChange();
 }
 
-async function alertAction(a: Alert, what: 'ack' | 'resolve') {
+/** After ack/resolve: the briefing paragraph follows what is still open. */
+function renderBriefAfterChange() {
+  if (!lastBrief?.id) return;
+  const cur = alertsById.get(lastBrief.id);
+  if (cur && cur.status !== 'resolved') return;
+  const next = [...alertsById.values()].filter((a) => a.status !== 'resolved' && a.brief).sort((x, y) => y.t - x.t)[0];
+  if (next) return showBrief(next);
+  lastBrief = null;
+  const el = $('brief');
+  el.classList.add('muted');
+  el.textContent = cur?.resolvedAt
+    ? `Resolved at ${fmtTime(cur.resolvedAt)}${cur.resolvedBy ? ` by ${cur.resolvedBy}` : ''}. Nothing else is open.`
+    : 'Nothing to report. When the detector raises a red alert, a short briefing for staff appears here and is read aloud.';
+  $('briefMeta').textContent = '';
+  $('briefPanel').classList.remove('red', 'drill');
+  ($('replayAudioBtn') as HTMLButtonElement).disabled = true;
+}
+
+async function alertAction(a: Alert, what: 'ack' | 'resolve', note = '') {
   if (!a.id) return;
+  let by = operator();
+  if (what === 'ack' && !by) {
+    // Ask once; Cancel keeps it anonymous.
+    by = (window.prompt('Your name for the incident log (asked once on this console):', '') ?? '').trim().slice(0, 40);
+    if (by) lsSet('pulse.operator', by);
+  }
   // Optimistic: the server's update arrives over the socket too.
-  alertsById.set(a.id, { ...a, status: what === 'ack' ? 'ack' : 'resolved', ackAt: what === 'ack' ? Date.now() : a.ackAt });
+  const now = Date.now();
+  alertsById.set(a.id, {
+    ...a,
+    status: what === 'ack' ? 'ack' : 'resolved',
+    ackAt: what === 'ack' ? now : a.ackAt,
+    ackBy: what === 'ack' ? by || undefined : a.ackBy,
+    resolvedAt: what === 'resolve' ? now : a.resolvedAt,
+    resolvedBy: what === 'resolve' ? by || undefined : a.resolvedBy,
+    note: what === 'resolve' ? note || undefined : a.note,
+  });
+  if (what === 'resolve') {
+    logEntry({ id: a.id, t: now, level: 'calm', test: a.test, text: `${placeName(a.zone)}: resolved${by ? ` by ${by}` : ''}${note ? `: “${note}”` : '.'}` });
+  } else {
+    logEntry({ id: a.id, t: now, level: 'calm', test: a.test, text: `${placeName(a.zone)}: acknowledged${by ? ` by ${by}` : ''}.` });
+  }
   renderAlertCards();
   try {
-    await post(`/api/alerts/${encodeURIComponent(a.id)}/${what}`);
+    await post(`/api/alerts/${encodeURIComponent(a.id)}/${what}`, what === 'ack' ? { by } : { by, note });
   } catch (e) {
     toast(`Couldn't ${what === 'ack' ? 'acknowledge' : 'resolve'}: ${(e as Error).message}`, 'error');
   }
@@ -1361,36 +1944,62 @@ function buildRules(box: HTMLElement, id: string) {
   if (!a) return;
   const r: AlertRules = a.rules ?? {};
   const n = r.notify ?? {};
+  // Plain sentences an operator can read aloud: "Alert when more than 4 people per m² for 5 s".
+  // Empty boxes mean the rule is off; the server's limits are mirrored in min/max.
   box.innerHTML =
-    `<div class="rules-grid">` +
-    `<label>Density alert above<input type="number" name="density" min="0.5" max="10" step="0.5" placeholder="off" value="${r.density ?? ''}" /><span class="muted">people per m²</span></label>` +
-    `<label>…for at least<input type="number" name="densityHoldS" min="1" max="120" step="1" placeholder="5" value="${r.densityHoldS ?? ''}" /><span class="muted">seconds</span></label>` +
-    `<label>Capacity<input type="number" name="maxPhones" min="1" max="10000" step="1" placeholder="off" value="${r.maxPhones ?? ''}" /><span class="muted">phones inside</span></label>` +
-    `<label>Push detection<select name="push"><option value="on">On</option><option value="off">Off</option></select><span class="muted">travelling waves</span></label>` +
-    `<label class="wide">Message for staff<input type="text" name="message" maxlength="140" placeholder="e.g. Open the side gate and slow the barrier queue" value="${esc(r.message ?? '')}" /></label>` +
-    `<div class="checks"><label><input type="checkbox" name="sign" ${n.sign !== false ? 'checked' : ''}/> Sign</label>` +
-    `<label><input type="checkbox" name="light" ${n.light !== false ? 'checked' : ''}/> Zone light</label>` +
-    `<label><input type="checkbox" name="voice" ${n.voice !== false ? 'checked' : ''}/> Voice</label></div>` +
+    `<div class="rules-form">` +
+    `<p class="rf-lead">Alert when…</p>` +
+    `<div class="rf-rule"><label class="rf-line"><span>…more than</span><input type="number" name="density" min="0.5" max="20" step="0.5" placeholder="off" value="${r.density ?? ''}" aria-label="People per square metre" />` +
+    `<span>people per m² for</span><input type="number" name="densityHoldS" min="1" max="600" step="1" placeholder="5" value="${r.densityHoldS ?? ''}" aria-label="Seconds" /><span>s</span></label>` +
+    `<p class="rf-hint">People per m². About 2 is comfortable, 4 is tight, 5+ is dangerous.</p></div>` +
+    `<div class="rf-rule"><label class="rf-line"><span>Max people</span><input type="number" name="maxPhones" min="1" max="100000" step="1" placeholder="off" value="${r.maxPhones ?? ''}" aria-label="Max people" /></label>` +
+    `<p class="rf-hint" data-share></p></div>` +
+    `<label class="rf-line rf-switch"><input type="checkbox" name="push" ${r.push !== false ? 'checked' : ''} role="switch" /><span>Detect crowd pushes</span><span class="muted">a shove rippling through the crowd</span></label>` +
+    `<p class="rf-note muted">Leave a box empty to turn that limit off.</p>` +
+    `<label class="rf-block"><span>Message staff will hear</span><input type="text" name="message" maxlength="140" placeholder="e.g. Open the side gate and slow the barrier queue" value="${esc(r.message ?? '')}" /></label>` +
+    `<div class="rf-block"><span>Send to</span><div class="rf-chips">` +
+    `<label class="chip"><input type="checkbox" name="sign" ${n.sign !== false ? 'checked' : ''}/> Sign</label>` +
+    `<label class="chip"><input type="checkbox" name="light" ${n.light !== false ? 'checked' : ''}/> Zone light</label>` +
+    `<label class="chip"><input type="checkbox" name="voice" ${n.voice !== false ? 'checked' : ''}/> Voice</label></div></div>` +
+    `<span class="rf-saved" aria-live="polite"></span>` +
     `</div>`;
-  (box.querySelector('[name=push]') as HTMLSelectElement).value = r.push === false ? 'off' : 'on';
+  renderShareHint(box);
   const read = (): AlertRules => {
     const v = (name: string) => (box.querySelector(`[name=${name}]`) as HTMLInputElement).value.trim();
-    const num = (name: string) => (v(name) ? Number(v(name)) : undefined);
+    const num = (name: string, max: number) => {
+      const x = Number(v(name));
+      return v(name) && Number.isFinite(x) && x > 0 ? Math.min(max, x) : undefined;
+    };
     const chk = (name: string) => (box.querySelector(`[name=${name}]`) as HTMLInputElement).checked;
     return {
-      density: num('density'),
-      densityHoldS: num('densityHoldS'),
-      maxPhones: num('maxPhones'),
-      push: v('push') !== 'off',
+      density: num('density', 20),
+      densityHoldS: num('densityHoldS', 600),
+      maxPhones: num('maxPhones', 100000),
+      push: chk('push'),
       message: v('message') || undefined,
       notify: { sign: chk('sign'), light: chk('light'), voice: chk('voice') },
     };
   };
+  const saved = box.querySelector<HTMLElement>('.rf-saved')!;
   box.addEventListener('change', () => {
     areas.setRules(id, read());
-    toast(`Rules saved for ${areas.get(id)?.name ?? 'area'}`);
+    // Inline confirmation next to the form, instead of a toast per keystroke.
+    saved.textContent = 'Saved ✓';
+    animate(saved, { opacity: [0, 1], y: [4, 0] }, { duration: 0.2 });
+    window.clearTimeout(Number(saved.dataset.t));
+    saved.dataset.t = String(window.setTimeout(() => animate(saved, { opacity: 0 }, { duration: 0.4 }), 2500));
   });
   box.addEventListener('click', (e) => e.stopPropagation());
+}
+
+/** How many attendees each Pulse phone stands for, from the clusters' estimate (people ÷ phones). */
+let peoplePerPhone: number | null = null;
+function renderShareHint(root: ParentNode = document) {
+  const text =
+    peoplePerPhone && peoplePerPhone > 1.05
+      ? `Estimated from phones: about 1 in ${Math.round(peoplePerPhone)} attendees runs Pulse.`
+      : 'Estimated from the phones running Pulse inside the area.';
+  for (const el of root.querySelectorAll<HTMLElement>('[data-share]')) el.textContent = text;
 }
 
 // ---------------------------------------------------------------------------
@@ -1416,11 +2025,14 @@ function renderTemplates() {
       b.innerHTML = `<b>${t.name}</b><span>${t.w ? `${t.w} × ${t.h} m · ` : ''}${t.sub}</span>`;
       b.addEventListener('click', () => {
         if (t.id === 'custom') {
+          // Custom: type the metres, then "Save size" (that is what marks the step done).
+          for (const b of grid.querySelectorAll<HTMLElement>('.tpl')) b.classList.toggle('on', b === b.parentElement!.querySelector('[data-tpl="custom"]'));
           ($('vW') as HTMLInputElement).focus();
-          void saveVenue({ ...venueForm(), template: 'custom' });
+          ($('vW') as HTMLInputElement).select();
+          toast('Type the width and depth in metres, then press Save size.');
           return;
         }
-        void saveVenue({ ...venue, w: t.w, h: t.h, template: t.id });
+        void saveVenue({ ...venue, w: t.w, h: t.h, template: t.id }, { sized: true });
       });
       grid.append(b);
     }
@@ -1458,7 +2070,7 @@ async function uploadPlan(file: File) {
     if (!r.ok) throw new Error(j.error ?? (r.status === 404 ? 'the server needs the floor-plan update' : r.statusText));
     venue = j;
     renderVenue();
-    toast('Floor plan uploaded. Try “Read the layout with Gemini”.');
+    toast('Floor plan uploaded. Press “Find stage and exits” to have AI read it.');
   } catch (e) {
     toast(`Upload failed: ${(e as Error).message}`, 'error');
   }
@@ -1509,14 +2121,14 @@ $('fpRemove').addEventListener('click', async () => {
 $('fpAnalyze').addEventListener('click', async () => {
   const box = $('fpSuggest');
   box.hidden = false;
-  box.innerHTML = '<b>Gemini is reading the floor plan…</b>';
+  box.innerHTML = '<b>AI is reading the stage and exits from your plan…</b>';
   try {
     const r = await fetch('/api/venue/floorplan/analyze', { method: 'POST' });
     const j = (await r.json().catch(() => ({}))) as FloorplanSuggestion & { error?: string };
     if (!r.ok) throw new Error(j.error ?? r.statusText);
     const exits = j.layout.exits ?? [];
     box.innerHTML =
-      `<b>Gemini suggests</b> <span class="muted">(${esc(j.confidence)} confidence)</span>` +
+      `<b>AI suggests</b> <span class="muted">(${esc(j.confidence)} confidence)</span>` +
       `<ul><li>Size: <b>${j.w} × ${j.h} m</b></li><li>Stage: ${j.layout.stage ? 'found' : 'not found'}</li>` +
       `<li>Exits: ${exits.length ? exits.map((e) => esc(e.name)).join(', ') : 'none found'}</li></ul>` +
       `<p class="muted small">${esc(j.notes)}</p>` +
@@ -1524,7 +2136,7 @@ $('fpAnalyze').addEventListener('click', async () => {
     // Preview it on the map straight away.
     mesh.setLayout(j.layout);
     box.querySelector('[data-apply]')!.addEventListener('click', () => {
-      void saveVenue({ ...venue, w: j.w, h: j.h, layout: j.layout, template: 'custom' });
+      void saveVenue({ ...venue, w: j.w, h: j.h, layout: j.layout, template: 'custom' }, { sized: true });
       box.hidden = true;
     });
     box.querySelector('[data-dismiss]')!.addEventListener('click', () => {
@@ -1562,72 +2174,117 @@ areas.onBoardMoved = async (key, x, y) => {
 // ---------------------------------------------------------------------------
 
 let hwOnline = 0;
-const flag = (k: string) => {
+let hwTotal = 0;
+let hwList: Hardware[] = [];
+let hwLoaded = false;
+// Function declarations (hoisted): updateQR and onSnapshot use these before this point in the file.
+function flag(k: string) {
   try {
     return localStorage.getItem(k) === '1';
   } catch {
     return false;
   }
-};
-const setFlag = (k: string) => {
+}
+function setFlag(k: string) {
   try {
     localStorage.setItem(k, '1');
   } catch {
     /* fine */
   }
-};
+}
 
-$('testBtn').addEventListener('click', () => setFlag('pulse.drill'));
-
-function renderChecklist() {
+function renderGreeting() {
   const h = new Date().getHours();
   const part = h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';
   $('homeGreeting').textContent = `${part} · ${($('eventName') as HTMLInputElement).value || 'your event'}`;
-  if ((snap?.stats.phones ?? 0) > 0) setFlag('pulse.joined');
-  const items = [
-    { done: flag('pulse.eventNamed'), title: 'Name your event', sub: 'Shown on the console and in briefings.', go: '#home', optional: false },
-    { done: !!venue.template, title: 'Choose the venue size', sub: 'Pick a template or type the size in metres.', go: '#venue', optional: false },
-    { done: !!venue.floorplan, title: 'Upload a floor plan', sub: 'Gemini reads the stage and exits from it.', go: '#venue', optional: true },
-    { done: areas.list.length > 0, title: 'Draw watch areas', sub: 'Barriers, gates, the stage front.', go: '#areas', optional: false },
-    { done: areas.list.some((a) => a.rules && Object.values(a.rules).some((v) => v !== undefined)), title: 'Set alert rules', sub: 'Density, capacity and your own message per area.', go: '#areas', optional: true },
-    { done: hwOnline > 0, title: 'Connect signs and lights', sub: 'Check they are online and place them on the map.', go: '#hardware', optional: true },
-    { done: flag('pulse.drill'), title: 'Run a drill', sub: 'Fire a test alert through briefing, voice and signs.', go: '#recordings', optional: false },
-    { done: flag('pulse.joined'), title: 'Share the join QR', sub: 'Attendees scan it; their phones join the mesh.', go: '#live', optional: false },
-  ];
-  const req = items.filter((i) => !i.optional);
-  const doneReq = req.filter((i) => i.done).length;
-  $('setupProgress').textContent = `${doneReq} of ${req.length} required steps`;
-  $('setupBar').style.width = `${(doneReq / req.length) * 100}%`;
-  $('checklist').replaceChildren(
-    ...items.map((i) => {
-      const li = document.createElement('li');
-      li.className = i.done ? 'done' : '';
-      li.innerHTML =
-        `<span class="tick">${i.done ? '✓' : ''}</span><span class="ck-text"><span class="ck-title">${esc(i.title)}${i.optional ? '<span class="opt">optional</span>' : ''}</span>` +
-        `<span class="ck-sub">${esc(i.sub)}</span></span>` +
-        (i.done ? '' : `<a class="sm-link" href="${i.go}"><button class="sm">${i.go === '#home' ? 'Edit name' : 'Open'}</button></a>`);
-      if (i.go === '#home') li.querySelector('button')?.addEventListener('click', (e) => {
-        e.preventDefault();
-        ($('eventName') as HTMLInputElement).focus();
-        ($('eventName') as HTMLInputElement).select();
-      });
-      return li;
-    }),
-  );
 }
-$('eventName').addEventListener('change', () => {
+
+/** A new event name starts a new event: the timeline shows only what happens from now. */
+let eventNameBefore = eventInput.value;
+function eventRenamed() {
+  if (eventInput.value.trim() && eventInput.value !== eventNameBefore) startTimelineAt(Date.now());
+  eventNameBefore = eventInput.value;
+}
+
+function setEventName(name: string) {
+  const changed = name !== eventInput.value;
+  eventInput.value = name;
+  if (changed) eventRenamed();
+  try {
+    localStorage.setItem('pulse.event', name);
+  } catch {
+    /* fine */
+  }
   setFlag('pulse.eventNamed');
-  renderChecklist();
+  renderGreeting();
+}
+
+$('eventName').addEventListener('change', () => {
+  eventRenamed();
+  setFlag('pulse.eventNamed');
+  renderGreeting();
+  refreshSetup();
 });
+
+setup = new Setup({
+  facts: () => ({
+    loaded: areasLoaded && venueLoaded && hwLoaded,
+    named: flag('pulse.eventNamed'),
+    eventName: eventInput.value,
+    template: !!venue.template,
+    sizeChosen: flag('pulse.sizeChosen'),
+    floorplan: !!venue.floorplan,
+    areas: areas.list.length,
+    rules: areas.list.some((a) => hasRules(a.rules)),
+    hwOnline,
+    hwTotal,
+    drill: flag('pulse.drill'),
+    joined: flag('pulse.joined'),
+    qrShown: flag('pulse.qrShown'),
+    alarm: situation.cls === 'calm' ? '' : situation.text,
+    alarmSimulated: situation.cls !== 'calm' && !!snap && snap.mode !== 'live',
+  }),
+  toast: (text, kind) => toast(text, kind),
+  onName: (name) => setEventName(name),
+  onShowQR: () => {
+    qrMode = 'shown';
+    updateQR();
+  },
+  onEditName: () => {
+    const box = document.querySelector<HTMLElement>('.event-switch');
+    if (!box || !box.offsetParent) return false; // collapsed sidebar: use the setup bar's field instead
+    eventInput.focus();
+    eventInput.select();
+    box.classList.add('setup-focus');
+    window.setTimeout(() => box.classList.remove('setup-focus'), 4000);
+    toast('Type your event name in the sidebar, then press Enter.');
+    return true;
+  },
+  onEnter: (id) => {
+    // Rules step: fold out "Alert when…" on the selected (or first) area.
+    if (id === 'rules') {
+      const a = areas.get(areas.selected ?? '') ?? areas.list[0];
+      if (a) toggleRules(a.id, true);
+    }
+  },
+});
+setup.refresh();
+// Fallback for changes made elsewhere (another tab, a flag set by the server's state).
 setInterval(() => {
-  if (page() === 'home') renderChecklist();
-}, 2000);
+  renderGreeting();
+  refreshSetup();
+}, 5000);
 
 // Last: runs immediately, so everything it touches must already exist.
+let lastPage = '';
 onPage((p) => {
   mesh.showBoards = p === 'hardware';
-  if (p === 'home') renderChecklist();
+  // Each page starts with the whole venue in view (a pan on one page cut off the stage on the next).
+  if (p !== lastPage && lastPage) mesh.resetView();
+  lastPage = p;
+  if (p === 'home') renderGreeting();
   if (p === 'venue') renderTemplates();
+  refreshSetup();
 });
 
 // ---------------------------------------------------------------------------

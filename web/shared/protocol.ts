@@ -140,6 +140,8 @@ export interface Cluster {
   density: number;
   level?: Level;
   trend: 'forming' | 'steady' | 'dispersing';
+  /** Estimated people per m² at the cluster's densest spot (scaled by participation): the number alerts and rules use. */
+  est?: number;
   /** How fast the estimated density is changing (people/m² per minute). */
   rate?: number;
   /** Projected seconds until it reaches the danger density at the current rate (early warning). */
@@ -220,6 +222,18 @@ export interface Snapshot {
   waves: Wave[];
   /** Every neighbour pair the detector compares. */
   links: [string, string][];
+  /** The one overall status every part of the console shows: worst of zones, rules and clusters, with where and why. */
+  status?: {
+    level: Level;
+    /** 0..1 crowd risk. */
+    score: number;
+    /** Zone id and name of the worst place ("" when calm). */
+    zone?: string;
+    where?: string;
+    kind?: 'wave' | 'density' | 'rule' | 'early';
+    /** Estimated people/m² at the worst spot, when density is the reason. */
+    density?: number;
+  };
   clusters: Cluster[];
   stats: Stats;
 }
@@ -245,6 +259,10 @@ export interface Alert {
   status?: 'open' | 'ack' | 'resolved';
   ackAt?: number;
   resolvedAt?: number;
+  /** Who acknowledged / resolved (free text from the console), and the outcome note given on resolve. */
+  ackBy?: string;
+  resolvedBy?: string;
+  note?: string;
   /** Still unacknowledged after the escalation delay: re-announced. */
   escalated?: boolean;
 }

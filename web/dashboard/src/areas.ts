@@ -59,6 +59,8 @@ export class Areas {
 
   /** Fires when areas are added, removed, renamed, or change level. */
   onChange: () => void = () => {};
+  /** Fires once a newly drawn shape is committed (after onChange has rendered its row). */
+  onCreated: (a: AreaView) => void = () => {};
   /** Fires when an area escalates (from the server's zone level). */
   onEscalate: (a: AreaView, from: AreaLevel) => void = () => {};
   /** Fires when the tool changes (e.g. Escape, or after finishing a shape). */
@@ -97,13 +99,14 @@ export class Areas {
       { passive: false },
     );
     window.addEventListener('keydown', (e) => {
-      const typing = (e.target as HTMLElement).closest('input, textarea, select');
+      const typing = (e.target as HTMLElement).closest?.('input, textarea, select');
       if (e.key === 'Escape') {
         this.draft = null;
         this.pick = null;
         this.pickDrag = null;
         this.setTool('select');
-      } else if (!typing && (e.key === 'Delete' || e.key === 'Backspace') && this.selected) {
+      } else if (!typing && e.key === 'Delete' && this.selected && this.canvas.offsetParent) {
+        // Delete only (not Backspace): a stray Backspace meant for a name field must not delete an area.
         this.remove(this.selected);
       }
     });
@@ -144,7 +147,10 @@ export class Areas {
   private save() {
     window.clearTimeout(this.saveTimer);
     this.saveTimer = window.setTimeout(async () => {
-      const body: Area[] = this.list.map(({ id, name, sens, poly, light }) => ({ id, name, sens, poly, ...(light ? { light } : {}) }));
+      // Rules must go too: leaving them out wiped every area's rules on the next save.
+      const body: Area[] = this.list.map(({ id, name, sens, poly, light, rules }) => ({
+        id, name, sens, poly, ...(light ? { light } : {}), ...(rules ? { rules } : {}),
+      }));
       try {
         const r = await fetch('/api/areas', {
           method: 'PUT',
@@ -177,12 +183,13 @@ export class Areas {
     if (!a) return;
     a.name = name.trim().slice(0, 40) || a.name;
     this.save();
+    this.onChange();
   }
 
-  toggleSens(id: string) {
+  setSens(id: string, sens: Sensitivity) {
     const a = this.get(id);
-    if (!a) return;
-    a.sens = a.sens === 'high' ? 'normal' : 'high';
+    if (!a || a.sens === sens) return;
+    a.sens = sens;
     this.save();
     this.onChange();
   }
@@ -193,6 +200,7 @@ export class Areas {
     if (!a) return;
     a.rules = rules;
     this.save();
+    this.onChange();
   }
 
   /** Which zone light shows this area ("" = none). */
@@ -441,7 +449,7 @@ export class Areas {
     this.draft = null;
     if (!d || !this.bigEnough(d)) return;
     const a = this.view(
-      { id: Math.random().toString(36).slice(2, 9), name: `Area ${nextNumber(this.list)}`, sens: 'high', poly: this.toPoly(d) },
+      { id: Math.random().toString(36).slice(2, 9), name: `Area ${nextNumber(this.list)}`, sens: 'normal', poly: this.toPoly(d) },
       this.list.length,
     );
     this.list.push(a);
@@ -449,6 +457,7 @@ export class Areas {
     this.save();
     this.setTool('select');
     this.onChange();
+    this.onCreated(a);
   }
 
   // -------------------------------------------------------------------------
@@ -461,14 +470,17 @@ export class Areas {
       if (a.poly.length < 3) continue;
       const sel = a.id === this.selected;
       const rgb = a.level === 'calm' ? hexRgb(a.color) : LEVEL_RGB[a.level];
-      const fill = a.level === 'danger' ? 0.16 + Math.sin(now / 200) * 0.08 : a.level === 'watch' ? 0.12 : 0.06;
+      // A light, static fill: the map's heat map shows where in the area the crowd is.
+      // Danger and watch get a crisp solid outline instead of a pulsing wash.
+      const alerting = a.level !== 'calm';
+      const fill = a.level === 'danger' ? 0.09 : a.level === 'watch' ? 0.07 : 0.06;
       this.path(g, a.poly);
       g.fillStyle = `rgba(${rgb},${fill})`;
       g.fill();
-      g.setLineDash(sel ? [] : [7, 6]);
+      g.setLineDash(sel || alerting ? [] : [7, 6]);
       g.lineDashOffset = -now / 50;
-      g.lineWidth = sel ? 2.5 : a.level === 'calm' ? 1.5 : 2;
-      g.strokeStyle = `rgba(${rgb},${sel ? 0.95 : 0.7})`;
+      g.lineWidth = a.level === 'danger' ? 3 : sel || alerting ? 2.5 : 1.5;
+      g.strokeStyle = `rgba(${rgb},${sel || alerting ? 0.95 : 0.7})`;
       g.stroke();
       g.setLineDash([]);
 

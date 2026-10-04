@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Pulse · Crowd Safety</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23111'/%3E%3Cpath d='M3 16Q5 15 7 16Q9 18.5 11 16Q13.5 9 16 16Q18.5 23 21 16Q23 13.5 25 16Q27 17 29 16' fill='none' stroke='%23fff' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
     <!-- The console has its own light and dark themes; stop dark-mode extensions recolouring it. -->
     <meta name="darkreader-lock" />
     <meta name="color-scheme" content="light dark" />
@@ -23,7 +24,7 @@
         <div class="brand">
           <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
             <rect width="32" height="32" rx="9" />
-            <path d="M5 17h5l3-7 4 13 3-9 2 3h5" />
+            <path d="M3 16Q5 15 7 16Q9 18.5 11 16Q13.5 9 16 16Q18.5 23 21 16Q23 13.5 25 16Q27 17 29 16" />
           </svg>
           <b>Pulse</b>
         </div>
@@ -102,6 +103,31 @@
           </div>
         </header>
 
+        <!-- While a drill is open: nobody should mistake it for a real incident. -->
+        <div id="drillBanner" class="drill-banner" hidden role="status">
+          <b>DRILL</b><span>Not a real incident · test alert at <span id="drillWhere"></span>. Resolve it on Live when you're done.</span>
+        </div>
+
+        <!-- Guided setup: shown on setup pages until every step is done or skipped. -->
+        <div id="flowBar" class="flow-bar" hidden role="region" aria-label="Event setup">
+          <div class="flow-progress"><i id="flowFill"></i></div>
+          <div class="flow-row">
+            <span id="flowTick" class="flow-tick" aria-hidden="true">1</span>
+            <div class="flow-text">
+              <span id="flowStep" class="flow-step">Step 1 of 8</span>
+              <b id="flowTitle">Name your event</b>
+              <span id="flowHint" class="flow-hint" aria-live="polite"></span>
+            </div>
+            <input id="flowName" class="flow-name" maxlength="48" placeholder="e.g. Summer Stage, Friday" aria-label="Event name" hidden />
+            <div class="flow-actions">
+              <button id="flowBack" class="sm ghost">← Back</button>
+              <button id="flowSkip" class="sm">Skip</button>
+              <button id="flowNext" class="primary">Continue →</button>
+              <button id="flowExit" class="sm ghost flow-exit">Exit setup</button>
+            </div>
+          </div>
+        </div>
+
         <div class="pages">
           <!-- ---------------------------------------------------------- home -->
           <section class="page" data-page="home">
@@ -109,6 +135,19 @@
               <div class="hero">
                 <h2 id="homeGreeting">Welcome to Pulse</h2>
                 <p>Early warning for crowd crushes, using the phones already in the crowd. Set up your venue once, then watch one screen.</p>
+              </div>
+
+              <div id="setupCard" class="card checklist-card">
+                <div class="setup-head">
+                  <div>
+                    <h3 id="setupHeadline">Event setup</h3>
+                    <p id="setupLead" class="muted small"></p>
+                  </div>
+                  <button id="setupResume" class="primary big">Start setup →</button>
+                </div>
+                <p id="setupAlarm" class="setup-alarm" hidden role="status"></p>
+                <div class="progress"><i id="setupBar"></i></div>
+                <ol id="checklist" class="checklist"></ol>
               </div>
 
               <div class="menu-grid">
@@ -120,7 +159,7 @@
                 <a class="menu-card" href="#venue">
                   <span class="mc-icon">▦</span>
                   <b>Venue &amp; floor plan</b>
-                  <span>Pick a size or upload a plan; Gemini reads the layout.</span>
+                  <span>Pick a size or upload a plan; AI reads the stage and exits from it.</span>
                 </a>
                 <a class="menu-card" href="#areas">
                   <span class="mc-icon">⚑</span>
@@ -143,15 +182,6 @@
                   <span>Rehearse with saved runs and test the alert chain.</span>
                 </a>
               </div>
-
-              <div class="card checklist-card">
-                <div class="card-head">
-                  <h3>Event setup</h3>
-                  <span id="setupProgress" class="meta"></span>
-                </div>
-                <div class="progress"><i id="setupBar"></i></div>
-                <ol id="checklist" class="checklist"></ol>
-              </div>
             </div>
           </section>
 
@@ -161,7 +191,7 @@
               <div class="kpi">
                 <span class="k-label">Attendees connected</span>
                 <b id="cPhones">0</b>
-                <span class="k-sub">phones streaming motion</span>
+                <span class="k-sub">phones sharing crowd movement</span>
               </div>
               <div class="kpi">
                 <span class="k-label">Crowd risk</span>
@@ -179,9 +209,9 @@
                 <span class="k-sub" id="kDenseSub">no crowds packed together</span>
               </div>
               <div class="kpi">
-                <span class="k-label">Network latency</span>
+                <span class="k-label">Connection</span>
                 <b id="cRtt">–</b>
-                <span class="k-sub">median round trip, ms</span>
+                <span class="k-sub" id="cRttSub">no phones connected</span>
               </div>
             </section>
             <div class="split">
@@ -221,9 +251,15 @@
                 </div>
 
                 <div class="card log-panel">
-                  <div class="card-head"><h3>Incident timeline</h3></div>
+                  <div class="card-head">
+                    <h3>Incident timeline</h3>
+                    <div class="log-tools">
+                      <label class="small muted"><input id="logHideDrills" type="checkbox" /> Hide drills</label>
+                      <button id="logClear" class="sm ghost" data-tip="Start the timeline fresh for this event (nothing is deleted on the server)">Clear</button>
+                    </div>
+                  </div>
                   <ol id="log"></ol>
-                  <p id="logEmpty" class="muted small">No incidents yet.</p>
+                  <p id="logEmpty" class="muted small">No incidents for this event yet.</p>
                 </div>
               </aside>
             </div>
@@ -241,7 +277,9 @@
                   <div class="row venue-row">
                     <label>Width <input id="vW" type="number" min="2" max="5000" step="1" /> m</label>
                     <label>Depth <input id="vH" type="number" min="2" max="5000" step="1" /> m</label>
-                    <label>Facing <input id="vBearing" type="number" min="0" max="359" step="1" /> °</label>
+                  </div>
+                  <div class="row venue-row">
+                    <label>Which way is the stage? <input id="vBearing" type="number" min="0" max="359" step="1" /> compass °</label>
                   </div>
                   <div class="row"><button id="vSave" class="primary">Save size</button></div>
                 </div>
@@ -256,7 +294,7 @@
                   <div id="fpTools" class="fp-tools" hidden>
                     <label class="sim-strength">Plan visibility <input id="fpOpacity" type="range" min="10" max="100" step="5" value="55" /></label>
                     <div class="row">
-                      <button id="fpAnalyze" class="primary">✦ Read the layout with Gemini</button>
+                      <button id="fpAnalyze" class="primary" data-tip="AI reads the stage and exits from your plan">✦ Find stage and exits</button>
                       <button id="fpRemove" class="ghost sm">Remove</button>
                     </div>
                   </div>
@@ -286,10 +324,23 @@
                     <h3>Watch areas</h3>
                     <button id="addArea" class="sm primary">+ Draw area</button>
                   </div>
+                  <details id="areasHow" class="explainer">
+                    <summary>How areas work</summary>
+                    <ul>
+                      <li>An area is one spot you want watched on its own: a barrier, a gate, the stage front.</li>
+                      <li>Pulse counts the phones inside and raises an alert when a crowd push travels through it, or when it gets more crowded than you allow.</li>
+                      <li><b>Alert early</b> uses lower thresholds, for spots where trouble starts fast. <b>Standard</b> suits open floor.</li>
+                      <li>Each area can light its own zone light, show on the signs and give staff its own message.</li>
+                    </ul>
+                  </details>
                   <ul id="areas" class="areas"></ul>
                   <div id="areasEmpty" class="empty">
-                    <p>Mark the spots your team knows get dangerous: barriers, gates, the stage front.</p>
-                    <p class="muted">Use the shape tools on the map. Each area gets its own alert rules, light and message.</p>
+                    <p><b>No watch areas yet.</b> Mark the spots your team knows get dangerous:</p>
+                    <ol>
+                      <li>Click <b>+ Draw area</b>, or pick a shape on the map’s toolbar.</li>
+                      <li>Drag over the spot on the map: a barrier, a gate, the stage front.</li>
+                      <li>Name it, then choose when it should alert.</li>
+                    </ol>
                   </div>
                 </div>
               </aside>
@@ -301,14 +352,14 @@
             <div class="split">
               <div class="map-slot"></div>
               <aside class="rail">
-                <div class="card">
+                <div class="card" id="hwCard">
                   <div class="card-head">
                     <h3>Signs &amp; zone lights</h3>
                     <span id="hwSummary" class="meta"></span>
                   </div>
                   <p class="muted small">Drag a board's marker on the map to where it really is. Boards with Bluetooth hear each other and estimate the distance between them.</p>
                   <ul id="hw" class="hw"></ul>
-                  <p id="hwEmpty" class="muted small">No signs or lights configured. Add them to SIGN_URL in .env.</p>
+                  <p id="hwEmpty" class="muted small">No signs or zone lights are connected. They are optional: alerts still show on this console and are read aloud. To add boards, list them in SIGN_URL in the server’s .env file, then restart Pulse.</p>
                 </div>
               </aside>
             </div>
@@ -322,16 +373,19 @@
                 <div class="card">
                   <div class="card-head"><h3>Virtual crowd</h3><button id="simBtn" class="sm ghost" hidden>Simulate</button></div>
                   <div id="simOpts" class="sim-opts">
-                    <p class="muted small">
-                      Simulated people walk, keep their distance and push each other like real crowds (the Social Force Model,
-                      Helbing et&nbsp;al.). Some carry a phone running Pulse; the detector only sees those phones.
-                    </p>
+                    <p class="muted small">A virtual crowd to rehearse with. Some people carry a phone running Pulse; Pulse only sees those phones, just like on the night.</p>
+                    <details class="explainer how-sim">
+                      <summary>How the simulation works</summary>
+                      <p class="small">Simulated people walk, keep their distance and push each other like real crowds, using the Social Force Model (Helbing et&nbsp;al.).</p>
+                    </details>
                     <div class="sim-sliders">
                       <label>People <b id="simPeopleV">250</b><input id="simPeople" type="range" min="40" max="500" step="10" value="250" /></label>
                       <label>With the app <b id="simPartV">60%</b><input id="simPart" type="range" min="10" max="100" step="5" value="60" /></label>
                     </div>
+                    <p id="simNow" class="sim-now" hidden></p>
                     <div class="row">
                       <button id="simStart" class="primary">▶ Start simulation</button>
+                      <button id="simRestart" class="primary" hidden data-tip="The sliders differ from the running crowd">↻ Restart to apply</button>
                       <button id="simStop" class="ghost" hidden>■ Stop</button>
                     </div>
                     <div id="simControls" class="sim-controls" hidden>
@@ -393,11 +447,12 @@
                   </div>
                   <div class="ops-block">
                     <h4>Drill</h4>
-                    <p class="muted small">Fire the whole alert chain (briefing, voice, signage) without a real incident.</p>
+                    <p class="muted small">Fire the whole alert chain (briefing, voice, signs and lights) without a real incident. It shows as DRILL everywhere.</p>
                     <div class="row">
                       <button id="testBtn" class="warn">Run test alert</button>
                       <span id="ctlMsg" class="muted small"></span>
                     </div>
+                    <div id="drillResult" class="drill-result" hidden aria-live="polite"></div>
                   </div>
                   <div class="ops-block">
                     <h4>Ask the AI</h4>
@@ -416,12 +471,18 @@
           <section class="page" data-page="settings">
             <div class="settings">
               <div class="card">
-                <div class="card-head"><h3>Connected services</h3></div>
+                <div class="card-head"><h3>Privacy</h3></div>
+                <p class="small">Attendees share a random session ID, their position on the venue map and motion summaries. GPS is converted to venue metres on arrival and never stored. No names, contacts, audio or photos.</p>
+              </div>
+              <details class="card tech">
+                <summary><h3>Technical details</h3><span class="meta">services, system health, detector evaluation</span></summary>
+              <div class="tech-block">
+                <h4>Connected services</h4>
                 <p class="muted small">Every service is optional. When one is missing or down, Pulse falls back and keeps detecting.</p>
                 <div class="services" id="services"></div>
               </div>
-              <div class="card">
-                <div class="card-head"><h3>System health</h3></div>
+              <div class="tech-block">
+                <h4>System health</h4>
                 <div class="sys">
                   <div><b id="cRate">0</b><span>messages / s</span></div>
                   <div><b id="cDetect">–</b><span>ms per detector step</span></div>
@@ -431,8 +492,8 @@
                   <div><b id="mHops">0</b><span>mesh hops / s</span></div>
                 </div>
               </div>
-              <div class="card" id="evalCard">
-                <div class="card-head"><h3>Detector evaluation</h3><span id="evalMeta" class="meta"></span></div>
+              <div class="tech-block" id="evalCard">
+                <div class="card-head"><h4>Detector evaluation</h4><span id="evalMeta" class="meta"></span></div>
                 <div id="evalSummary" class="eval-summary"><p class="muted small">Run <span class="mono">make eval</span> to generate the evaluation report.</p></div>
                 <table id="evalTable" class="eval-table" hidden>
                   <thead><tr><th>Scenario</th><th>Layout</th><th>Should</th><th>Red</th><th>Yellow</th><th>Calm</th><th>Median to red</th></tr></thead>
@@ -440,10 +501,7 @@
                 </table>
                 <p class="muted small">Simulated motion and thresholds tuned on the same simulator: evidence the method works, not real-world validation.</p>
               </div>
-              <div class="card">
-                <div class="card-head"><h3>Privacy</h3></div>
-                <p class="small">Attendees share a random session ID, their position on the venue map and motion summaries. GPS is converted to venue metres on arrival and never stored. No names, contacts, audio or photos.</p>
-              </div>
+              </details>
             </div>
           </section>
         </div>
@@ -490,7 +548,7 @@
             <button id="zoomIn" data-tip="Zoom in" aria-label="Zoom in">+</button>
             <span id="zoomPct">100%</span>
             <button id="zoomOut" data-tip="Zoom out" aria-label="Zoom out">−</button>
-            <button id="zoomFit" data-tip="Reset view" aria-label="Reset view">
+            <button id="zoomFit" data-tip="Fit venue" aria-label="Fit venue">
               <svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" /></svg>
             </button>
           </div>
@@ -565,19 +623,27 @@
             <p class="d-privacy">A push travels person to person: the second phone repeats the first one's motion a fraction of a second later. Moving together (dancing) has no delay; walking repeats every step, so it has several equally good delays.</p>
           </aside>
 
-          <div id="qr" hidden>
-            <div class="qr-card">
-              <img id="qrImg" alt="QR code for attendees to join" />
-              <div class="qr-text">
-                <h2>Scan to join</h2>
-                <p id="qrUrl"></p>
-                <p class="muted">Hold your phone flat against your chest.</p>
-              </div>
-            </div>
-          </div>
         </div>
       </section>
     </template>
+
+    <!-- Join QR: a modal from the top bar on any page; shown inside the Live map while nobody has joined. -->
+    <div id="qr" hidden role="dialog" aria-modal="true" aria-labelledby="qrTitle">
+      <div class="qr-card">
+        <button id="qrClose" class="icon-btn qr-close" aria-label="Close" data-tip="Close (Esc)">✕</button>
+        <img id="qrImg" alt="QR code for attendees to join" />
+        <div class="qr-text">
+          <h2 id="qrTitle">Scan to join</h2>
+          <p class="qr-caption">Scan to help keep tonight’s crowd safe. Keep this page open, phone in your chest pocket or held flat.</p>
+          <p id="qrUrl" class="qr-url"></p>
+          <p id="qrWarn" class="qr-warn" hidden></p>
+          <div class="row qr-actions">
+            <button id="qrCopy" class="sm">Copy link</button>
+            <button id="qrPrint" class="sm">Print</button>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <div id="toasts"></div>
     <script type="module" src="./src/main.ts"></script>
