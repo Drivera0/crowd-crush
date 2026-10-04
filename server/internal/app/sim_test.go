@@ -187,7 +187,8 @@ func TestSimAPI(t *testing.T) {
 	if code := do(t, "POST", srv.URL+"/api/sim/stop", nil, nil); code != http.StatusConflict {
 		t.Errorf("stop while stopped: %d", code)
 	}
-	for _, body := range []string{`{"people":0.5}`, `{"people":5000}`, `{"participation":2}`, `{"scenario":"rave"}`, `nope`} {
+	for _, body := range []string{`{"people":0.5}`, `{"people":5000}`, `{"participation":2}`, `{"scenario":"rave"}`, `nope`,
+		`{"realism":"perfect"}`, `{"imperfections":{"gps":7}}`, `{"realism":"harsh","imperfections":{"carry":-1}}`} {
 		if code := do(t, "POST", srv.URL+"/api/sim/start", body, nil); code != http.StatusBadRequest {
 			t.Errorf("start %s: %d", body, code)
 		}
@@ -315,6 +316,103 @@ func TestSimPhonesThroughPipeline(t *testing.T) {
 	if kinds["hello"] == 0 || kinds["m"] < 40*ok {
 		t.Errorf("recording has sim records %v for %d phones", kinds, ok)
 	}
+}
+
+// TestSimRealism: the realism option of POST /api/sim/start. Ideal (the
+// default) phones are placed by hand and exact; realistic ones are GPS
+// nodes with an accuracy, some metres off, some silent or outside, and
+// their summaries carry a gravity vector; an imperfection can be switched
+// on alone.
+func TestSimRealism(t *testing.T) {
+	type res struct {
+		gps, manual, stale, outside int
+		medErr                      float64
+	}
+	run := func(req SimStart) res {
+		t.Helper()
+		a := New(Options{Detect: detect.DefaultConfig(), RecordingsDir: t.TempDir()})
+		req.People, req.Participation, req.Seed = 200, 0.6, 3
+		if err := a.startSimAt(req, simT0); err != nil {
+			t.Fatal(err)
+		}
+		r := &simRunner{t: t, a: a, now: simT0}
+		name, err := a.StartRecording("realism")
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.until(40, nil)
+		a.StopRecording()
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		snap := a.snapshotLocked(r.now)
+		truth := map[string][2]float64{}
+		for _, ag := range a.sim.w.Agents() {
+			if id := ag.PhoneID(); id != "" {
+				truth[id] = [2]float64{ag.X, ag.Y}
+			}
+		}
+		var out res
+		var errs []float64
+		for _, n := range snap.Nodes {
+			if n.UA != "sim" {
+				t.Fatalf("unexpected node %+v", n)
+			}
+			switch n.Src {
+			case protocol.SrcGPS:
+				out.gps++
+				if n.Acc < 3 {
+					t.Fatalf("gps node with accuracy %.1f", n.Acc)
+				}
+			default:
+				out.manual++
+			}
+			if n.Status == protocol.StatusStale {
+				out.stale++
+			}
+			if n.Outside {
+				out.outside++
+			}
+			if p, ok := truth[n.ID]; ok {
+				errs = append(errs, math.Hypot(n.X-p[0], n.Y-p[1]))
+			}
+		}
+		sort.Float64s(errs)
+		out.medErr = errs[len(errs)/2]
+		b, err := os.ReadFile(filepath.Join(a.opt.RecordingsDir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(b), `"lat"`) || strings.Contains(string(b), `"lon"`) {
+			t.Fatal("recording holds coordinates")
+		}
+		return out
+	}
+	one := 1.0
+	ideal := run(SimStart{})
+	if ideal.gps != 0 || ideal.stale != 0 || ideal.outside != 0 || ideal.medErr > 0.05 {
+		t.Errorf("ideal (default): %+v", ideal)
+	}
+	if named := run(SimStart{Realism: "ideal"}); named != ideal {
+		t.Errorf(`"ideal" %+v differs from the default %+v`, named, ideal)
+	}
+	rea := run(SimStart{Realism: "realistic"})
+	if rea.gps < rea.manual*5 || rea.medErr < 1.5 || rea.medErr > 9 || rea.stale == 0 {
+		t.Errorf("realistic: %+v", rea)
+	}
+	harsh := run(SimStart{Realism: "harsh"})
+	if harsh.medErr <= rea.medErr {
+		t.Errorf("harsh position error %.1f m not above realistic %.1f m", harsh.medErr, rea.medErr)
+	}
+	gpsOnly := run(SimStart{Imperfections: &SimImperfections{GPS: &one}})
+	if gpsOnly.gps == 0 || gpsOnly.stale != 0 {
+		t.Errorf("gps only: %+v", gpsOnly)
+	}
+	zero := 0.0
+	noGPS := run(SimStart{Realism: "realistic", Imperfections: &SimImperfections{GPS: &zero}})
+	if noGPS.gps != 0 || noGPS.medErr > 0.3 || noGPS.stale == 0 {
+		t.Errorf("realistic without gps: %+v", noGPS)
+	}
+	t.Logf("ideal %+v\nrealistic %+v\nharsh %+v\ngps only %+v\nrealistic, gps off %+v", ideal, rea, harsh, gpsOnly, noGPS)
 }
 
 // TestSimLeadSweep prints lead times over seeds (env-gated):

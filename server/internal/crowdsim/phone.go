@@ -55,13 +55,23 @@ const (
 	EvPos
 	EvMotion
 	EvGone
+	// EvGPS is a GPS-like fix (messy phones only, see realism.go): X, Y in
+	// venue metres, not clamped, with the accuracy radius Acc (m). The
+	// receiver smooths and gates it as the server does a live fix.
+	EvGPS
 )
 
 // Event is one phone message.
 type Event struct {
-	Kind        EventKind
-	ID          string
-	X, Y        float64         // hello, pos
+	Kind EventKind
+	ID   string
+	X, Y float64 // hello, pos, gps
+	Acc  float64 // gps: reported accuracy radius (m)
+	// Auto: a hello without a position, as a GPS phone's is (its hello
+	// carries only the fix, which follows as EvGPS). The receiver places
+	// the phone where the server places such a phone (the default grid
+	// cell) until a usable fix arrives.
+	Auto        bool
 	Offset, RTT int64           // sync
 	M           protocol.Motion // motion
 }
@@ -93,15 +103,49 @@ type phone struct {
 	handleRot  float64
 	offset     int64
 	rtt        int64
+	dev        *Device // messy phone (realism.go); nil = ideal
 }
 
 func newPhone(w *World, a *Agent) *phone {
 	r := rand.New(rand.NewSource(w.rng.Int63()))
-	return &phone{
+	p := &phone{
 		id: fmt.Sprintf("sim-%04d", a.ID), rng: r,
 		breathF: 0.2 + 0.13*r.Float64(), breathP: 2 * math.Pi * r.Float64(),
 		offset: int64(r.NormFloat64() * 800), rtt: int64(25 + r.ExpFloat64()*40),
 	}
+	if !w.realism.Ideal() {
+		// Its own random stream, derived from the world seed and the
+		// person, so the world's and the ideal phone's draws are untouched.
+		p.dev = NewDevice(p.id, w.realism, mixSeed(w.seed, int64(a.ID)))
+	}
+	return p
+}
+
+// mixSeed derives an independent seed (splitmix64).
+func mixSeed(seed, k int64) int64 {
+	z := uint64(seed) + 0x9E3779B97F4A7C15*uint64(k+1)
+	z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9
+	z = (z ^ (z >> 27)) * 0x94D049BB133111EB
+	return int64(z ^ (z >> 31))
+}
+
+// PhoneID is the id of the phone this person carries ("" = none).
+func (a *Agent) PhoneID() string {
+	if a.phone == nil {
+		return ""
+	}
+	return a.phone.id
+}
+
+// Carry is how this person carries their phone (CarryChest…; −1 = no phone).
+func (a *Agent) Carry() int {
+	switch {
+	case a.phone == nil:
+		return -1
+	case a.phone.dev == nil:
+		return CarryChest
+	}
+	return a.phone.dev.Carry()
 }
 
 // Events returns (and clears) the phone messages produced since the last call.
@@ -202,12 +246,16 @@ func (w *World) bodyMotion(a *Agent, speed float64, r *rand.Rand) (bx, by, bz, r
 
 // phones advances every phone by one tick and queues its messages.
 func (w *World) phones() {
+	if w.envRng != nil {
+		w.env.Common.Step(Dt, w.realism.GPS, w.envRng)
+	}
+	w.env.StartMs = w.StartMs
 	for _, a := range w.agents {
 		p := a.phone
 		if p == nil {
 			continue
 		}
-		if !p.hello {
+		if !p.hello && p.dev == nil {
 			p.hello = true
 			p.sx, p.sy = r2c(a.X), r2c(a.Y)
 			w.events = append(w.events, Event{Kind: EvHello, ID: p.id, X: a.X, Y: a.Y},
@@ -252,6 +300,11 @@ func (w *World) phones() {
 			bx += 0.6 * p.rng.NormFloat64()
 			by += 0.6 * p.rng.NormFloat64()
 			bz += 0.6 * p.rng.NormFloat64()
+		}
+		if p.dev != nil {
+			// A messy phone: the device decides what is sent, and when.
+			w.events = p.dev.Tick(Raw{T: w.T, X: a.X, Y: a.Y, BX: bx, BY: by, BZ: bz, Rot: rot, Gait: g, Step: p.step}, w.env, w.events)
+			continue
 		}
 		p.ax += bx
 		p.ay += by
