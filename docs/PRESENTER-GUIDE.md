@@ -92,6 +92,16 @@ For each phone in danger the server computes a direction toward fewer people (do
 
 Click any red link on the dashboard: you see both phones' motion traces, the correlation curve, the peak delay, and every check with pass/fail in plain words. This is the answer to "why not machine learning?" — a safety officer can see exactly why.
 
+### E. Peer-to-peer mesh (phones relaying for each other)
+
+Each phone opens **WebRTC** links to a few nearby phones. If a phone loses its connection to the server, it keeps sending its readings through its neighbours and still gets its warnings back, up to **3 hops**. On the dashboard, **Jam half the phones** cuts half the phones off the server to show this.
+
+- **What it proves:** phones can carry each other's data, so a phone with a bad connection isn't automatically blind.
+- **What it doesn't prove:** that it works when the cell network is actually jammed. Setting up the links still needs the server, and phones on different mobile networks need the internet to reach each other (there's no TURN server). A true off-grid relay needs Bluetooth or Wi-Fi Direct in a native app.
+- **Privacy:** on the mesh, phones see a hashed handle, not each other's session IDs, and raw GPS never passes through another phone.
+
+**Line to say:** "If a phone drops off the network, its neighbours carry its data. That works today over the internet; a real jammed network would need Bluetooth relay in a native app."
+
 ---
 
 ## 5. Tech stack
@@ -216,6 +226,7 @@ Full list (27 questions): `docs/QA.md`.
 - **What if it's wrong?** Every alert is a card with its evidence. Staff acknowledge or resolve. Nothing acts on the crowd automatically except an arrow.
 - **Does it scale?** One Go server took 1000 phones at 10,000 messages/s with none dropped. Each phone is compared only with nearby neighbours, so work grows with the crowd, not its square.
 - **Privacy?** Random session ID, position in venue metres, motion numbers. No names. GPS is converted to venue metres on arrival and never stored or shown.
+- **What happens if the cell network jams?** Phones already relay for each other over WebRTC, up to 3 hops, so a phone that loses the server still reports and still gets warnings. Honestly, that needs the internet to set up; real off-grid relay needs Bluetooth or Wi-Fi Direct in a native app.
 - **If you don't know:** "I don't know; here's how I'd find out" — and name the test.
 
 ---
@@ -226,6 +237,7 @@ Full list (27 questions): `docs/QA.md`.
 - A web page only streams while it's open and on screen. A real event would build this into the ticket app.
 - Indoor GPS is too coarse to see packing; the demo places people by hand.
 - Density is only as good as the `participation` estimate.
+- The peer-to-peer mesh is proven over the internet, not on a jammed cell network. Off-grid relay needs a native app.
 - In the crowd simulator, the push detector rarely fires (stiff simulated bodies pass a push too fast). Surges there are caught by density. Only real recordings settle which is right.
 
 ---
@@ -238,5 +250,6 @@ From `docs/PITCH.md`, `docs/QA.md` and `docs/TRACKS.md`:
 - `[PRICE]` — per event or per attendee, one number.
 - `[BUYER]` — one verified fact about the buyer.
 - `[REAL]` — what got tested on judges' phones / a real iPhone.
+- `[MESH]` — how many real phones the "Jam half the phones" demo has run on.
 - `[TRACKS]` — confirm the 2026 StormHacks prize list.
 - Is `pulsecrowd.tech` and the named tunnel live?
