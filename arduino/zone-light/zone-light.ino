@@ -635,12 +635,18 @@ void loop() {
   // Short double blip when a new Pulse board is heard (shows after the scan's triple blip).
   unsigned long pb = peerBlip ? t - peerBlip : 99999;
   if (level != DANGER && pb >= 500 && pb < 700) pwm = (pb < 540 || (pb >= 620 && pb < 660)) ? 255 : 0;
+  // Linked to another Pulse board (its beacon is being heard): a double flash
+  // every 1.5 s while calm, on the green LED and on the onboard blue one.
+  bool linked = peerCount > 0;
+  unsigned long lp = t % 1500;
+  bool linkFlash = lp < 90 || (lp >= 200 && lp < 290);
+  if (level == CALM && linked && since >= 420 && !(pb >= 500 && pb < 700)) pwm = linkFlash ? 255 : 6;
   ledcWrite(BLUE, pwm);
 
   // External LEDs: green → orange → red, speeding up.
   int g = 0, y = 0, r = 0;
   switch (level) {
-    case CALM: g = breathe(t, 3000, 10, 255); break;
+    case CALM: g = linked ? (linkFlash ? 255 : 12) : breathe(t, 3000, 10, 255); break;
     case WARN:
       if (RGB_LED) { r = breathe(t, 1100, 20, 255); g = r * 2 / 5; } // orange = red + some green
       else y = breathe(t, 1100, 20, 255);
