@@ -1,12 +1,16 @@
-// Living mesh view of the crowd on a canvas, drawn on the venue in metres.
+// Live crowd map on a canvas, drawn on the venue in metres.
 //
-// Each phone is a body that follows its real position (GPS or placed on the
-// map) and jitters around it like an ant: jitter grows with the phone's real
-// sway, and a detected wave shoves the receiving phone in the direction of
-// travel. Bodies link to the neighbours the server's detector compares, and
-// small packets gossip along those links, hop by hop. Wave edges carry fast
-// red packets in the direction the push travels. Clusters (where the crowd is
-// packing together) are drawn underneath with their density and trend.
+// Motion is the truth, smoothed: each phone's dot follows its latest reported
+// position (GPS or placed on the map) with a critically damped follow, so it
+// never overshoots, and big re-placements (> 3 m) ease over ~400 ms. A phone's
+// real sway only adds a few centimetres of idle motion. Simulated people
+// arrive at 10 Hz and are interpolated between frames; phone nodes in a
+// simulation ride exactly on their simulated body.
+//
+// Danger is drawn where it is: a smoothed density heat map (kernel density of
+// people, coloured only above the watch density and red only above danger),
+// a crisp pulsing hull around each yellow/red cluster with a badge, and push
+// waves that light up only the links and phones they travel through.
 
 import type { Cluster, Hardware, Level, Node, NodeStatus, SimFrame, SimState, VenueLayout, Wave } from '../../shared/protocol';
 
@@ -20,39 +24,78 @@ const COLOR: Record<NodeStatus, RGB> = {
   connecting: [148, 163, 184],
   stale: [71, 85, 105],
 };
+const STATUSES = Object.keys(COLOR) as NodeStatus[];
 const WAVE: RGB = COLOR.wave;
+const AMBER: RGB = [245, 158, 11];
+const ORANGE: RGB = [249, 115, 22];
+const RED: RGB = [239, 68, 68];
+const CALM_CLUSTER: RGB = [56, 189, 248];
+/** Opaque colour per status; alpha goes through globalAlpha so the hot loops build no strings. */
+const SOLID = Object.fromEntries(STATUSES.map((s) => [s, `rgb(${COLOR[s].join(',')})`])) as Record<NodeStatus, string>;
 
-const TRAIL_LEN = 26;
-const TRAIL_EVERY = 45; // ms between trail points
-const NEIGHBOURS = 3; // nearest bodies each node links to, beyond its grid neighbours
+// Server thresholds (server/internal/detect/config.go: DensityWatch, DensityDanger), people per m².
+const DENSITY_WATCH = 2;
+const DENSITY_DANGER = 4;
+// Density field: kernel density estimate on a coarse grid.
+const FIELD_CELL = 0.5; // m (grown for big venues so the grid stays ≤ FIELD_MAX_DIM cells a side)
+const FIELD_MAX_DIM = 320;
+const FIELD_SIGMA = 1; // m, Gaussian kernel
+const FIELD_EVERY = 120; // ms between refreshes (~8 Hz)
+const FIELD_TAU = 0.45; // s, temporal smoothing
+const FIELD_LUT_MAX = 8; // people/m² at the top of the colour table
+
+const NODE_R = 6.5; // world px
+const TELEPORT_M = 3; // a jump bigger than this eases instead of following
+const TELEPORT_MS = 400;
+const FADE_IN_MS = 350;
+const FADE_OUT_MS = 450;
+const COLOR_FADE_MS = 200;
+const IDLE_MAX_M = 0.04; // sway idle motion, at most 4 cm
+const SIM_SNAP_M = 1.5; // a sim body that moved further than this in one frame is a different person: snap
+const SIM_MATCH_M = 1.5; // phone node ↔ simulated body matching radius
+const NEIGHBOURS = 3; // nearest bodies each node links to when the server sends no links
 const MAX_PACKETS = 260;
 
-interface Ripple { t0: number; color: RGB; max: number }
+interface Ripple { t0: number; style: string; max: number }
 
 interface Body {
   id: string;
   data: Node;
-  x: number; y: number;
-  vx: number; vy: number;
-  hx: number; hy: number; // home: the tapped spot, spread organically over the canvas
-  heading: number;
   seed: number;
-  color: RGB;
-  alpha: number;
+  /** Latest reported position (venue m). */
+  rx: number; ry: number;
+  /** Follow target (venue m): the report, or the matched simulated body. */
+  tx: number; ty: number;
+  /** Displayed position (venue m) and its follow velocity (m/s). */
+  px: number; py: number;
+  vx: number; vy: number;
+  /** Ease of a big jump: start time (−1 = none) and where it started. */
+  tw0: number; twx: number; twy: number;
+  /** When the report last moved, and the typical gap between moves (ms). */
+  movedAt: number; interval: number;
+  /** Drawn position in world px (with the idle sway), and the reported spot in world px. */
+  x: number; y: number;
+  hx: number; hy: number;
+  sway: number;
+  status: NodeStatus;
+  prevStatus: NodeStatus;
+  statusAt: number;
+  stale: number; // 1 → 0.45 when offline
+  vis: number; // 0..1 fade in/out
   gone: boolean;
-  trail: { x: number; y: number }[];
-  lastTrail: number;
-  nextBeat: number;
   ripples: Ripple[];
   flash: number;
+  nextBeat: number;
+  simIdx: number;
+  nbrs: Body[];
 }
 
-interface Link { a: Body; b: Body; grid: boolean }
+interface Link { a: Body; b: Body; grid: boolean; wave: boolean }
 
 interface Packet {
   from: Body; to: Body;
   t0: number; dur: number;
-  color: RGB;
+  style: string;
   hops: number;
   wave: boolean;
 }
@@ -62,14 +105,25 @@ function hash(s: string): number {
   for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
   return (h >>> 0) / 4294967296;
 }
-const rand1 = (seed: number, k: number) => {
-  const x = Math.sin(seed * 9301 + k * 49297) * 233280;
-  return x - Math.floor(x);
-};
 const rgba = (c: RGB, a: number) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
-const ease = (f: number) => (f < 0.5 ? 2 * f * f : 1 - (-2 * f + 2) ** 2 / 2);
+const clamp = (v: number, lo: number, hi: number) => (v < lo ? lo : v > hi ? hi : v);
+const ease = (f: number) => (f < 0.5 ? 4 * f * f * f : 1 - (-2 * f + 2) ** 3 / 2);
+const easeOut = (f: number) => 1 - (1 - f) ** 3;
+const smooth = (e0: number, e1: number, x: number) => {
+  const t = clamp((x - e0) / (e1 - e0), 0, 1);
+  return t * t * (3 - 2 * t);
+};
+const mix = (a: RGB, b: RGB, t: number): RGB => [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)];
 const key = (a: string, b: string) => (a < b ? `${a}|${b}` : `${b}|${a}`);
+
+/** Colour of the density heat map at d people/m²: nothing below watch, amber → orange, red only past danger. */
+function fieldColor(d: number, light: boolean): [number, number, number, number] {
+  const a = smooth(DENSITY_WATCH, DENSITY_WATCH + 0.6, d) * (0.26 + 0.24 * smooth(DENSITY_DANGER - 0.15, DENSITY_DANGER + 0.15, d));
+  let c = mix(AMBER, ORANGE, smooth(DENSITY_WATCH + 0.5, DENSITY_DANGER - 0.4, d));
+  c = mix(c, RED, smooth(DENSITY_DANGER - 0.15, DENSITY_DANGER + 0.15, d));
+  return [c[0], c[1], c[2], Math.min(1, a * (light ? 1.15 : 1))];
+}
 
 export class Mesh {
   private ctx: CanvasRenderingContext2D;
@@ -78,15 +132,62 @@ export class Mesh {
   private dpr = 1;
   private bg: HTMLCanvasElement | null = null;
   private bodies = new Map<string, Body>();
+  private list: Body[] = [];
+  private listDirty = false;
   private links: Link[] = [];
   private linkAt = 0;
   private packets: Packet[] = [];
   private waves: Wave[] = [];
+  private waveKeys = new Set<string>();
+  private waveNodes = new Set<string>();
   private waveSpawn = new Map<string, number>();
   private serverLinks: [string, string][] = [];
   private clusters: Cluster[] = [];
+  private clusterLabels: string[] = [];
+  /** Estimated people per phone (cluster people ÷ count), for the density field. */
+  private perPhone = 1;
   private sim: SimFrame | null = null;
   private simGeo: SimState | null = null;
+  // Simulated bodies, stride 3 (x, y, pressure), venue m: interpolated from prev to cur over one frame gap.
+  private simPrev = new Float32Array(0);
+  private simCur = new Float32Array(0);
+  private simDraw = new Float32Array(0);
+  private simPhone = new Uint8Array(0);
+  private simClaim = new Uint8Array(0);
+  private simBucket = new Uint8Array(0);
+  private simOldP = new Float32Array(0);
+  private simOldC = new Float32Array(0);
+  private simRemap = new Int32Array(0);
+  private simN = 0;
+  private simT = NaN;
+  private simAt = 0;
+  private simGap = 100;
+  // Density field.
+  private gw = 0;
+  private gh = 0;
+  private cell = FIELD_CELL;
+  private fieldRaw = new Float32Array(0);
+  private field = new Float32Array(0);
+  private fieldFresh = true;
+  private fieldAt = 0;
+  private fieldHot = false;
+  private fieldCanvas: HTMLCanvasElement = document.createElement('canvas');
+  private fieldImg: ImageData | null = null;
+  private fieldLut = new Uint32Array(256);
+  private kx = new Float32Array(64);
+  private ky = new Float32Array(64);
+  // Hull scratch buffers (cluster outlines).
+  private hp: number[] = [];
+  private hIdx: number[] = [];
+  private hull: number[] = [];
+  /** Badges queued by drawClusters for drawing above the nodes: [cluster index, x, top] triples. */
+  private badges: number[] = [];
+  // Cached per-theme sprites and styles.
+  private glow: Record<string, HTMLCanvasElement> = {};
+  private pressureStyle: string[] = [];
+  private reduced = false;
+  private frameMs = 0;
+
   private floorplan: HTMLImageElement | null = null;
   private floorplanAlpha = 0.55;
   private layoutGeo: VenueLayout | null = null;
@@ -111,6 +212,12 @@ export class Mesh {
 
   constructor(private canvas: HTMLCanvasElement) {
     this.ctx = canvas.getContext('2d')!;
+    const mq = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+    if (mq) {
+      this.reduced = mq.matches;
+      mq.addEventListener?.('change', () => (this.reduced = mq.matches));
+    }
+    this.buildThemeCache();
     new ResizeObserver(() => this.resize()).observe(canvas);
     this.resize();
     const tick = (now: number) => {
@@ -120,55 +227,247 @@ export class Mesh {
     requestAnimationFrame(tick);
   }
 
-  /** Links currently drawn and gossip hops per second, for the overlay. */
+  /** Links currently drawn, gossip hops per second and the mean frame time (ms), for the overlay. */
   stats() {
     const now = performance.now();
-    this.hopTimes = this.hopTimes.filter((t) => now - t < 1000);
-    return { links: this.links.length, hops: this.hopTimes.length };
+    let i = 0;
+    while (i < this.hopTimes.length && now - this.hopTimes[i] >= 1000) i++;
+    if (i) this.hopTimes.splice(0, i);
+    return { links: this.links.length, hops: this.hopTimes.length, frameMs: Math.round(this.frameMs * 100) / 100 };
   }
 
   update(nodes: Node[], waves: Wave[], links: [string, string][], clusters: Cluster[], venue: { w: number; h: number }) {
     const now = performance.now();
-    const layoutChanged = venue.w !== this.venue.w || venue.h !== this.venue.h;
-    if (layoutChanged) {
+    if (venue.w !== this.venue.w || venue.h !== this.venue.h) {
       this.venue = { w: Math.max(1, venue.w), h: Math.max(1, venue.h) };
       this.layout();
     }
     this.serverLinks = links;
     this.clusters = clusters;
+    this.clusterLabels = clusters.map((c) => {
+      const arrow = c.trend === 'forming' ? ' ↑' : c.trend === 'dispersing' ? ' ↓' : '';
+      const eta = c.eta != null && c.level !== 'red' ? ` · danger in ~${Math.max(1, Math.round(c.eta))} s` : '';
+      return `${c.people ?? c.count} people · ${c.density.toFixed(1)}/m²${arrow}${eta}`;
+    });
+    // Participation: the server estimates people = phones ÷ participation per cluster.
+    let people = 0, count = 0;
+    for (const c of clusters) {
+      if (c.people != null && c.count > 0) {
+        people += c.people;
+        count += c.count;
+      }
+    }
+    if (count > 0) this.perPhone = lerp(this.perPhone, clamp(people / count, 1, 50), 0.3);
+
     const seen = new Set<string>();
     for (const n of nodes) {
       seen.add(n.id);
       let b = this.bodies.get(n.id);
+      const [rx, ry] = this.reported(n);
       if (!b) {
         const seed = hash(n.id);
         b = {
-          id: n.id, data: n, x: 0, y: 0, vx: 0, vy: 0, hx: 0, hy: 0,
-          heading: seed * Math.PI * 2, seed,
-          color: [...COLOR[n.status]] as RGB, alpha: 0, gone: false,
-          trail: [], lastTrail: 0, nextBeat: now + 400 + seed * 900,
-          ripples: [{ t0: now, color: COLOR.ok, max: 70 }], flash: 0,
+          id: n.id, data: n, seed,
+          rx, ry, tx: rx, ty: ry, px: rx, py: ry, vx: 0, vy: 0,
+          tw0: -1, twx: 0, twy: 0, movedAt: now, interval: 1000,
+          x: 0, y: 0, hx: 0, hy: 0, sway: Math.min(2, n.sway),
+          status: n.status, prevStatus: n.status, statusAt: now - COLOR_FADE_MS,
+          stale: n.status === 'stale' ? 0.45 : 1, vis: 0, gone: false,
+          ripples: [], flash: 0, nextBeat: now + 400 + seed * 900, simIdx: -1, nbrs: [],
         };
         this.bodies.set(n.id, b);
-        this.placeHome(b, n);
-        b.x = b.hx;
-        b.y = b.hy;
-      } else if (b.data.status !== n.status) {
-        b.ripples.push({ t0: now, color: COLOR[n.status], max: n.status === 'wave' ? 90 : 50 });
+        this.listDirty = true;
+        this.place(b, now);
+      } else {
+        const d = Math.hypot(rx - b.rx, ry - b.ry);
+        if (d > 0.001) {
+          b.interval = clamp(lerp(b.interval, now - b.movedAt, 0.3), 80, 2000);
+          b.movedAt = now;
+          if (d > TELEPORT_M && b.simIdx < 0) this.startEase(b, now);
+          b.rx = rx;
+          b.ry = ry;
+        }
+        if (b.status !== n.status) {
+          const f = (now - b.statusAt) / COLOR_FADE_MS;
+          b.prevStatus = f < 0.5 ? b.prevStatus : b.status;
+          b.status = n.status;
+          b.statusAt = now;
+          if (n.status === 'wave') b.ripples.push({ t0: now, style: SOLID.wave, max: 2 * NODE_R });
+        }
+        if (b.gone) {
+          b.gone = false;
+          this.listDirty = true;
+        }
       }
       b.data = n;
-      b.gone = false;
-      this.placeHome(b, n);
     }
-    for (const b of this.bodies.values()) if (!seen.has(b.id)) b.gone = true;
+    for (const b of this.bodies.values()) if (!seen.has(b.id) && !b.gone) b.gone = true;
     this.waves = waves;
+    this.waveKeys.clear();
+    this.waveNodes.clear();
+    for (const w of waves) {
+      this.waveKeys.add(key(w.from, w.to));
+      this.waveNodes.add(w.from);
+      this.waveNodes.add(w.to);
+    }
+    for (const l of this.links) l.wave = waves.length > 0 && this.waveKeys.has(key(l.a.id, l.b.id));
+    if (this.simN) this.matchSimPhones();
+  }
+
+  /** A report in venue metres; phones outside the venue sit just beyond its edge. */
+  private reported(n: Node): [number, number] {
+    if (!n.outside) return [n.x, n.y];
+    const m = Math.min(1, 30 / this.fit.s);
+    return [clamp(n.x, -m, this.venue.w + m), clamp(n.y, -m, this.venue.h + m)];
+  }
+
+  private startEase(b: Body, now: number) {
+    b.tw0 = now;
+    b.twx = b.px;
+    b.twy = b.py;
+    b.vx = b.vy = 0;
   }
 
   /** Simulated people (null when not simulating) and the venue's walls and exits. */
   setSim(frame: SimFrame | null, geo: SimState | null) {
     this.sim = frame;
     if (geo) this.simGeo = geo;
-    if (!frame) this.simGeo = null;
+    if (!frame) {
+      this.simGeo = null;
+      if (this.simN) {
+        this.simN = 0;
+        this.simT = NaN;
+        for (const b of this.list) b.simIdx = -1;
+      }
+      return;
+    }
+    if (frame.t === this.simT) return;
+    const now = performance.now();
+    const a = this.simN ? clamp((now - this.simAt) / this.simGap, 0, 1) : 1;
+    if (this.simN) this.simGap = clamp(lerp(this.simGap, now - this.simAt, 0.25), 40, 1000);
+    this.simT = frame.t;
+    this.simAt = now;
+    const list = frame.bodies;
+    const n = list.length;
+    if (this.simCur.length < n * 3) {
+      const cap = Math.max(64, n * 2);
+      const grow = (old: Float32Array) => {
+        const f = new Float32Array(cap * 3);
+        f.set(old);
+        return f;
+      };
+      this.simPrev = grow(this.simPrev);
+      this.simCur = grow(this.simCur);
+      this.simDraw = grow(this.simDraw);
+      this.simPhone = new Uint8Array(cap);
+      this.simClaim = new Uint8Array(cap);
+      this.simBucket = new Uint8Array(cap);
+    }
+    const P = this.simPrev, C = this.simCur;
+    const old = this.simN;
+    // Same length: index i is the same person. Otherwise someone left or arrived: walk both
+    // arrays in order and pair each body with the nearest old one a few places ahead.
+    const shifted = old > 0 && n !== old;
+    if (shifted) {
+      if (this.simOldC.length < old * 3) {
+        this.simOldP = new Float32Array(this.simCur.length);
+        this.simOldC = new Float32Array(this.simCur.length);
+      }
+      this.simOldP.set(P.subarray(0, old * 3));
+      this.simOldC.set(C.subarray(0, old * 3));
+    }
+    const SP = shifted ? this.simOldP : P, SC = shifted ? this.simOldC : C;
+    if (shifted) {
+      if (this.simRemap.length < old) this.simRemap = new Int32Array(this.simCur.length / 3);
+      this.simRemap.fill(-1, 0, old);
+    }
+    const ahead = Math.max(0, old - n) + 1;
+    let ptr = 0;
+    for (let i = 0; i < n; i++) {
+      const [x, y, p, ph] = list[i];
+      const j = i * 3;
+      let o = -1;
+      if (!shifted) o = i < old ? i : -1;
+      else {
+        let bd = 0.25;
+        for (let q = ptr, end = Math.min(old, ptr + ahead); q < end; q++) {
+          const d = (x - SC[q * 3]) ** 2 + (y - SC[q * 3 + 1]) ** 2;
+          if (d < bd) {
+            bd = d;
+            o = q;
+          }
+        }
+        if (o >= 0) {
+          ptr = o + 1;
+          this.simRemap[o] = i;
+        }
+      }
+      if (o >= 0) {
+        // Start from where the body is drawn right now, so a late frame never jumps.
+        const k = o * 3;
+        const dx = lerp(SP[k], SC[k], a), dy = lerp(SP[k + 1], SC[k + 1], a), dp = lerp(SP[k + 2], SC[k + 2], a);
+        const far = (x - dx) * (x - dx) + (y - dy) * (y - dy) > SIM_SNAP_M * SIM_SNAP_M;
+        P[j] = far ? x : dx;
+        P[j + 1] = far ? y : dy;
+        P[j + 2] = far ? p : dp;
+      } else {
+        P[j] = x;
+        P[j + 1] = y;
+        P[j + 2] = p;
+      }
+      C[j] = x;
+      C[j + 1] = y;
+      C[j + 2] = p;
+      this.simPhone[i] = ph ? 1 : 0;
+    }
+    if (shifted) for (const b of this.list) if (b.simIdx >= 0) b.simIdx = b.simIdx < old ? this.simRemap[b.simIdx] : -1;
+    this.simN = n;
+    this.interpolateSim(now);
+    this.matchSimPhones();
+  }
+
+  /** Pin each phone node to the simulated body carrying it: nearest phone-carrying body to its report, sticky. */
+  private matchSimPhones() {
+    if (this.listDirty) {
+      this.list = [...this.bodies.values()];
+      this.listDirty = false;
+    }
+    const n = this.simN, C = this.simCur, claim = this.simClaim, ph = this.simPhone;
+    claim.fill(0, 0, n);
+    const r2 = SIM_MATCH_M * SIM_MATCH_M;
+    // Keep last frame's matches that still fit.
+    for (const b of this.list) {
+      const i = b.simIdx;
+      if (i < 0) continue;
+      const ok = i < n && ph[i] && !claim[i] && (C[i * 3] - b.rx) ** 2 + (C[i * 3 + 1] - b.ry) ** 2 < r2;
+      if (ok) claim[i] = 1;
+      else b.simIdx = -1;
+    }
+    for (const b of this.list) {
+      if (b.simIdx >= 0 || b.gone) continue;
+      let best = -1, bd = r2;
+      for (let i = 0; i < n; i++) {
+        if (!ph[i] || claim[i]) continue;
+        const d = (C[i * 3] - b.rx) ** 2 + (C[i * 3 + 1] - b.ry) ** 2;
+        if (d < bd) {
+          bd = d;
+          best = i;
+        }
+      }
+      if (best >= 0) {
+        claim[best] = 1;
+        b.simIdx = best;
+        // Glide onto the body if the dot is visibly elsewhere.
+        const j = best * 3;
+        if (b.vis > 0.5 && (this.simDraw[j] - b.px) ** 2 + (this.simDraw[j + 1] - b.py) ** 2 > 0.09) this.startEase(b, performance.now());
+      }
+    }
+  }
+
+  private interpolateSim(now: number) {
+    const a = clamp((now - this.simAt) / this.simGap, 0, 1);
+    const P = this.simPrev, C = this.simCur, D = this.simDraw;
+    for (let j = 0, m = this.simN * 3; j < m; j++) D[j] = P[j] + (C[j] - P[j]) * a;
   }
 
   /** Floor-plan image drawn under everything, stretched to the venue rectangle. */
@@ -226,6 +525,43 @@ export class Mesh {
   setTheme(t: 'dark' | 'light') {
     this.theme = t;
     this.bg = null;
+    this.buildThemeCache();
+    this.fieldFresh = true;
+  }
+
+  /** Glow sprites per status, pressure tints and the density colour table for the current theme. */
+  private buildThemeCache() {
+    const light = this.theme === 'light';
+    this.glow = {};
+    for (const s of STATUSES) {
+      const c = document.createElement('canvas');
+      c.width = c.height = 64;
+      const g = c.getContext('2d')!;
+      const grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+      grad.addColorStop(0, rgba(COLOR[s], light ? 0.35 : 0.6));
+      grad.addColorStop(0.35, rgba(COLOR[s], light ? 0.12 : 0.22));
+      grad.addColorStop(1, rgba(COLOR[s], 0));
+      g.fillStyle = grad;
+      g.fillRect(0, 0, 64, 64);
+      this.glow[s] = c;
+    }
+    // Simulated bodies: grey when free, amber → red as the squeeze builds (8 steps).
+    const grey: RGB = light ? [100, 116, 139] : [148, 163, 184];
+    this.pressureStyle = [];
+    for (let i = 0; i < 8; i++) {
+      const k = i / 7;
+      const c = k < 0.5 ? mix(grey, AMBER, k * 2) : mix(AMBER, RED, (k - 0.5) * 2);
+      const a = i === 0 ? (light ? 0.55 : 0.45) : 0.6 + 0.35 * k;
+      this.pressureStyle.push(rgba(c, a));
+    }
+    const bytes = new Uint8ClampedArray(this.fieldLut.buffer);
+    for (let i = 0; i < 256; i++) {
+      const [r, g, b, a] = fieldColor((i / 255) * FIELD_LUT_MAX, light);
+      bytes[i * 4] = r;
+      bytes[i * 4 + 1] = g;
+      bytes[i * 4 + 2] = b;
+      bytes[i * 4 + 3] = a * 255;
+    }
   }
 
   toWorld(sx: number, sy: number) {
@@ -285,13 +621,8 @@ export class Mesh {
     const mx = 70, my = 50;
     const s = Math.max(4, Math.min((this.w - 2 * mx) / this.venue.w, (this.h - 2 * my) / this.venue.h));
     this.fit = { s, ox: (this.w - this.venue.w * s) / 2, oy: (this.h - this.venue.h * s) / 2 };
-    for (const b of this.bodies.values()) {
-      const hx = b.hx, hy = b.hy;
-      this.placeHome(b, b.data);
-      // Keep bodies where they are relative to their home on a resize.
-      b.x += b.hx - hx;
-      b.y += b.hy - hy;
-    }
+    // Bodies live in venue metres; their world px follow on the next frame.
+    for (const b of this.list) this.place(b, this.last);
   }
 
   /** Venue metres → world px. */
@@ -313,152 +644,180 @@ export class Mesh {
     return { ...this.venue };
   }
 
-  /** Home = the phone's real position on the venue map. */
-  private placeHome(b: Body, n: Node) {
-    const p = this.venueToWorld(n.x, n.y);
-    b.hx = p.x;
-    b.hy = p.y;
+  /** World px of a body: drawn spot (displayed position + a few cm of sway) and its reported spot. */
+  private place(b: Body, now: number) {
+    const { s, ox, oy } = this.fit;
+    let ix = 0, iy = 0;
+    if (!this.reduced && b.sway > 0.02) {
+      const amp = Math.min(IDLE_MAX_M, b.sway * 0.025);
+      ix = amp * Math.sin(now * 0.0023 + b.seed * 40);
+      iy = amp * 0.8 * Math.sin(now * 0.0017 + b.seed * 71);
+    }
+    b.x = ox + (b.px + ix) * s;
+    b.y = oy + (b.py + iy) * s;
+    b.hx = ox + b.rx * s;
+    b.hy = oy + b.ry * s;
   }
 
   private frame(now: number) {
-    const dt = Math.min(0.05, (now - this.last) / 1000);
+    const t0 = performance.now();
+    const dt = Math.min(0.05, Math.max(0, (now - this.last) / 1000));
     this.last = now;
     this.step(now, dt);
     this.draw(now);
+    this.frameMs = lerp(this.frameMs, performance.now() - t0, 0.05);
   }
 
   // -------------------------------------------------------------------------
-  // simulation
+  // motion
   // -------------------------------------------------------------------------
 
   private step(now: number, dt: number) {
-    const list = [...this.bodies.values()];
-    const roam = Math.max(4, this.fit.s * 0.3); // ants wander ~30 cm around their real spot
-    const space = Math.max(6, Math.min(18, this.fit.s * 0.3)); // personal space, px
-
-    for (const b of list) {
-      const st = b.data.status;
-      const sway = Math.min(2, b.data.sway);
-      // Ants: a heading that wanders, a little faster when the phone sways.
-      b.heading += (rand1(b.seed, now * 0.0007) - 0.5) * 5 * dt + Math.sin(now * 0.0011 + b.seed * 40) * 0.9 * dt;
-      const still = st === 'stale' || st === 'connecting' ? 0.15 : 1;
-      const speed = (6 + sway * 22) * still;
-      const tx = Math.cos(b.heading) * speed;
-      const ty = Math.sin(b.heading) * speed;
-      // Steer toward the wander velocity, and stay near home.
-      const dx = b.hx - b.x;
-      const dy = b.hy - b.y;
-      const dist = Math.hypot(dx, dy);
-      const pull = dist > roam ? 2.2 : 0.35;
-      b.vx += ((tx - b.vx) * 1.4 + dx * pull) * dt;
-      b.vy += ((ty - b.vy) * 1.4 + dy * pull) * dt;
-      if (st === 'handling') {
-        b.vx += (rand1(b.seed, now) - 0.5) * 900 * dt;
-        b.vy += (rand1(b.seed, now + 1) - 0.5) * 900 * dt;
-      }
+    if (this.listDirty) {
+      this.list = [...this.bodies.values()];
+      this.listDirty = false;
     }
+    if (this.simN) this.interpolateSim(now);
+    const D = this.simDraw;
+    const kSway = 1 - Math.exp(-dt / 0.6);
+    const kStale = 1 - Math.exp(-dt / 0.25);
+    let removed = false;
 
-    // Personal space.
-    for (let i = 0; i < list.length; i++) {
-      for (let j = i + 1; j < list.length; j++) {
-        const a = list[i], b = list[j];
-        const dx = b.x - a.x, dy = b.y - a.y;
-        const d = Math.hypot(dx, dy) || 0.01;
-        if (d < space) {
-          const f = ((space - d) / space) * 160 * dt;
-          a.vx -= (dx / d) * f; a.vy -= (dy / d) * f;
-          b.vx += (dx / d) * f; b.vy += (dy / d) * f;
+    for (const b of this.list) {
+      // Target: the matched simulated body (already smooth at 10 Hz), else the latest report.
+      if (b.simIdx >= 0 && b.simIdx < this.simN) {
+        b.tx = D[b.simIdx * 3];
+        b.ty = D[b.simIdx * 3 + 1];
+      } else {
+        b.tx = b.rx;
+        b.ty = b.ry;
+      }
+      if (b.tw0 >= 0) {
+        const f = (now - b.tw0) / TELEPORT_MS;
+        if (f >= 1) {
+          b.tw0 = -1;
+          b.px = b.tx;
+          b.py = b.ty;
+        } else {
+          const e = ease(f);
+          b.px = lerp(b.twx, b.tx, e);
+          b.py = lerp(b.twy, b.ty, e);
         }
+      } else if (b.simIdx >= 0) {
+        b.px = b.tx;
+        b.py = b.ty;
+      } else {
+        // Critically damped follow; the time constant tracks how often this phone reports.
+        this.follow(b, clamp(b.interval * 0.00035, 0.1, 0.35), dt);
       }
-    }
-
-    for (const b of list) {
-      const damp = Math.exp(-1.6 * dt);
-      b.vx *= damp;
-      b.vy *= damp;
-      b.x += b.vx * dt;
-      b.y += b.vy * dt;
-      // Stay inside the venue (outside phones sit just beyond its edge).
-      const pad = 4;
-      const x0 = this.fit.ox - (b.data.outside ? 30 : -pad), x1 = this.fit.ox + this.venue.w * this.fit.s + (b.data.outside ? 30 : -pad);
-      const y0 = this.fit.oy - (b.data.outside ? 30 : -pad), y1 = this.fit.oy + this.venue.h * this.fit.s + (b.data.outside ? 30 : -pad);
-      b.x = Math.max(x0, Math.min(x1, b.x));
-      b.y = Math.max(y0, Math.min(y1, b.y));
-
-      const k = 1 - Math.exp(-dt / 0.2); // ~200 ms colour fade
-      const target = COLOR[b.data.status];
-      for (let c = 0; c < 3; c++) b.color[c] = lerp(b.color[c], target[c], k);
-      const ta = b.gone ? 0 : b.data.status === 'stale' ? 0.45 : 1;
-      b.alpha = lerp(b.alpha, ta, 1 - Math.exp(-dt / 0.3));
-      if (b.gone && b.alpha < 0.02) this.bodies.delete(b.id);
-
-      if (now - b.lastTrail > TRAIL_EVERY) {
-        b.lastTrail = now;
-        b.trail.push({ x: b.x, y: b.y });
-        if (b.trail.length > TRAIL_LEN) b.trail.shift();
+      b.sway = lerp(b.sway, Math.min(2, b.data.sway), kSway);
+      b.stale = lerp(b.stale, b.status === 'stale' ? 0.45 : 1, kStale);
+      b.vis = clamp(b.vis + (b.gone ? -dt * 1000 / FADE_OUT_MS : dt * 1000 / FADE_IN_MS), 0, 1);
+      if (b.gone && b.vis <= 0) {
+        this.bodies.delete(b.id);
+        removed = true;
+        continue;
       }
-      b.ripples = b.ripples.filter((r) => now - r.t0 < 900);
+      this.place(b, now);
+      let n = 0;
+      for (const r of b.ripples) if (now - r.t0 < 900) b.ripples[n++] = r;
+      b.ripples.length = n;
       b.flash = Math.max(0, b.flash - dt * 3);
     }
+    if (removed) this.listDirty = true;
 
     if (now - this.linkAt > 180) {
       this.linkAt = now;
       this.relink();
     }
-    this.gossip(now);
-    this.spawnWavePackets(now);
+    if (now - this.fieldAt > FIELD_EVERY) {
+      const fdt = (now - this.fieldAt) / 1000;
+      this.fieldAt = now;
+      this.refreshField(fdt);
+    }
+    if (this.reduced) {
+      this.packets.length = 0;
+    } else {
+      this.gossip(now);
+      this.spawnWavePackets(now);
+    }
     this.deliver(now);
+  }
+
+  /** SmoothDamp toward the target: critically damped, never overshoots. */
+  private follow(b: Body, st: number, dt: number) {
+    if (dt <= 0) return;
+    const omega = 2 / st;
+    const x = omega * dt;
+    const e = 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x);
+    const cx = b.px - b.tx, cy = b.py - b.ty;
+    const tx = (b.vx + omega * cx) * dt, ty = (b.vy + omega * cy) * dt;
+    b.vx = (b.vx - omega * tx) * e;
+    b.vy = (b.vy - omega * ty) * e;
+    let nx = b.tx + (cx + tx) * e, ny = b.ty + (cy + ty) * e;
+    if ((b.tx - b.px) * (nx - b.tx) + (b.ty - b.py) * (ny - b.ty) > 0) {
+      nx = b.tx;
+      ny = b.ty;
+      b.vx = b.vy = 0;
+    }
+    b.px = nx;
+    b.py = ny;
   }
 
   /** Links are the neighbour pairs the server's detector compares; without them, nearest bodies. */
   private relink() {
-    const live = [...this.bodies.values()].filter((b) => !b.gone);
-    const maxD = this.fit.s * 2; // 2 m
+    const live = this.list;
+    for (const b of live) b.nbrs.length = 0;
     const seen = new Set<string>();
     const out: Link[] = [];
     const add = (a: Body, b: Body, grid: boolean) => {
       const k = key(a.id, b.id);
       if (seen.has(k)) return;
       seen.add(k);
-      out.push({ a, b, grid });
+      out.push({ a, b, grid, wave: this.waveKeys.has(k) });
+      a.nbrs.push(b);
+      b.nbrs.push(a);
     };
     for (const [ia, ib] of this.serverLinks) {
       const a = this.bodies.get(ia), b = this.bodies.get(ib);
       if (a && b && !a.gone && !b.gone) add(a, b, true);
     }
-    if (out.length) {
-      this.links = out;
-      return;
-    }
-    for (const a of live) {
-      const near = live
-        .filter((b) => b !== a)
-        .map((b) => ({ b, d: Math.hypot(b.x - a.x, b.y - a.y) }))
-        .filter((e) => e.d < maxD)
-        .sort((p, q) => p.d - q.d)
-        .slice(0, NEIGHBOURS);
-      for (const { b } of near) add(a, b, false);
+    if (!out.length) {
+      const maxD2 = (this.fit.s * 2) ** 2; // 2 m
+      const best: Body[] = [];
+      const bestD: number[] = [];
+      for (const a of live) {
+        if (a.gone) continue;
+        best.length = 0;
+        bestD.length = 0;
+        for (const b of live) {
+          if (b === a || b.gone) continue;
+          const d = (b.x - a.x) ** 2 + (b.y - a.y) ** 2;
+          if (d >= maxD2) continue;
+          let i = bestD.length;
+          while (i > 0 && bestD[i - 1] > d) i--;
+          if (i >= NEIGHBOURS) continue;
+          best.splice(i, 0, b);
+          bestD.splice(i, 0, d);
+          if (best.length > NEIGHBOURS) {
+            best.length = NEIGHBOURS;
+            bestD.length = NEIGHBOURS;
+          }
+        }
+        for (const b of best) add(a, b, false);
+      }
     }
     this.links = out;
   }
 
-  private neighbours(b: Body): Body[] {
-    const out: Body[] = [];
-    for (const l of this.links) {
-      if (l.a === b) out.push(l.b);
-      else if (l.b === b) out.push(l.a);
-    }
-    return out;
-  }
-
   /** Every streaming phone shares its reading with its neighbours, who pass it on. */
   private gossip(now: number) {
-    for (const b of this.bodies.values()) {
+    for (const b of this.list) {
       if (now < b.nextBeat) continue;
-      const st = b.data.status;
-      b.nextBeat = now + (st === 'wave' ? 350 : st === 'swaying' ? 600 : 1000) + rand1(b.seed, now) * 500;
+      const st = b.status;
+      b.nextBeat = now + (st === 'wave' ? 350 : st === 'swaying' ? 600 : 1000) + Math.random() * 500;
       if (b.gone || st === 'stale' || st === 'connecting') continue;
-      for (const n of this.neighbours(b)) this.send(b, n, [...b.color] as RGB, 0, false, now);
+      for (const n of b.nbrs) this.send(b, n, SOLID[st], 0, false, now);
     }
   }
 
@@ -469,39 +828,120 @@ export class Mesh {
       const a = this.bodies.get(w.from), b = this.bodies.get(w.to);
       if (!a || !b) continue;
       this.waveSpawn.set(k, now);
-      this.send(a, b, WAVE, 0, true, now, Math.max(260, Math.min(800, w.lagMs * 1.4)));
+      this.send(a, b, SOLID.wave, 0, true, now, Math.max(260, Math.min(800, w.lagMs * 1.4)));
     }
+    if (this.waveSpawn.size > 500) this.waveSpawn.clear();
   }
 
-  private send(from: Body, to: Body, color: RGB, hops: number, wave: boolean, now: number, dur?: number) {
+  private send(from: Body, to: Body, style: string, hops: number, wave: boolean, now: number, dur?: number) {
     if (this.packets.length >= MAX_PACKETS && !wave) return;
     const d = Math.hypot(to.x - from.x, to.y - from.y);
-    this.packets.push({ from, to, t0: now, dur: dur ?? Math.max(220, d * 3.2), color, hops, wave });
+    this.packets.push({ from, to, t0: now, dur: dur ?? Math.max(220, d * 3.2), style, hops, wave });
     this.hopTimes.push(now);
+    if (this.hopTimes.length > 4000) this.hopTimes.splice(0, 2000);
   }
 
   private deliver(now: number) {
-    const arrived: Packet[] = [];
-    this.packets = this.packets.filter((p) => {
-      if (now - p.t0 < p.dur) return true;
-      arrived.push(p);
-      return false;
-    });
-    for (const p of arrived) {
-      const to = p.to;
-      to.flash = Math.min(1, to.flash + (p.wave ? 1 : 0.35));
-      if (p.wave) {
-        // The push reaches this person: they get shoved along the direction of travel.
-        const dx = to.x - p.from.x, dy = to.y - p.from.y;
-        const d = Math.hypot(dx, dy) || 1;
-        to.vx += (dx / d) * 150;
-        to.vy += (dy / d) * 150;
-        to.ripples.push({ t0: now, color: WAVE, max: 60 });
-      } else if (p.hops < 2 && Math.random() < 0.45) {
-        // Relay: pass the reading on to someone who didn't send it.
-        const next = this.neighbours(to).filter((n) => n !== p.from);
-        if (next.length) this.send(to, next[(Math.random() * next.length) | 0], p.color, p.hops + 1, false, now);
+    let n = 0;
+    const ps = this.packets;
+    const count = ps.length;
+    for (let i = 0; i < count; i++) {
+      const p = ps[i];
+      if (now - p.t0 < p.dur) {
+        ps[n++] = p;
+        continue;
       }
+      const to = p.to;
+      if (p.wave) {
+        // The push reaches this person: a ring on their node, never a positional kick.
+        to.flash = 1;
+        to.ripples.push({ t0: now, style: SOLID.wave, max: 3 * NODE_R });
+      } else {
+        to.flash = Math.min(0.6, to.flash + 0.25);
+        if (p.hops < 2 && Math.random() < 0.45 && to.nbrs.length > 1) {
+          // Relay: pass the reading on to someone who didn't send it.
+          let next = to.nbrs[(Math.random() * to.nbrs.length) | 0];
+          if (next === p.from) next = to.nbrs[(to.nbrs.indexOf(next) + 1) % to.nbrs.length];
+          if (next !== p.from) this.send(to, next, p.style, p.hops + 1, false, now);
+        }
+      }
+    }
+    // Relays pushed during the loop sit after `count`; keep them.
+    for (let i = count; i < ps.length; i++) ps[n++] = ps[i];
+    ps.length = n;
+  }
+
+  // -------------------------------------------------------------------------
+  // density field
+  // -------------------------------------------------------------------------
+
+  /** Kernel density estimate of people on a coarse grid, smoothed over time, rendered into a small offscreen image. */
+  private refreshField(dt: number) {
+    const cell = Math.max(FIELD_CELL, Math.max(this.venue.w, this.venue.h) / FIELD_MAX_DIM);
+    const gw = Math.ceil(this.venue.w / cell), gh = Math.ceil(this.venue.h / cell);
+    if (gw !== this.gw || gh !== this.gh || cell !== this.cell) {
+      this.gw = gw;
+      this.gh = gh;
+      this.cell = cell;
+      this.fieldRaw = new Float32Array(gw * gh);
+      this.field = new Float32Array(gw * gh);
+      this.fieldCanvas.width = gw;
+      this.fieldCanvas.height = gh;
+      this.fieldImg = this.fieldCanvas.getContext('2d')!.createImageData(gw, gh);
+      this.fieldFresh = true;
+    }
+    const raw = this.fieldRaw;
+    raw.fill(0);
+    const sig = FIELD_SIGMA;
+    const norm = 1 / (2 * Math.PI * sig * sig);
+    if (this.simN) {
+      // Simulated crowd: everyone is known.
+      const D = this.simDraw;
+      for (let i = 0; i < this.simN; i++) this.splat(D[i * 3], D[i * 3 + 1], norm);
+    } else {
+      // Phones only: each stands for perPhone people (the server's participation estimate).
+      const wgt = norm * this.perPhone;
+      for (const b of this.list) if (!b.gone && !b.data.outside) this.splat(b.px, b.py, wgt);
+    }
+    const f = this.field;
+    const k = this.fieldFresh ? 1 : 1 - Math.exp(-dt / FIELD_TAU);
+    this.fieldFresh = false;
+    const img = this.fieldImg!;
+    const px = new Uint32Array(img.data.buffer);
+    const lut = this.fieldLut;
+    const scale = 255 / FIELD_LUT_MAX;
+    let hot = false;
+    for (let i = 0, m = f.length; i < m; i++) {
+      const v = f[i] + (raw[i] - f[i]) * k;
+      f[i] = v;
+      if (v > DENSITY_WATCH) hot = true;
+      px[i] = lut[Math.min(255, (v * scale) | 0)];
+    }
+    this.fieldHot = hot;
+    if (hot) this.fieldCanvas.getContext('2d')!.putImageData(img, 0, 0);
+  }
+
+  /** Add one Gaussian kernel (weight w, already normalised) centred on venue (x, y). */
+  private splat(x: number, y: number, w: number) {
+    const cell = this.cell, gw = this.gw, gh = this.gh;
+    const R = 3 * FIELD_SIGMA;
+    const i0 = Math.max(0, Math.floor((x - R) / cell)), i1 = Math.min(gw - 1, Math.floor((x + R) / cell));
+    const j0 = Math.max(0, Math.floor((y - R) / cell)), j1 = Math.min(gh - 1, Math.floor((y + R) / cell));
+    if (i1 < i0 || j1 < j0 || i1 - i0 >= this.kx.length || j1 - j0 >= this.ky.length) return;
+    const inv = 1 / (2 * FIELD_SIGMA * FIELD_SIGMA);
+    for (let i = i0; i <= i1; i++) {
+      const d = (i + 0.5) * cell - x;
+      this.kx[i - i0] = Math.exp(-d * d * inv);
+    }
+    for (let j = j0; j <= j1; j++) {
+      const d = (j + 0.5) * cell - y;
+      this.ky[j - j0] = w * Math.exp(-d * d * inv);
+    }
+    const raw = this.fieldRaw;
+    for (let j = j0; j <= j1; j++) {
+      const wy = this.ky[j - j0];
+      const row = j * gw;
+      for (let i = i0; i <= i1; i++) raw[row + i] += wy * this.kx[i - i0];
     }
   }
 
@@ -531,225 +971,289 @@ export class Mesh {
   private draw(now: number) {
     const g = this.ctx;
     g.setTransform(1, 0, 0, 1, 0, 0);
+    g.globalAlpha = 1;
     g.drawImage(this.background(), 0, 0);
     const { k, x: vx, y: vy } = this.view;
     g.setTransform(this.dpr * k, 0, 0, this.dpr * k, this.dpr * vx, this.dpr * vy);
-    const bodies = [...this.bodies.values()];
+    const light = this.theme === 'light';
+    const bodies = this.list;
+    const pulse = this.reduced ? 0.5 : 0.5 + 0.5 * Math.sin(now / 320);
+
     this.drawVenue(g);
     if (!this.sim) this.drawLayout(g);
     this.drawSimGeometry(g);
     this.underlay?.(g, now);
-    this.drawClusters(g, now);
+    this.drawField(g);
     this.drawSimBodies(g);
 
     // GPS accuracy: the true spot is somewhere in this circle.
+    g.lineWidth = 1;
     for (const b of bodies) {
       const acc = b.data.acc ?? 0;
-      if (acc <= 0 || b.gone) continue;
-      g.fillStyle = rgba(b.color, 0.05 * b.alpha);
-      g.strokeStyle = rgba(b.color, 0.18 * b.alpha);
-      g.lineWidth = 1;
+      if (acc <= 0 || b.vis <= 0) continue;
+      const a = easeOut(b.vis) * b.stale;
+      g.fillStyle = g.strokeStyle = SOLID[b.status];
       g.beginPath();
       g.arc(b.hx, b.hy, acc * this.fit.s, 0, Math.PI * 2);
+      g.globalAlpha = 0.05 * a;
       g.fill();
+      g.globalAlpha = 0.18 * a;
       g.stroke();
     }
+    g.globalAlpha = 1;
 
-    // Heat under swaying and wave phones: where the crowd is moving.
-    g.globalCompositeOperation = this.theme === 'light' ? 'source-over' : 'lighter';
-    for (const b of bodies) {
-      const st = b.data.status;
-      if (st !== 'swaying' && st !== 'wave') continue;
-      const r = this.fit.s * (st === 'wave' ? 2.4 + Math.sin(now / 180 + b.seed * 9) * 0.3 : 1.6);
-      const grad = g.createRadialGradient(b.x, b.y, 0, b.x, b.y, r);
-      const heat = this.theme === 'light' ? 0.45 : 1;
-      grad.addColorStop(0, rgba(b.color, (st === 'wave' ? 0.2 : 0.1) * b.alpha * heat));
-      grad.addColorStop(1, rgba(b.color, 0));
-      g.fillStyle = grad;
-      g.fillRect(b.x - r, b.y - r, r * 2, r * 2);
-    }
-    g.globalCompositeOperation = 'source-over';
-
-    // Trails.
+    // Mesh links: one quiet path per kind. Wave links are drawn separately, on top.
+    const base = light ? 'rgba(71,85,105,' : 'rgba(148,163,184,';
     g.lineCap = 'round';
-    for (const b of bodies) {
-      const t = b.trail;
-      for (let i = 1; i < t.length; i++) {
-        g.strokeStyle = rgba(b.color, (i / t.length) * 0.35 * b.alpha);
-        g.lineWidth = 1 + (i / t.length) * 1.5;
-        g.beginPath();
-        g.moveTo(t[i - 1].x, t[i - 1].y);
-        g.lineTo(t[i].x, t[i].y);
-        g.stroke();
-      }
-    }
-
-    // Mesh links.
-    const waveKeys = new Set(this.waves.map((w) => key(w.from, w.to)));
-    const maxD = this.fit.s * 2;
-    for (const l of this.links) {
-      const { a, b } = l;
-      const d = Math.hypot(b.x - a.x, b.y - a.y);
-      const alpha = Math.min(a.alpha, b.alpha);
-      if (waveKeys.has(key(a.id, b.id))) {
-        g.save();
-        g.shadowColor = rgba(WAVE, 0.9);
-        g.shadowBlur = 14;
-        g.strokeStyle = rgba(WAVE, (0.55 + Math.sin(now / 120) * 0.2) * alpha);
-        g.lineWidth = 2.6;
-        g.beginPath();
-        g.moveTo(a.x, a.y);
-        g.lineTo(b.x, b.y);
-        g.stroke();
-        g.restore();
-        continue;
-      }
-      const strength = Math.max(0.05, 1 - d / (maxD * 1.3));
-      const grad = g.createLinearGradient(a.x, a.y, b.x, b.y);
-      grad.addColorStop(0, rgba(a.color, (l.grid ? 0.32 : 0.16) * strength * alpha));
-      grad.addColorStop(1, rgba(b.color, (l.grid ? 0.32 : 0.16) * strength * alpha));
-      g.strokeStyle = grad;
-      g.lineWidth = l.grid ? 1.4 : 0.9;
-      g.setLineDash(l.grid ? [] : [3, 5]);
-      g.lineDashOffset = -now / 60;
+    for (let pass = 0; pass < 2; pass++) {
+      const grid = pass === 0;
       g.beginPath();
-      g.moveTo(a.x, a.y);
-      g.lineTo(b.x, b.y);
+      let any = false;
+      for (const l of this.links) {
+        if (l.grid !== grid || l.wave) continue;
+        if (l.a.vis < 0.05 || l.b.vis < 0.05) continue;
+        g.moveTo(l.a.x, l.a.y);
+        g.lineTo(l.b.x, l.b.y);
+        any = true;
+      }
+      if (!any) continue;
+      g.strokeStyle = base + (grid ? (light ? '0.28)' : '0.22)') : light ? '0.16)' : '0.13)');
+      g.lineWidth = grid ? 1.2 : 0.9;
+      g.setLineDash(grid ? [] : [3, 5]);
       g.stroke();
     }
     g.setLineDash([]);
 
-    // Packets.
+    this.drawClusters(g, pulse);
+    this.drawWaves(g, now, pulse);
+
+    // Gossip packets.
     for (const p of this.packets) {
+      if (p.wave) continue;
       const f = ease(Math.min(1, (now - p.t0) / p.dur));
-      const x = lerp(p.from.x, p.to.x, f), y = lerp(p.from.y, p.to.y, f);
-      if (p.wave) {
-        const tf = Math.max(0, f - 0.3);
-        g.strokeStyle = rgba(WAVE, 0.7);
-        g.lineWidth = 3;
-        g.beginPath();
-        g.moveTo(lerp(p.from.x, p.to.x, tf), lerp(p.from.y, p.to.y, tf));
-        g.lineTo(x, y);
-        g.stroke();
-        g.save();
-        g.shadowColor = rgba(WAVE, 1);
-        g.shadowBlur = 18;
-        g.fillStyle = '#fff1f2';
-        g.beginPath();
-        g.arc(x, y, 4.5, 0, Math.PI * 2);
-        g.fill();
-        g.restore();
-      } else {
-        g.fillStyle = rgba(p.color, 0.6 - p.hops * 0.18);
-        g.beginPath();
-        g.arc(x, y, 2.2 - p.hops * 0.4, 0, Math.PI * 2);
-        g.fill();
-      }
-    }
-
-    // Nodes.
-    for (const b of bodies) {
-      const st = b.data.status;
-      const sway = Math.min(2, b.data.sway);
-      const a = b.alpha;
-      let r = 7 + sway * 2.5;
-      if (st === 'wave') r *= 1 + Math.sin(now / 130 + b.seed * 10) * 0.15;
-
-      for (const rp of b.ripples) {
-        const f = (now - rp.t0) / 900;
-        g.strokeStyle = rgba(rp.color, (1 - f) * 0.7 * a);
-        g.lineWidth = 2 * (1 - f) + 0.5;
-        g.beginPath();
-        g.arc(b.x, b.y, r + f * rp.max, 0, Math.PI * 2);
-        g.stroke();
-      }
-
-      // Sway ring.
-      g.strokeStyle = rgba(b.color, 0.35 * a);
-      g.lineWidth = 1 + sway * 2.5;
+      g.globalAlpha = Math.max(0.1, 0.55 - p.hops * 0.17) * Math.min(p.from.vis, p.to.vis);
+      g.fillStyle = p.style;
       g.beginPath();
-      g.arc(b.x, b.y, r + 6 + sway * 9, 0, Math.PI * 2);
-      g.stroke();
-
-      if (st === 'connecting' || b.data.outside) {
-        g.save();
-        g.translate(b.x, b.y);
-        g.rotate(now / 400);
-        g.setLineDash([4, 4]);
-        g.strokeStyle = rgba(b.color, 0.9 * a);
-        g.lineWidth = 2;
-        g.beginPath();
-        g.arc(0, 0, r + 2, 0, Math.PI * 2);
-        g.stroke();
-        g.restore();
-        continue;
-      }
-
-      g.save();
-      g.shadowColor = rgba(b.color, 0.9 * a);
-      g.shadowBlur = (this.theme === 'light' ? 0 : 6) + b.flash * 8 + (st === 'wave' ? 10 : 0);
-      g.fillStyle = rgba(b.color, a);
-      g.beginPath();
-      g.arc(b.x, b.y, r, 0, Math.PI * 2);
+      g.arc(lerp(p.from.x, p.to.x, f), lerp(p.from.y, p.to.y, f), 2.1 - p.hops * 0.4, 0, Math.PI * 2);
       g.fill();
-      g.restore();
-      g.strokeStyle = this.theme === 'light' ? `rgba(255,255,255,${0.9 * a})` : `rgba(10,14,21,${0.8 * a})`;
-      g.lineWidth = 2;
-      g.stroke();
-      if (b.flash > 0.05) {
-        g.fillStyle = `rgba(255,255,255,${b.flash * 0.5 * a})`;
-        g.beginPath();
-        g.arc(b.x, b.y, r * 0.45, 0, Math.PI * 2);
-        g.fill();
-      }
-
-      if (this.hover === b.id || this.selected === b.id) {
-        const sel = this.selected === b.id;
-        g.strokeStyle = sel ? 'rgba(14,165,233,0.95)' : this.theme === 'light' ? 'rgba(15,23,42,0.6)' : 'rgba(226,232,240,0.9)';
-        g.lineWidth = sel ? 2.5 : 1.5;
-        g.setLineDash(sel ? [5, 4] : []);
-        g.lineDashOffset = -now / 40;
-        g.beginPath();
-        g.arc(b.x, b.y, r + 16, 0, Math.PI * 2);
-        g.stroke();
-        g.setLineDash([]);
-      }
     }
+    g.globalAlpha = 1;
+
+    this.drawNodes(g, now, pulse);
+    this.drawBadges(g);
 
     // Links of the selected phone: who it shares readings with.
     const sel = this.selected ? this.bodies.get(this.selected) : undefined;
     if (sel) {
       g.strokeStyle = 'rgba(34,211,238,0.55)';
       g.lineWidth = 2;
-      for (const n of this.neighbours(sel)) {
-        g.beginPath();
+      g.beginPath();
+      for (const n of sel.nbrs) {
         g.moveTo(sel.x, sel.y);
         g.lineTo(n.x, n.y);
-        g.stroke();
       }
+      g.stroke();
     }
 
     if (this.showBoards) this.drawBoards(g, now);
 
     g.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
 
-    // Alert vignette around the whole view.
+    // A thin tint on the map's border: a glance tells there is an alert somewhere; the map itself stays clean.
     if (this.level !== 'calm') {
-      const c = this.level === 'red' ? WAVE : COLOR.swaying;
-      const pulse = (this.level === 'red' ? 0.32 + Math.sin(now / 220) * 0.14 : 0.16) * (this.theme === 'light' ? 0.45 : 1);
-      const grad = g.createRadialGradient(this.w / 2, this.h / 2, Math.min(this.w, this.h) * 0.35, this.w / 2, this.h / 2, Math.max(this.w, this.h) * 0.75);
-      grad.addColorStop(0, rgba(c, 0));
-      grad.addColorStop(1, rgba(c, pulse));
-      g.fillStyle = grad;
-      g.fillRect(0, 0, this.w, this.h);
+      const red = this.level === 'red';
+      g.strokeStyle = rgba(red ? WAVE : AMBER, red ? 0.4 + 0.25 * pulse : 0.45);
+      g.lineWidth = 3;
+      g.strokeRect(1.5, 1.5, this.w - 3, this.h - 3);
     }
 
-    if (bodies.length === 0) {
-      g.fillStyle = this.theme === 'light' ? 'rgba(71,85,105,0.8)' : 'rgba(148,163,184,0.6)';
+    if (bodies.length === 0 && !this.simN) {
+      g.fillStyle = light ? 'rgba(71,85,105,0.8)' : 'rgba(148,163,184,0.6)';
       g.font = '500 18px Inter, system-ui, sans-serif';
       g.textAlign = 'center';
       g.fillText('Waiting for phones to join the mesh…', this.w / 2, this.h / 2);
+      g.textAlign = 'left';
     }
+  }
+
+  /** The density heat map: a small image stretched (bilinear) over the venue. */
+  private drawField(g: CanvasRenderingContext2D) {
+    if (!this.fieldHot || !this.gw) return;
+    const { s, ox, oy } = this.fit;
+    g.save();
+    g.imageSmoothingEnabled = true;
+    g.imageSmoothingQuality = 'high';
+    g.beginPath();
+    g.rect(ox, oy, this.venue.w * s, this.venue.h * s);
+    g.clip();
+    g.drawImage(this.fieldCanvas, ox, oy, this.gw * this.cell * s, this.gh * this.cell * s);
+    g.restore();
+  }
+
+  /** Push waves: only the links they travel along, with the direction of travel, and the phones on them. */
+  private drawWaves(g: CanvasRenderingContext2D, now: number, pulse: number) {
+    g.lineCap = 'round';
+    for (const w of this.waves) {
+      const a = this.bodies.get(w.from), b = this.bodies.get(w.to);
+      if (!a || !b) continue;
+      const alpha = Math.min(a.vis, b.vis);
+      if (alpha < 0.02) continue;
+      g.globalAlpha = alpha;
+      g.strokeStyle = rgba(WAVE, 0.18);
+      g.lineWidth = 8;
+      g.beginPath();
+      g.moveTo(a.x, a.y);
+      g.lineTo(b.x, b.y);
+      g.stroke();
+      g.strokeStyle = rgba(WAVE, 0.7 + 0.25 * pulse);
+      g.lineWidth = 2.4;
+      g.stroke();
+      // Arrowhead: which way the push travels.
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const d = Math.hypot(dx, dy);
+      if (d > 4 * NODE_R) {
+        const ux = dx / d, uy = dy / d;
+        const mx = a.x + dx * 0.58, my = a.y + dy * 0.58;
+        const s = 6;
+        g.fillStyle = rgba(WAVE, 0.95);
+        g.beginPath();
+        g.moveTo(mx + ux * s, my + uy * s);
+        g.lineTo(mx - ux * s - uy * s * 0.8, my - uy * s + ux * s * 0.8);
+        g.lineTo(mx - ux * s + uy * s * 0.8, my - uy * s - ux * s * 0.8);
+        g.closePath();
+        g.fill();
+      }
+    }
+    // Packets riding the wave links.
+    for (const p of this.packets) {
+      if (!p.wave) continue;
+      const f = ease(Math.min(1, (now - p.t0) / p.dur));
+      const x = lerp(p.from.x, p.to.x, f), y = lerp(p.from.y, p.to.y, f);
+      const tf = Math.max(0, f - 0.3);
+      g.globalAlpha = Math.min(p.from.vis, p.to.vis);
+      g.strokeStyle = rgba(WAVE, 0.75);
+      g.lineWidth = 3;
+      g.beginPath();
+      g.moveTo(lerp(p.from.x, p.to.x, tf), lerp(p.from.y, p.to.y, tf));
+      g.lineTo(x, y);
+      g.stroke();
+      g.fillStyle = rgba(WAVE, 0.3);
+      g.beginPath();
+      g.arc(x, y, 7, 0, Math.PI * 2);
+      g.fill();
+      g.fillStyle = '#fff1f2';
+      g.beginPath();
+      g.arc(x, y, 3.5, 0, Math.PI * 2);
+      g.fill();
+    }
+    g.globalAlpha = 1;
+  }
+
+  private drawNodes(g: CanvasRenderingContext2D, now: number, pulse: number) {
+    const light = this.theme === 'light';
+    const outline = light ? '#ffffff' : '#0a0e15';
+    const TAU = Math.PI * 2;
+    for (const b of this.list) {
+      if (b.vis <= 0) continue;
+      const st = b.status;
+      const ve = easeOut(b.vis);
+      const a = ve * b.stale;
+      const fade = Math.min(1, (now - b.statusAt) / COLOR_FADE_MS);
+      let r = this.reduced ? NODE_R : NODE_R * (0.5 + 0.5 * ve);
+      if (st === 'wave' && !this.reduced) r *= 1 + 0.07 * Math.sin(now / 320 + b.seed * 10);
+      const onWave = this.waveNodes.has(b.id);
+
+      // Ripples: a status change or a push arriving.
+      for (const rp of b.ripples) {
+        const f = (now - rp.t0) / 900;
+        g.globalAlpha = (1 - f) * 0.7 * a;
+        g.strokeStyle = rp.style;
+        g.lineWidth = 2 * (1 - f) + 0.5;
+        g.beginPath();
+        g.arc(b.x, b.y, r + (this.reduced ? 4 : f * rp.max), 0, TAU);
+        g.stroke();
+      }
+
+      // Glow (pre-rendered sprite), cross-faded with the colour. Calm phones barely glow in light theme.
+      const glowR = r * (st === 'wave' ? 4.2 : 3) * (1 + b.flash * 0.3);
+      const glowA = (light && st !== 'wave' ? 0.4 : 1) * a;
+      if (fade < 1) {
+        g.globalAlpha = glowA * (1 - fade);
+        g.drawImage(this.glow[b.prevStatus], b.x - glowR, b.y - glowR, glowR * 2, glowR * 2);
+      }
+      g.globalAlpha = glowA * fade;
+      g.drawImage(this.glow[st], b.x - glowR, b.y - glowR, glowR * 2, glowR * 2);
+
+      // Sway ring: subtle, only when the phone is actually swaying.
+      if (b.sway > 0.15) {
+        g.globalAlpha = Math.min(0.35, b.sway * 0.25) * a;
+        g.strokeStyle = SOLID[st];
+        g.lineWidth = 1.2;
+        g.beginPath();
+        g.arc(b.x, b.y, r + 3 + b.sway * 2, 0, TAU);
+        g.stroke();
+      }
+      // Phones on a push: a red ring, gently pulsing.
+      if (onWave) {
+        g.globalAlpha = (0.55 + 0.35 * pulse) * a;
+        g.strokeStyle = SOLID.wave;
+        g.lineWidth = 2;
+        g.beginPath();
+        g.arc(b.x, b.y, r + 4.5 + pulse * 1.5, 0, TAU);
+        g.stroke();
+      }
+
+      if (st === 'connecting' || b.data.outside) {
+        g.save();
+        g.translate(b.x, b.y);
+        if (!this.reduced) g.rotate(now / 400);
+        g.setLineDash([4, 4]);
+        g.globalAlpha = 0.9 * a;
+        g.strokeStyle = SOLID[st];
+        g.lineWidth = 2;
+        g.beginPath();
+        g.arc(0, 0, r + 2, 0, TAU);
+        g.stroke();
+        g.restore();
+      } else {
+        // Core: previous colour underneath, new colour on top → a 200 ms cross-fade.
+        g.beginPath();
+        g.arc(b.x, b.y, r, 0, TAU);
+        if (fade < 1) {
+          g.globalAlpha = a;
+          g.fillStyle = SOLID[b.prevStatus];
+          g.fill();
+        }
+        g.globalAlpha = a * fade;
+        g.fillStyle = SOLID[st];
+        g.fill();
+        g.globalAlpha = (light ? 0.9 : 0.8) * a;
+        g.strokeStyle = outline;
+        g.lineWidth = 2;
+        g.stroke();
+        if (b.flash > 0.05) {
+          g.globalAlpha = b.flash * 0.5 * a;
+          g.fillStyle = '#ffffff';
+          g.beginPath();
+          g.arc(b.x, b.y, r * 0.45, 0, TAU);
+          g.fill();
+        }
+      }
+
+      if (this.hover === b.id || this.selected === b.id) {
+        const sel = this.selected === b.id;
+        g.globalAlpha = 1;
+        g.strokeStyle = sel ? 'rgba(14,165,233,0.95)' : light ? 'rgba(15,23,42,0.6)' : 'rgba(226,232,240,0.9)';
+        g.lineWidth = sel ? 2.5 : 1.5;
+        g.setLineDash(sel ? [5, 4] : []);
+        g.lineDashOffset = this.reduced ? 0 : -now / 40;
+        g.beginPath();
+        g.arc(b.x, b.y, r + 14, 0, TAU);
+        g.stroke();
+        g.setLineDash([]);
+      }
+    }
+    g.globalAlpha = 1;
   }
 
   size() {
@@ -952,84 +1456,222 @@ export class Mesh {
     g.textAlign = 'left';
   }
 
-  /** Simulated people: phone carriers are drawn as nodes; the rest are grey, tinted by how hard they're squeezed. */
+  /** Simulated people, interpolated at 10 Hz: grey, and tinted amber → red only where they are squeezed. */
   private drawSimBodies(g: CanvasRenderingContext2D) {
-    if (!this.sim) return;
+    const n = this.simN;
+    if (!this.sim || !n) return;
+    const { s, ox, oy } = this.fit;
     // Body-sized when zoomed out, capped near the phone dots' size in small venues.
-    const r = Math.max(3, Math.min(8, 0.22 * this.fit.s));
-    const light = this.theme === 'light';
-    for (const [x, y, pressure, phone] of this.sim.bodies) {
-      const p = this.venueToWorld(x, y);
+    const r = Math.max(3, Math.min(8, 0.22 * s)) * 0.8;
+    const D = this.simDraw, B = this.simBucket, ph = this.simPhone;
+    let maxB = 0;
+    for (let i = 0; i < n; i++) {
       // 0 → grey; ~1500 N/m and up → red (crowd-crush pressure).
-      const k = Math.min(1, pressure / 1500);
-      if (k > 0.05) {
-        g.fillStyle = `rgba(239,${Math.round(140 * (1 - k))},${Math.round(60 * (1 - k))},${0.25 + 0.5 * k})`;
-        g.beginPath();
-        g.arc(p.x, p.y, r * (1.6 + k), 0, Math.PI * 2);
-        g.fill();
-      }
-      if (phone) continue;
-      g.fillStyle = light ? 'rgba(100,116,139,0.55)' : 'rgba(148,163,184,0.45)';
+      const k = Math.min(1, D[i * 3 + 2] / 1500);
+      const q = k < 0.08 ? 0 : 1 + Math.min(6, Math.floor(k * 7));
+      B[i] = q;
+      if (q > maxB) maxB = q;
+    }
+    // A small halo only around bodies under real pressure (≥ ~50 %).
+    if (maxB >= 4) {
+      g.fillStyle = rgba(RED, this.theme === 'light' ? 0.16 : 0.2);
       g.beginPath();
-      g.arc(p.x, p.y, r * 0.8, 0, Math.PI * 2);
+      for (let i = 0; i < n; i++) {
+        if (B[i] < 4) continue;
+        const x = ox + D[i * 3] * s, y = oy + D[i * 3 + 1] * s;
+        g.moveTo(x + r * 1.7, y);
+        g.arc(x, y, r * 1.7, 0, Math.PI * 2);
+      }
+      g.fill();
+    }
+    // One path per tint step.
+    for (let q = 0; q <= maxB; q++) {
+      g.beginPath();
+      let any = false;
+      for (let i = 0; i < n; i++) {
+        if (B[i] !== q || ph[i]) continue; // phone carriers are drawn as nodes
+        const x = ox + D[i * 3] * s, y = oy + D[i * 3 + 1] * s;
+        const rr = q ? r * 1.1 : r;
+        g.moveTo(x + rr, y);
+        g.arc(x, y, rr, 0, Math.PI * 2);
+        any = true;
+      }
+      if (!any) continue;
+      g.fillStyle = this.pressureStyle[q];
       g.fill();
     }
   }
 
-  /** Where the crowd packs together: a soft disc per cluster with its density and trend. */
-  private drawClusters(g: CanvasRenderingContext2D, now: number) {
+  /**
+   * Clusters, drawn where they are: a hull around the members (phones, or
+   * simulated people) padded by ~0.6 m. Yellow and red clusters get a crisp
+   * outline (red pulses) and a badge; calm ones a faint dashed outline.
+   */
+  private drawClusters(g: CanvasRenderingContext2D, pulse: number) {
     const light = this.theme === 'light';
-    for (const c of this.clusters) {
+    const s = this.fit.s;
+    const pad = Math.max(6, 0.6 * s);
+    this.badges.length = 0;
+    for (let ci = 0; ci < this.clusters.length; ci++) {
+      const c = this.clusters[ci];
+      const level = c.level ?? 'calm';
+      const col: RGB = level === 'red' ? WAVE : level === 'yellow' ? AMBER : CALM_CLUSTER;
+      const n = this.clusterHull(c);
       const p = this.venueToWorld(c.x, c.y);
-      const r = Math.max(10, c.r * this.fit.s);
-      const col: RGB = c.level === 'red' ? WAVE : c.level === 'yellow' ? COLOR.swaying : [56, 189, 248];
-      const grad = g.createRadialGradient(p.x, p.y, 0, p.x, p.y, r);
-      grad.addColorStop(0, rgba(col, (c.level === 'red' ? 0.22 : 0.12) * (light ? 0.7 : 1)));
-      grad.addColorStop(1, rgba(col, 0));
-      g.fillStyle = grad;
-      g.beginPath();
-      g.arc(p.x, p.y, r, 0, Math.PI * 2);
-      g.fill();
-      // Forming: rings converge inward. Dispersing: rings spread outward.
-      if (c.trend !== 'steady') {
-        const f = ((now / 1600) % 1);
-        const rr = c.trend === 'forming' ? r * (1.25 - 0.45 * f) : r * (0.8 + 0.45 * f);
-        g.strokeStyle = rgba(col, 0.35 * (c.trend === 'forming' ? f : 1 - f));
-        g.lineWidth = 1.5;
-        g.beginPath();
-        g.arc(p.x, p.y, rr, 0, Math.PI * 2);
+      this.tracePadded(g, n, pad, p.x, p.y, Math.max(pad, Math.min(c.r, 1.5) * s));
+      let top = p.y - pad;
+      for (let i = 0; i < n; i++) top = Math.min(top, this.hp[this.hull[i] * 2 + 1] - pad);
+
+      if (level === 'calm') {
+        g.setLineDash([4, 5]);
+        g.strokeStyle = rgba(col, light ? 0.45 : 0.35);
+        g.lineWidth = 1;
         g.stroke();
+        g.setLineDash([]);
+        g.font = '600 10px Inter, system-ui, sans-serif';
+        g.textAlign = 'center';
+        g.fillStyle = rgba(col, light ? 0.8 : 0.7);
+        g.fillText(this.clusterLabels[ci] ?? '', p.x, top - 5);
+        g.textAlign = 'left';
+        continue;
       }
-      g.setLineDash([4, 4]);
-      g.strokeStyle = rgba(col, 0.45);
-      g.lineWidth = 1;
-      g.beginPath();
-      g.arc(p.x, p.y, r, 0, Math.PI * 2);
+
+      const red = level === 'red';
+      g.fillStyle = rgba(col, red ? 0.1 : 0.07);
+      g.fill();
+      // Soft halo stroke, then the crisp line.
+      g.strokeStyle = rgba(col, red ? 0.12 + 0.14 * pulse : 0.12);
+      g.lineWidth = red ? 7 + 3 * pulse : 6;
+      g.stroke();
+      g.strokeStyle = rgba(col, red ? 0.8 + 0.2 * pulse : 0.85);
+      g.lineWidth = red ? 2.2 : 1.8;
+      g.setLineDash(red ? [] : [7, 4]);
       g.stroke();
       g.setLineDash([]);
-      const arrow = c.trend === 'forming' ? ' ↑' : c.trend === 'dispersing' ? ' ↓' : '';
-      const label = `${c.people ?? c.count} people · ${c.density.toFixed(1)}/m²${arrow}${c.eta != null ? ` · danger in ~${Math.round(c.eta)} s` : ''}`;
-      g.font = '600 11px Inter, system-ui, sans-serif';
-      const tw = g.measureText(label).width;
-      g.fillStyle = light ? 'rgba(255,255,255,0.9)' : 'rgba(10,14,21,0.8)';
-      g.beginPath();
-      g.roundRect(p.x - tw / 2 - 7, p.y - r - 22, tw + 14, 18, 9);
-      g.fill();
-      g.fillStyle = rgba(col, 1);
-      g.textAlign = 'center';
-      g.fillText(label, p.x, p.y - r - 9);
-      g.textAlign = 'left';
+      // The badge is drawn later, above the nodes.
+      this.badges.push(ci, p.x, top);
     }
+  }
+
+  /** Badges of yellow/red clusters: people, density, trend and the early-warning countdown. */
+  private drawBadges(g: CanvasRenderingContext2D) {
+    const B = this.badges;
+    g.font = '700 11px Inter, system-ui, sans-serif';
+    g.textAlign = 'center';
+    for (let k = 0; k < B.length; k += 3) {
+      const ci = B[k], x = B[k + 1], top = B[k + 2];
+      const red = this.clusters[ci]?.level === 'red';
+      const col = red ? WAVE : AMBER;
+      const label = this.clusterLabels[ci] ?? '';
+      const tw = g.measureText(label).width;
+      const by = top - 26;
+      g.fillStyle = rgba(col, 0.96);
+      g.beginPath();
+      g.roundRect(x - tw / 2 - 8, by, tw + 16, 19, 9.5);
+      g.moveTo(x - 5, by + 18);
+      g.lineTo(x + 5, by + 18);
+      g.lineTo(x, by + 24);
+      g.closePath();
+      g.fill();
+      g.fillStyle = red ? '#ffffff' : '#1c1917';
+      g.fillText(label, x, by + 13.5);
+    }
+    g.textAlign = 'left';
+  }
+
+  /** Members of a cluster in world px (into this.hp), then their convex hull (indices into this.hull). Returns the hull size. */
+  private clusterHull(c: Cluster): number {
+    const hp = this.hp;
+    hp.length = 0;
+    const r2 = (c.r + 0.75) ** 2;
+    const { s, ox, oy } = this.fit;
+    if (this.simN) {
+      const D = this.simDraw;
+      for (let i = 0; i < this.simN; i++) {
+        const x = D[i * 3], y = D[i * 3 + 1];
+        if ((x - c.x) ** 2 + (y - c.y) ** 2 < r2) hp.push(ox + x * s, oy + y * s);
+      }
+    } else {
+      for (const b of this.list) {
+        if (b.gone || b.data.outside) continue;
+        if ((b.px - c.x) ** 2 + (b.py - c.y) ** 2 < r2) hp.push(b.x, b.y);
+      }
+    }
+    const m = hp.length / 2;
+    const idx = this.hIdx;
+    idx.length = m;
+    for (let i = 0; i < m; i++) idx[i] = i;
+    idx.sort((a, b) => hp[a * 2] - hp[b * 2] || hp[a * 2 + 1] - hp[b * 2 + 1]);
+    // Andrew's monotone chain, skipping duplicate points.
+    const h = this.hull;
+    h.length = 0;
+    const cross = (o: number, a: number, b: number) =>
+      (hp[a * 2] - hp[o * 2]) * (hp[b * 2 + 1] - hp[o * 2 + 1]) - (hp[a * 2 + 1] - hp[o * 2 + 1]) * (hp[b * 2] - hp[o * 2]);
+    let u = 0;
+    for (let i = 0; i < m; i++) {
+      const j = idx[i];
+      if (u && hp[idx[u - 1] * 2] === hp[j * 2] && hp[idx[u - 1] * 2 + 1] === hp[j * 2 + 1]) continue;
+      idx[u++] = j;
+    }
+    if (u <= 2) {
+      for (let i = 0; i < u; i++) h.push(idx[i]);
+      return u;
+    }
+    for (let i = 0; i < u; i++) {
+      while (h.length >= 2 && cross(h[h.length - 2], h[h.length - 1], idx[i]) <= 0) h.pop();
+      h.push(idx[i]);
+    }
+    const lower = h.length + 1;
+    for (let i = u - 2; i >= 0; i--) {
+      while (h.length >= lower && cross(h[h.length - 2], h[h.length - 1], idx[i]) <= 0) h.pop();
+      h.push(idx[i]);
+    }
+    h.pop();
+    return h.length;
+  }
+
+  /** Trace the hull grown outward by pad (rounded corners). Falls back to a small disc with no members. */
+  private tracePadded(g: CanvasRenderingContext2D, n: number, pad: number, cx: number, cy: number, fallbackR: number) {
+    const hp = this.hp, h = this.hull;
+    g.beginPath();
+    if (n === 0) {
+      g.arc(cx, cy, fallbackR, 0, Math.PI * 2);
+      return;
+    }
+    if (n === 1) {
+      g.arc(hp[h[0] * 2], hp[h[0] * 2 + 1], pad, 0, Math.PI * 2);
+      return;
+    }
+    // Screen-clockwise order (positive shoelace area with y down), so outward normals are (dy, −dx).
+    let area = 0;
+    for (let i = 0; i < n; i++) {
+      const a = h[i], b = h[(i + 1) % n];
+      area += hp[a * 2] * hp[b * 2 + 1] - hp[b * 2] * hp[a * 2 + 1];
+    }
+    const at = (i: number) => (area >= 0 ? h[((i % n) + n) % n] : h[n - 1 - (((i % n) + n) % n)]);
+    for (let i = 0; i < n; i++) {
+      const p0 = at(i - 1), p1 = at(i), p2 = at(i + 1);
+      const a0 = Math.atan2(-(hp[p1 * 2] - hp[p0 * 2]), hp[p1 * 2 + 1] - hp[p0 * 2 + 1]);
+      const a1 = Math.atan2(-(hp[p2 * 2] - hp[p1 * 2]), hp[p2 * 2 + 1] - hp[p1 * 2 + 1]);
+      g.arc(hp[p1 * 2], hp[p1 * 2 + 1], pad, a0, a1, false);
+    }
+    g.closePath();
   }
 
   neighbourCount(id: string) {
     const b = this.bodies.get(id);
-    return b ? this.neighbours(b).length : 0;
+    return b ? b.nbrs.length : 0;
   }
 
   /** Screen position of a body, for anchoring the tooltip. */
   position(id: string) {
     const b = this.bodies.get(id);
     return b ? this.toScreen(b.x, b.y) : null;
+  }
+
+  /** Screen position of a body's latest reported spot (where the dot is heading). */
+  homeOf(id: string) {
+    const b = this.bodies.get(id);
+    return b ? this.toScreen(b.hx, b.hy) : null;
   }
 }
