@@ -625,12 +625,22 @@ func (w *World) intent(a *Agent) (speed, ex, ey float64, h how) {
 	g := w.G
 	cx := (g.BarrierX0 + g.BarrierX1) / 2
 	grp := a.grp
+	if a.hold { // the press is over, but the people behind have not let go yet
+		ex, ey, _ = toward(a, a.gx, a.gy)
+		return a.holdV, ex, ey, howPress
+	}
 	switch w.Action {
 	case actCorridor:
 		a.gx, a.gy = a.X+10*a.cdir, a.Y
 		ex, ey, _ = toward(a, a.gx, a.gy)
 		return a.V0, ex, ey, howWalk
 	case ActStage, ActSurge:
+		// In a surge, some of the people at the loose edge step back (peel).
+		if w.Action == ActSurge {
+			if speed, ex, ey, h, ok := w.peelIntent(a); ok {
+				return speed, ex, ey, h
+			}
+		}
 		// Head for the barrier just ahead, the group drifting toward the
 		// middle together and keeping its members side by side.
 		pull := 0.3
@@ -729,6 +739,9 @@ func (w *World) desire() {
 	// Followers stop pressing once inside the disc they would fill at ~3.5/m².
 	w.packR = math.Sqrt(float64(nFollow) / (attractPack * math.Pi))
 	for i, a := range w.agents {
+		if a.hold {
+			w.release(i, a)
+		}
 		target, ex, ey, h := w.intent(a)
 		// Voluntary speed changes are gradual.
 		if target > a.sp {
@@ -818,4 +831,139 @@ func (w *World) orient(a *Agent, h how) {
 	}
 	a.prevFace = a.face
 	a.face += step
+}
+
+// Stepping back from a surge. Not everyone at the back of a crowd that is
+// pressing forward keeps pressing: people who are still free to move (nobody
+// leaning on them, room around them) and have got nowhere for a while give
+// up and step back to watch. Only the loose edge can do that; anyone in the
+// packed part is held by the people behind. peelShare of people are that
+// cautious, each with their own patience (peelMinS–peelMaxS held up at the
+// edge); the rest keep pushing for as long as the surge lasts, so the crush
+// at the front holds. Which people is fixed by the seed and the person's id
+// (no random draws, so the rest of the simulation is unchanged).
+type peelState int
+
+const (
+	peelNo    peelState = iota
+	peelBack            // walking back out of the press
+	peelWatch           // standing behind it, watching
+)
+
+const (
+	peelShare   = 0.3
+	peelDensity = 2.3  // people/m² within 1 m: looser than this is the edge
+	peelMinS    = 8.0  // s
+	peelMaxS    = 30.0 // s
+	peelFront   = 2.0  // m from the barrier: nearer than this nobody gets out
+	peelWalkS   = 8.0  // s; after that they stay wherever they got to
+)
+
+// Making room after a press. Someone standing ignores a net social
+// (non-contact) push below standDead, which is what keeps a standing crowd
+// still; it would also keep a crowd that was pressed together exactly as
+// tight as the press left it, forever. People don't stay like that: once
+// the pushing stops, whoever has more room on one side shifts that way,
+// first the back rows (nobody behind them), then the rows they free, and
+// the front last. So for people who were in a press that ended (calm after
+// stage, surge or a gathering), the dead-band is easeDead while more than
+// easeDensity people/m² stand within 1 m of them.
+const (
+	easeDensity = 2.0  // people/m² within 1 m (Agent.Density)
+	easeDead    = 25.0 // N
+)
+
+// Release. When a press ends, the crowd does not spring apart at once:
+// someone leaning forward with people leaning on their back can only
+// straighten up when those behind have let go. So after calm, a person who
+// was pressing keeps pressing until nobody still pressing stands within
+// releaseR behind them for their own reaction time (releaseMinS–releaseMaxS,
+// fixed per person), and then stands and makes room (ease). The back row
+// lets go first and the release travels forward row by row; the people at
+// the barrier are the last to be let off. Nobody holds on longer than
+// releaseMaxHoldS.
+const (
+	releaseR        = 0.9 // m
+	releaseMinS     = 0.5
+	releaseMaxS     = 1.0
+	releaseMaxHoldS = 30.0
+)
+
+// release lets agent i go once nobody behind is still pressing.
+func (w *World) release(i int, a *Agent) {
+	ex, ey, _ := toward(a, a.gx, a.gy)
+	pushed := false
+	w.grid.near(w.agents, i, releaseR, func(b *Agent) {
+		if b.hold && (b.X-a.X)*ex+(b.Y-a.Y)*ey < -0.1 {
+			pushed = true
+		}
+	})
+	if pushed {
+		a.freeT = 0
+	} else {
+		a.freeT += Dt
+	}
+	u := float64(uint64(mixSeed(w.seed, int64(a.ID)+104729))>>11) / float64(1<<53)
+	if a.freeT >= releaseMinS+(releaseMaxS-releaseMinS)*u || w.T-a.holdT > releaseMaxHoldS {
+		a.hold = false
+	}
+}
+
+// patience is how long person a puts up with being held at the loose edge
+// of a surge before stepping back; ok = false for those who never do.
+func (w *World) patience(a *Agent) (sec float64, ok bool) {
+	u := float64(uint64(mixSeed(w.seed, int64(a.ID)+7919))>>11) / float64(1<<53)
+	if u >= peelShare {
+		return 0, false
+	}
+	return peelMinS + (peelMaxS-peelMinS)*u/peelShare, true
+}
+
+// resetPeel: a new behaviour, everyone is back in it.
+func (w *World) resetPeel() {
+	for _, a := range w.agents {
+		a.peel, a.heldT, a.ease, a.hold = peelNo, 0, false, false
+	}
+}
+
+// peelIntent is what someone who stepped back from the surge (or is about
+// to) wants this tick; ok = false while they are still pressing.
+func (w *World) peelIntent(a *Agent) (speed, ex, ey float64, h how, ok bool) {
+	switch a.peel {
+	case peelWatch:
+		return 0, 0, 0, howStand, true
+	case peelBack:
+		ex, ey, d := toward(a, a.pbx, a.pby)
+		if d < settleDone || w.T-a.peelT > peelWalkS {
+			a.peel = peelWatch
+			return 0, 0, 0, howStand, true
+		}
+		return 0.7 * a.V0 * clamp((d-0.15)/0.8, 0.3, 1), ex, ey, howWalk, true
+	}
+	pat, cautious := w.patience(a)
+	if !cautious {
+		return 0, 0, 0, howPress, false
+	}
+	loose := a.Pressure == 0 && a.Density < peelDensity && math.Hypot(a.VX, a.VY) < 0.2 && a.Y-w.G.BarrierY > peelFront
+	if !loose {
+		a.heldT = math.Max(0, a.heldT-Dt)
+		return 0, 0, 0, howPress, false
+	}
+	if a.heldT += Dt; a.heldT < pat {
+		return 0, 0, 0, howPress, false
+	}
+	// Straight back from where they were pushing to, as far as there is room.
+	ux, uy, _ := toward(a, a.gx, a.gy)
+	if ux == 0 && uy == 0 {
+		uy = -1
+	}
+	for _, d := range []float64{3, 2.2, 1.5} {
+		x, y := a.X-ux*d, a.Y-uy*d
+		if w.clear(x, y, a.R) {
+			a.peel, a.peelT, a.pbx, a.pby, a.heldT = peelBack, w.T, x, y, 0
+			return 0, 0, 0, howWalk, true
+		}
+	}
+	a.heldT = 0 // a wall behind them: try again later
+	return 0, 0, 0, howPress, false
 }

@@ -76,6 +76,16 @@ export class Areas {
    */
   pick: { label: string; arrow: boolean; done: (p: { x: number; y: number; dx: number; dy: number }) => void } | null = null;
   private pickDrag: { x0: number; y0: number; x1: number; y1: number } | null = null;
+  /** Areas are not drawn (a replay of a recording made in another venue is on screen). */
+  hidden = false;
+
+  /** Give up a pending map pick (the page changed, the simulation stopped). */
+  cancelPick() {
+    if (!this.pick) return;
+    this.pick = null;
+    this.pickDrag = null;
+    this.setTool('select');
+  }
   /** Fires when a neighbour link is clicked (no phone under the pointer). */
   onLink: (from: string, to: string) => void = () => {};
   /** Fires when a board marker is dropped at a new spot (venue metres). */
@@ -490,6 +500,7 @@ export class Areas {
   // -------------------------------------------------------------------------
 
   private draw(g: CanvasRenderingContext2D, now: number) {
+    if (this.hidden) return;
     const light = document.documentElement.dataset.theme === 'light';
     for (const a of this.list) {
       if (a.poly.length < 3) continue;

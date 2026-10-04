@@ -85,6 +85,16 @@
 //     POIs within 25 s, so the first ones come back through those still
 //     arriving (bidirectional flow) and the POIs crowd up.
 //
+// A surge (stage, surge) lasts as long as it is the behaviour, and it is
+// not a frozen block: squeezed people struggle for room (struggle, below:
+// crowd turbulence after Helbing, Johansson & Al-Abideen 2007 and Yu &
+// Johansson 2007), a cautious minority at the loose back edge gives up and
+// steps back to watch (peel, behaviour.go), and when the director calls it
+// off the press lets go from the back: nobody stops leaning while someone
+// behind them still is, and people who were pressed together make room
+// again (release, ease; behaviour.go). TestCrushPersists, TestTurbulence
+// and TestPeelAway hold this in place.
+//
 // Motion is smooth: desired speed rises at most 1 m/s² (voluntary slowing
 // 3 m/s²; braking for the time gap is immediate), the walking heading turns
 // at most 2 rad/s (5 rad/s when nearly stopped, turning on the spot), and
@@ -139,8 +149,8 @@
 //
 // Limits. Groups never split (one member can't pop to the toilet alone);
 // POIs have no service model (people stand around them, they don't queue
-// in a line); standing people never shuffle their feet, so a crowd stays
-// exactly where it settled; the side preference is fixed to the right;
+// in a line); standing people never shuffle their feet (except to make room after
+// a press), so a crowd stays where it settled; the side preference is fixed to the right;
 // sway and dance exist only in the phone signal; bodies are discs, so
 // nobody turns sideways to squeeze through. Only the three benchmarks
 // above were checked, not evacuation times or panic behaviour.
@@ -286,6 +296,17 @@ type Agent struct {
 	sx, sy       float64 // social (non-contact) force this step
 	phone        *phone
 	out          bool // left through an exit
+
+	// Stepping back from a surge (behaviour.go, peel): how long this person
+	// has been held up at the loose edge, and where they are stepping back to.
+	peel     peelState
+	heldT    float64
+	peelT    float64
+	pbx, pby float64
+	ease     bool // was in a press that ended: shuffles apart until there is room (easeDensity)
+	// The press is over but this person is still leaning forward (release).
+	hold                bool
+	holdV, freeT, holdT float64
 }
 
 // Config starts a world.
@@ -562,6 +583,10 @@ func (w *World) Apply(act Action) error {
 		return *act.Strength, nil
 	}
 	switch act.Type {
+	case ActCalm, ActDance, ActIntermission, ActStage, ActSurge, ActAttract, ActDisperse:
+		w.resetPeel() // a new behaviour: whoever stepped back from a surge is part of it again
+	}
+	switch act.Type {
 	case ActCalm, ActDance, ActIntermission:
 		// Back to the concert routine: whoever was pressing, gathering or
 		// leaving stops where they are; trips in progress carry on.
@@ -572,6 +597,14 @@ func (w *World) Apply(act Action) error {
 			switch {
 			case prev == ActStage || prev == ActSurge || g.purpose == pFollow || g.purpose == pEvac:
 				w.toIdle(g)
+				for _, a := range g.members {
+					a.ease = true // packed by the press: they make room again
+					if (prev == ActStage || prev == ActSurge) && a.peel == peelNo {
+						// Still leaning on the people in front until those
+						// behind let go (behaviour.go, release).
+						a.hold, a.holdV, a.freeT, a.holdT = true, a.sp, 0, w.T
+					}
+				}
 			case g.purpose == pIdle:
 				g.startAt = 0
 			}
@@ -714,6 +747,35 @@ func (w *World) surgeSpeed(a *Agent) float64 {
 // wanderSigma is the wander force (m/s²) on people walking or pressing.
 const wanderSigma = 0.15
 
+// Crowd turbulence. Helbing, Johansson & Al-Abideen, "Dynamics of crowd
+// disasters: an empirical study", Phys. Rev. E 75, 046109 (2007) found that
+// a crowd packed to the point of danger does not stand still: people are
+// moved involuntarily, in all directions, and the "crowd pressure"
+// ρ·Var(v) passes 0.02 /s² when it turns turbulent. Yu & Johansson,
+// "Modeling crowd turbulence by many-particle simulations", Phys. Rev. E
+// 76, 046105 (2007) reproduce it by letting people push back for space as
+// they are squeezed. Here: someone who is pressing or walking and whose
+// body compression is above struggleFrom N/m shoves in an irregular
+// direction (the wander process, correlation time 1.5 s) with up to
+// struggleAcc m/s², reached at struggleFull N/m. The shifts that follow
+// (neighbours giving way, force chains breaking and re-forming, pressure
+// moving from person to person) are contact physics. Someone standing (not
+// pushing toward anything) does not struggle.
+const (
+	struggleFrom = 250.0  // N/m
+	struggleFull = 1200.0 // N/m
+	struggleAcc  = 6.0    // m/s² (about 450 N for 75 kg: shoving as hard as a person can)
+)
+
+// struggle is the extra irregular push (m/s²) of someone squeezed at
+// pressure p (N/m).
+func struggle(p float64) float64 {
+	if p <= struggleFrom {
+		return 0
+	}
+	return struggleAcc * math.Min(1, (p-struggleFrom)/(struggleFull-struggleFrom))
+}
+
 // ---- physics ----
 
 // Step advances the world by one 50 Hz tick.
@@ -794,8 +856,10 @@ func (w *World) forces(h float64) {
 		if a.stand {
 			a.fx, a.fy = -a.M*a.VX/tauStand, -a.M*a.VY/tauStand
 		} else {
-			a.fx = a.M*(a.dvx-a.VX)/Tau + a.M*wanderSigma*a.wx
-			a.fy = a.M*(a.dvy-a.VY)/Tau + a.M*wanderSigma*a.wy
+			// Squeezed, people struggle for room (struggle, above).
+			sig := wanderSigma + struggle(a.Pressure)
+			a.fx = a.M*(a.dvx-a.VX)/Tau + a.M*sig*a.wx
+			a.fy = a.M*(a.dvy-a.VY)/Tau + a.M*sig*a.wy
 		}
 		if a.pushT > 0 {
 			a.fx += a.M * a.pushX
@@ -902,8 +966,12 @@ func (w *World) forces(h float64) {
 		if a.stand {
 			m := math.Hypot(sx, sy)
 			k := 0.0
-			if m > standDead {
-				k = (m - standDead) / m
+			dead := standDead
+			if a.ease && a.Density > easeDensity {
+				dead = easeDead // making room again after a press (behaviour.go)
+			}
+			if m > dead {
+				k = (m - dead) / m
 			}
 			sx, sy = sx*k, sy*k
 		}

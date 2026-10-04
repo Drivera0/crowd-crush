@@ -83,4 +83,4 @@ SIGN_URL=serial:auto,A=http://<esp32 #1 ip>  # mixes with Wi-Fi boards; A=serial
 
 ## 5. Before judging
 
-Record real runs (dashboard → Record run) with labels such as `wave-push-end` and `dance-jumping`; `go test ./...` checks each run against its label. Rehearse with **Replay** as the fallback.
+Record real runs (dashboard → Record run) with labels such as `wave-push-end` and `dance-jumping`; `go test ./...` checks each run against its label. Rehearse with **Simulation → Saved runs** as the fallback.

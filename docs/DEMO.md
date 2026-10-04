@@ -61,10 +61,10 @@ Drop one rung the moment the current one stalls for more than 10 s. Don't debug 
 |---|---|---|---|
 | 1. Live phones | default | as above | — |
 | 2. Simulation | judge's phone won't join, tunnel down, or phones misbehave | **Simulation** → Start → To the stage → Surge | "Here are 250 simulated people, 60 % with the app. Same detector, same alerts." |
-| 3. Replay | simulation fails or the laptop is slow | **Recordings** → pick the good run → **▶ Play** | "This is a recorded run going through the same pipeline." |
+| 3. Replay | simulation fails or the laptop is slow | **Simulation** → **Saved runs** → pick the good run → **▶ Play** | "This is a recorded run going through the same pipeline." |
 | 4. Recorded video | the server won't start | the Devpost video, downloaded locally (not streamed) | "Here's the three-minute video; happy to show code." |
 
-**Run test alert** (Recordings page) fires briefing, voice, sign and lights on demand at any rung.
+**Send drill** (Alert drill page) fires briefing, voice, sign and lights on demand at any rung, and reports what each one did.
 
 ## When something fails
 

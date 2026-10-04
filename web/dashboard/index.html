@@ -59,8 +59,8 @@
           <a href="#sim" data-nav="sim">
             <svg viewBox="0 0 24 24"><circle cx="7" cy="8" r="2" /><circle cx="15" cy="6" r="2" /><circle cx="12" cy="14" r="2" /><circle cx="18" cy="15" r="2" /><circle cx="6" cy="17" r="2" /></svg>Simulation
           </a>
-          <a href="#recordings" data-nav="recordings">
-            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" /><path d="M10 9l5 3-5 3z" /></svg>Replays &amp; drills
+          <a href="#drill" data-nav="drill">
+            <svg viewBox="0 0 24 24"><path d="M6 9a6 6 0 0112 0v4l2 3H4l2-3z" /><path d="M10 19a2 2 0 004 0" /></svg>Alert drill
           </a>
           <a href="#settings" data-nav="settings">
             <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 00.3 1.8l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.8-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1.1-1.5 1.7 1.7 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.8 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.5-1.1 1.7 1.7 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.8.3H9a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.8V9a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z" /></svg>Settings
@@ -108,7 +108,8 @@
 
         <!-- While a drill is open: nobody should mistake it for a real incident. -->
         <div id="drillBanner" class="drill-banner" hidden role="status">
-          <b>DRILL</b><span>Not a real incident · test alert at <span id="drillWhere"></span>. Resolve it on Live when you're done.</span>
+          <b>DRILL</b><span>Not a real incident · test alert at <span id="drillWhere"></span>.</span>
+          <button id="drillBannerResolve" class="sm">End drill</button>
         </div>
 
         <!-- Guided setup: shown on setup pages until every step is done or skipped. -->
@@ -177,14 +178,17 @@
                 <a class="menu-card" href="#sim">
                   <span class="mc-icon">⁘</span>
                   <b>Simulate a crowd</b>
-                  <span>Steer a virtual crowd into a crush and watch Pulse react.</span>
+                  <span>Steer a virtual crowd into a crush and watch Pulse react. Saved runs play here too.</span>
                 </a>
-                <a class="menu-card" href="#recordings">
-                  <span class="mc-icon">▶</span>
-                  <b>Replays &amp; drills</b>
-                  <span>Rehearse with saved runs and test the alert chain.</span>
+                <a class="menu-card" href="#drill">
+                  <span class="mc-icon">◔</span>
+                  <b>Alert drill</b>
+                  <span>Send a test alert through briefing, voice, signs and lights.</span>
                 </a>
               </div>
+              <p class="home-foot">
+                <button id="startOver" class="sm ghost" data-tip="Start the setup checklist again, or clear this event's venue, areas and timeline">Start over…</button>
+              </p>
             </div>
           </section>
 
@@ -263,6 +267,15 @@
                   </div>
                   <ol id="log"></ol>
                   <p id="logEmpty" class="muted small">No incidents for this event yet.</p>
+                </div>
+
+                <div class="card ask-card">
+                  <div class="card-head"><h3>Ask the AI</h3><span class="meta">about the last 10 minutes</span></div>
+                  <form id="askForm" class="row">
+                    <input id="askInput" placeholder="What happened in the last 10 minutes?" maxlength="300" />
+                    <button type="submit">Ask</button>
+                  </form>
+                  <p id="askAnswer" class="answer" hidden></p>
                 </div>
 
                 <details class="card demo-card" id="demoCard">
@@ -405,7 +418,7 @@
               <div class="map-slot"></div>
               <aside class="rail">
                 <div class="card">
-                  <div class="card-head"><h3>Virtual crowd</h3><button id="simBtn" class="sm ghost" hidden>Simulate</button></div>
+                  <div class="card-head"><h3>Virtual crowd</h3><span id="simClock" class="meta"></span></div>
                   <div id="simOpts" class="sim-opts">
                     <p class="muted small">A virtual crowd to rehearse with. Some people carry a phone running Pulse; Pulse only sees those phones, just like on the night.</p>
                     <details class="explainer how-sim">
@@ -443,62 +456,128 @@
                     </div>
                   </div>
                 </div>
+                <div class="card sim-alerts" id="simAlerts">
+                  <div class="card-head">
+                    <h3>What Pulse raised</h3>
+                    <span id="simAlertsTag" class="src-tag sim">SIMULATION</span>
+                  </div>
+                  <div id="simStatus" class="status calm sim-status" role="status"><span class="status-dot"></span><span id="simStatusText">Not running</span></div>
+                  <div id="simAlertCards" class="alert-cards"></div>
+                  <p id="simAlertsEmpty" class="muted small">Start a simulation or play a saved run: the alerts Pulse raises from it appear here, exactly as they would on Live. They are marked as simulated and disappear when it stops.</p>
+                  <div id="simBriefBox" class="sim-brief" hidden>
+                    <p id="simBrief" class="brief"></p>
+                    <button id="simBriefPlay" class="sm ghost">▶ Play voice</button>
+                  </div>
+                </div>
                 <div class="card">
                   <div class="card-head"><h3>Ground truth vs Pulse</h3></div>
                   <div id="simTruth" class="sim-truth"><p class="muted small">Start a simulation to compare what really happens in the crowd with what Pulse detects.</p></div>
                 </div>
+                <details class="card saved-runs" id="savedRuns">
+                  <summary><h3>Saved runs</h3><span class="meta" id="savedRunsMeta">replay or record</span></summary>
+                  <p class="muted small">A saved run is a recording of phones' readings. Playing one feeds it through the same detector as live phones: a rehearsal, and a fallback for the demo if phones can't connect.</p>
+                  <div class="row">
+                    <select id="recSelect" title="Saved run to play" aria-label="Saved run to play"></select>
+                    <select id="speedSelect" title="Playback speed" aria-label="Playback speed">
+                      <option value="1">1×</option>
+                      <option value="2">2×</option>
+                      <option value="4">4×</option>
+                    </select>
+                  </div>
+                  <p id="recInfo" class="rec-info small"></p>
+                  <div class="row">
+                    <button id="replayPlayBtn" class="primary">▶ Play</button>
+                    <button id="replayStopBtn" class="ghost" hidden>■ Stop, back to live</button>
+                  </div>
+                  <div class="ops-block">
+                    <h4>Record a run</h4>
+                    <p class="muted small">Saves what the phones on screen send (live or simulated) under a label, so it can be played back or used to tune the detector.</p>
+                    <div class="row">
+                      <input id="recLabel" placeholder="Label, e.g. push-at-barrier" maxlength="40" aria-label="Label for the recording" />
+                      <button id="recBtn">● Start recording</button>
+                    </div>
+                  </div>
+                </details>
               </aside>
             </div>
           </section>
 
-          <!-- ---------------------------------------------------------- recordings -->
-          <section class="page" data-page="recordings">
-            <div class="split">
-              <div class="map-slot"></div>
-              <aside class="rail">
-                <div class="card ops">
-                  <div class="card-head"><h3>Data source</h3></div>
-                  <div class="seg" role="radiogroup" aria-label="Data source">
-                    <button id="liveBtn" class="on" role="radio"><b>Live</b><span>Phones in the crowd right now</span></button>
-                    <button id="replayBtn" role="radio"><b>Replay</b><span>Play back a saved run</span></button>
+          <!-- ---------------------------------------------------------- alert drill -->
+          <section class="page" data-page="drill">
+            <div class="drill-page">
+              <div class="card drill-form" id="drillForm">
+                <div class="card-head">
+                  <div>
+                    <h2>Send a drill</h2>
+                    <p class="sub">A drill is a test alert you send on purpose, to check that the briefing, the voice, the signs and the lights all work before doors open.</p>
                   </div>
-                  <div id="replayOpts" class="replay-opts" hidden>
-                    <p class="muted small">A replay feeds a saved recording through the same detector, as if it were happening now. Use it to rehearse, or as a backup if phones can't connect.</p>
-                    <div class="row">
-                      <select id="recSelect" title="Recording to replay"></select>
-                      <select id="speedSelect" title="Replay speed">
-                        <option value="1">1×</option>
-                        <option value="2">2×</option>
-                        <option value="4">4×</option>
-                      </select>
-                      <button id="replayPlayBtn" class="primary">▶ Play</button>
+                </div>
+
+                <div class="df-row">
+                  <label class="df-label" for="drillZone">Where</label>
+                  <div class="df-field">
+                    <select id="drillZone" aria-describedby="drillZoneHint"></select>
+                    <p id="drillZoneHint" class="muted small">The area or zone the drill is about. Its own alert message and zone light are used.</p>
+                  </div>
+                </div>
+
+                <div class="df-row">
+                  <span class="df-label" id="drillLevelLabel">Level</span>
+                  <div class="df-field">
+                    <div class="seg2 drill-seg" id="drillLevel" role="radiogroup" aria-labelledby="drillLevelLabel">
+                      <button type="button" role="radio" data-level="yellow">Warning (yellow)</button>
+                      <button type="button" role="radio" data-level="red" class="on">Danger (red)</button>
                     </div>
                   </div>
-                  <div class="ops-block">
-                    <h4>Record</h4>
-                    <p class="muted small">Save the live feed so it can be replayed or used to tune the detector.</p>
-                    <div class="row">
-                      <input id="recLabel" placeholder="Label, e.g. push-at-barrier" maxlength="40" />
-                      <button id="recBtn">● Start recording</button>
+                </div>
+
+                <div class="df-row">
+                  <span class="df-label" id="drillKindLabel">Kind of incident</span>
+                  <div class="df-field">
+                    <div class="seg2 drill-seg" id="drillKind" role="radiogroup" aria-labelledby="drillKindLabel">
+                      <button type="button" role="radio" data-kind="wave" class="on" data-tip="A push travelling through the crowd, person to person">Crowd push</button>
+                      <button type="button" role="radio" data-kind="density" data-tip="People packed too tightly in one spot">Crowding</button>
+                      <button type="button" role="radio" data-kind="rule" data-tip="More people in the area than its limit">Over capacity</button>
                     </div>
+                    <p class="muted small">Sets the wording of the briefing, so staff hear what they would hear in that kind of incident.</p>
                   </div>
-                  <div class="ops-block">
-                    <h4>Drill</h4>
-                    <p class="muted small">Fire the whole alert chain (briefing, voice, signs and lights) without a real incident. It shows as DRILL everywhere.</p>
-                    <div class="row">
-                      <button id="testBtn" class="warn">Run test alert</button>
-                      <span id="ctlMsg" class="muted small"></span>
-                    </div>
-                    <div id="drillResult" class="drill-result" hidden aria-live="polite"></div>
+                </div>
+
+                <div class="df-row">
+                  <span class="df-label">What to test</span>
+                  <div class="df-field">
+                    <ul id="drillOutputs" class="drill-outputs"></ul>
+                    <p id="drillOutputsHint" class="muted small"></p>
                   </div>
-                  <div class="ops-block">
-                    <h4>Ask the AI</h4>
-                    <form id="askForm" class="row">
-                      <input id="askInput" placeholder="What happened in the last 10 minutes?" maxlength="300" />
-                      <button type="submit">Ask</button>
-                    </form>
-                    <p id="askAnswer" class="answer" hidden></p>
+                </div>
+
+                <div class="df-send">
+                  <button id="drillSend" class="primary big">Send drill</button>
+                  <span id="drillSendNote" class="muted small" aria-live="polite"></span>
+                </div>
+
+                <div class="drill-safety" role="note">
+                  <b>What a drill does and does not do</b>
+                  <ul>
+                    <li>It is marked <b>DRILL</b> on every console: the alert card, the timeline and a banner across the top. The spoken briefing starts with “This is a drill”.</li>
+                    <li>It never escalates, and the AI leaves it out when asked what happened.</li>
+                    <li>Attendees’ phones are not affected: their screens only follow the real detector.</li>
+                    <li>Signs and zone lights you include show the level for 8 seconds, then go back to the real state. The boards cannot show the word “drill”, so tell anyone who can see them.</li>
+                  </ul>
+                </div>
+              </div>
+
+              <aside class="drill-side">
+                <div class="card" id="drillResultCard">
+                  <div class="card-head"><h3>Result</h3><span id="drillResultMeta" class="meta"></span></div>
+                  <div id="drillResult" class="drill-result2" aria-live="polite">
+                    <p class="muted small">Nothing sent yet. After you send a drill, each output reports here what it did.</p>
                   </div>
+                </div>
+                <div class="card">
+                  <div class="card-head"><h3>Recent drills</h3><span class="meta">since the server started</span></div>
+                  <ol id="drillHistory" class="drill-history"></ol>
+                  <p id="drillHistoryEmpty" class="muted small">No drills yet.</p>
                 </div>
               </aside>
             </div>
@@ -551,16 +630,17 @@
         <div class="card-head">
           <div>
             <h2 id="mapTitle">Live crowd map</h2>
-            <p id="mapSub" class="sub">Each dot is an attendee's phone at its real spot. Lines join phones close enough to compare readings; shaded circles are crowds packing together.</p>
+            <p id="mapSub" class="sub">Each dot is an attendee's phone at its real spot, coloured by how packed in that person is; the ring shows its motion. Lines join phones close enough to compare readings.</p>
           </div>
           <div id="legend">
             <span id="locating" class="locating" hidden data-tip="Connected, but with no position yet (waiting for a usable GPS fix, or for a tap on the phone's map). Not counted anywhere until placed."></span>
             <span id="meshCount" class="mesh-count" hidden data-tip="Phones that sent a reading in the last 2 seconds, and how many of those reach the server through another phone instead of their own connection."></span>
             <label id="meshLayerWrap" class="mesh-layer" hidden data-tip="Direct phone-to-phone links (WebRTC). Packets travel along a link while one phone's data is being relayed through another."><input id="meshLayer" type="checkbox" checked /><i class="lg mesh-lg"></i>Mesh</label>
-            <span><i class="lg ok"></i>Calm</span>
-            <span><i class="lg swaying"></i>Swaying</span>
-            <span><i class="lg wave"></i>In a push</span>
-            <span><i class="lg handling"></i>In hand</span>
+            <span class="lg-crush" data-tip="A dot's fill is how packed in that person is: pale = standing free, amber = getting tight (2 people per m² and up), red = dangerously packed (4 per m² and up), deep red = crushed. It does not depend on movement: a crowd that has stopped moving is the most dangerous."><i class="ramp"></i>Free → tight → crushed</span>
+            <span data-tip="The ring round a dot is the phone's motion. Green: streaming, standing still (only shown while it is not packed in)."><i class="lg ring ok"></i>Still</span>
+            <span data-tip="Yellow ring: sustained side-to-side sway"><i class="lg ring swaying"></i>Swaying</span>
+            <span data-tip="Red pulsing ring: moving with a push travelling person to person"><i class="lg ring wave"></i>In a push</span>
+            <span data-tip="Blue ring: the phone is being handled, its readings are ignored"><i class="lg ring handling"></i>In hand</span>
             <span><i class="lg stale"></i>Offline</span>
           </div>
         </div>
@@ -621,6 +701,10 @@
               <div class="d-chart"><div class="dc-head"><span>Up / down</span><b id="vY">–</b></div><canvas id="chY"></canvas></div>
               <div class="d-chart"><div class="dc-head"><span>Rotation</span><b id="vR">–</b></div><canvas id="chR"></canvas></div>
             </div>
+
+            <h4>Packed in</h4>
+            <div class="meter crush-meter"><div id="dCrushBar" class="meter-fill"></div><div class="meter-th" style="left: 35%"></div><div class="meter-th" style="left: 70%"></div></div>
+            <div class="meter-cap"><span id="dCrush">–</span><span>tight from 2 · danger from 4 people per m²</span></div>
 
             <h4>Sway vs alert threshold</h4>
             <div class="meter"><div id="dSwayBar" class="meter-fill"></div><div class="meter-th" style="left: 25%"></div></div>
@@ -689,6 +773,38 @@
           </div>
         </div>
       </div>
+    </div>
+
+    <!-- Home → Start over: reset the setup checklist, or also clear this event's data. -->
+    <div id="resetDlg" class="modal-back" hidden role="dialog" aria-modal="true" aria-labelledby="resetTitle">
+      <form class="modal-card" id="resetForm">
+        <h2 id="resetTitle">Start over</h2>
+        <label class="reset-opt">
+          <input type="radio" name="resetWhat" value="checklist" checked />
+          <span>
+            <b>Reset the setup checklist only</b>
+            <small>The guided setup starts again from step 1 on this console. Your venue, watch areas and hardware stay exactly as they are, so steps that are still true (areas drawn, boards online) show as done again straight away.</small>
+          </span>
+        </label>
+        <label class="reset-opt danger">
+          <input type="radio" name="resetWhat" value="data" />
+          <span>
+            <b>Also clear this event’s data</b>
+            <small>For a new event in a different place. This removes, for everyone using this server:</small>
+            <ul id="resetList"></ul>
+            <small>It does not touch saved runs, connected signs and lights, or the server’s settings.</small>
+          </span>
+        </label>
+        <label id="resetConfirmRow" class="reset-confirm" hidden>
+          Type <b>CLEAR</b> to confirm
+          <input id="resetConfirm" autocomplete="off" spellcheck="false" maxlength="10" />
+        </label>
+        <p id="resetMsg" class="small off-text" aria-live="polite"></p>
+        <div class="row modal-actions">
+          <button type="button" id="resetCancel" class="ghost">Cancel</button>
+          <button type="submit" id="resetGo" class="primary">Reset checklist</button>
+        </div>
+      </form>
     </div>
 
     <div id="toasts"></div>

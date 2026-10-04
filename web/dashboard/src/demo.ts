@@ -113,6 +113,18 @@ export function initDemo(ctx: DemoCtx) {
   $('surgeStop').addEventListener('click', () => void ctx.goLive());
 
   return {
+    /** Fetch the demo spot again (after something else changed it). */
+    reload() {
+      void (async () => {
+        try {
+          const r = await fetch('/api/demo');
+          if (r.ok) spot = (await r.json()) as DemoSpot;
+        } catch {
+          /* keep what we have */
+        }
+        render();
+      })();
+    },
     /** Called on every snapshot. */
     onMode(mode: string) {
       $('surgeStop').hidden = mode !== 'sim';

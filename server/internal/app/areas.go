@@ -50,7 +50,7 @@ func (a *App) SetAreas(areas []protocol.Area) ([]protocol.Area, error) {
 	a.areas = clean
 	a.applyZones(a.live)
 	if a.replay != nil {
-		a.applyZones(a.replay.p)
+		a.applyReplayZones(a.replay)
 	}
 	log.Printf("areas: %d custom area(s)", len(clean))
 	return cloneAreas(clean), nil
