@@ -51,7 +51,36 @@ This is the most important step: almost every number in the pitch comes from the
 - **Sound:** record the voice-over separately in a quiet room and lay it over. Keep the dashboard's spoken briefing audible in shot 5 and 8: it's part of the demo.
 - **People:** two friends plus you. They agree to be filmed. Phones held in front of the chest.
 
-## The 3-minute video script
+## Screen-share only (recommended if time is short)
+
+One continuous screen recording of the dashboard while you talk, about 2:30. No table footage, no slides, no editing beyond trimming. Everything happens in the simulator plus your own two phones, so nobody else is needed.
+
+**Before you hit record**
+- Server and tunnel running; dashboard full screen (⛶), light theme, browser zoom 110 %. Escalation off, spoken alerts on.
+- Your Android joined (as #1) and a second phone if you have one (#2). Mirror the Android onto the Mac with **scrcpy** (`brew install scrcpy`, USB debugging on) and put its window at the right edge of the screen: that's how the viewer sees a real phone turn red without a camera.
+- Simulation page: scenario **Concert**, 250 people, not started yet.
+- Record with ⇧⌘5 → Record Entire Screen, with your microphone on.
+
+| Time | On screen (your clicks) | Say |
+|---|---|---|
+| 0:00 | Live page, empty map, QR visible | "In October 2022, 159 people died in a crowd crush in Itaewon, in Seoul. Nobody inside the crowd could see it building. This is Pulse: early warning for crowd crushes, using the phones already in the crowd." |
+| 0:15 | Point the cursor at the QR, then at your phone's dot (and the mirrored phone window) | "Attendees scan one code. No app. Each phone becomes a dot on the steward's map and streams ten motion readings a second." |
+| 0:30 | **Simulation** → **Start simulation** → **Dance** | "To show a crowd, here are 250 simulated people, 60 percent with the app. They're dancing: everyone moving at the same moment. No alarm." |
+| 0:45 | **To the stage**, then **Surge** | "A crush is different: people pack in, and a push travels from person to person. Pulse compares each phone with its neighbours and watches how tightly they're packed." |
+| 1:00 | Wait as the front turns amber then red; the alert card and status go red; the briefing plays | "It goes red where the crush is, not everywhere. The steward hears one sentence and one action." *(let the voice play)* |
+| 1:20 | Point at the "Ground truth vs Pulse" panel | "The simulator knows the true pressure on every body. Pulse only sees the phones, and here it warned before the crowd became dangerous." |
+| 1:35 | Click the alert card's **Why did it fire?** | "Every alert shows its evidence. The math decides. Gemini only writes the sentence; if it's down, a template does." |
+| 1:50 | **Stop**, then **Surge around the real phones**; point at the mirrored phone as it turns red with an arrow | "And here's a real phone, mine, placed inside the simulated crush. It turns red and points me out: sideways, never against the push." |
+| 2:10 | Back to Live, or the Hardware page showing the sign and lights | "It drives a warning sign and zone lights, reads floor plans, and runs on one Go server that handled a thousand phones in testing." |
+| 2:20 | Live page | "The honest limit: these results are from the simulator, and phone GPS is metres off indoors. Next is real crowds, with consent. Pulse is for venue safety teams and ticketing platforms, through the ticket app people already have." |
+| 2:35 | Stop recording | |
+
+Notes:
+- Do a dry run first: the surge takes some seconds to go red. If it's slow, keep talking over the amber stage rather than cutting.
+- If scrcpy isn't set up, skip the phone window and say "on the attendee's phone, the same red screen and arrow"; the 1:50 step still shows the dots turning red on the map.
+- Two phones can't show a real push going red (that needs three), which is why the screen-only version leans on the simulation. Say "simulated" out loud whenever the crowd is simulated.
+
+## The full 3-minute video script (with table footage)
 
 About 400 spoken words. Read at a calm pace; the shots carry the rest. Times are targets.
 
