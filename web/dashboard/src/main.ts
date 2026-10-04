@@ -4,6 +4,8 @@ import type { Alert, AlertRules, Cluster, Config, EdgeExplain, EvalReport, Floor
 import { wsURL } from '../../shared/protocol';
 import { animate } from 'motion';
 import { Areas, inPoly, type Tool } from './areas';
+import { initDemo } from './demo';
+import { initMeshNet } from './meshnet';
 import { Mesh } from './mesh';
 import { Setup } from './setup';
 
@@ -416,9 +418,10 @@ function renderTooltip() {
     return;
   }
   tip.innerHTML =
-    `<div class="tt-head"><b>${esc(n.id.slice(0, 8))}</b><span class="st ${n.status}">${statusText[n.status]}</span></div>` +
-    `<div class="tt-ua">${esc(deviceName(n.ua))} · ${where(n)}</div>` +
-    `<div class="tt-foot">Click for live telemetry</div>`;
+    `<div class="tt-head">${n.name ? whoHTML(n.id) : `<b>${esc(n.id.slice(0, 8))}</b>`}<span class="st ${n.status}">${statusText[n.status]}</span></div>` +
+    `<div class="tt-ua">${esc(deviceName(n.ua))} · ${where(n)}${n.real ? ' · real phone in the simulated crowd' : ''}</div>` +
+    (meshNet.tip(n.id) ? `<div class="tt-ua tt-mesh">${esc(meshNet.tip(n.id))}</div>` : '') +
+    `<div class="tt-foot">${n.name && lastMode !== 'replay' ? 'Click for live telemetry · drag to move' : 'Click for live telemetry'}</div>`;
   tip.hidden = false;
   const w = $('mesh').clientWidth;
   tip.style.left = `${Math.min(p.x + 22, w - 230)}px`;
@@ -434,10 +437,22 @@ const statusText: Record<Node['status'], string> = {
   stale: 'Offline',
 };
 
+/** What staff call a phone: its generated name ("Blue Otter"), else the start of its random id. */
+function who(id: string): string {
+  return nodesById.get(id)?.name ?? id.slice(0, 6);
+}
+
+/** The name with a dot in the phone's colour. */
+function whoHTML(id: string): string {
+  const n = nodesById.get(id);
+  const c = n?.color && /^#[0-9a-f]{3,8}$/i.test(n.color) ? n.color : '';
+  return `<b class="who"${c ? ` style="--c:${c}"` : ''}>${c ? '<i></i>' : ''}${esc(who(id))}</b>`;
+}
+
 /** How the phone's position is known. */
 function where(n: Node) {
   if (n.outside) return 'outside the venue';
-  return n.src === 'gps' || (n.acc ?? 0) > 0 ? `GPS ±${Math.round(n.acc ?? 0)} m` : 'placed on map';
+  return n.src === 'gps' || (n.acc ?? 0) > 0 ? `GPS ±${Math.round(n.acc ?? 0)} m` : n.src === 'tower' ? 'checked in at a tower' : n.src === 'beacon' ? 'Bluetooth beacons' : 'placed on map';
 }
 
 /** Zone ids → names, from the latest snapshot (custom areas have random ids). */
@@ -493,6 +508,8 @@ async function refreshDrawer() {
   if (drawerId !== id) return;
   const color = getComputedStyle(document.documentElement).getPropertyValue(`--${n?.status ?? 'stale'}`).trim();
   $('dAvatar').style.background = color;
+  $('dAvatar').style.boxShadow = n?.color ? `0 0 0 3px ${n.color}` : '';
+  $('dName').textContent = n?.name ?? 'Attendee';
   $('dId').textContent = id.slice(0, 8);
   $('dDevice').textContent = deviceName(d?.ua ?? n?.ua);
   const st = $('dStatus');
@@ -512,6 +529,7 @@ async function refreshDrawer() {
   $('dOffset').textContent = n ? `${n.offset >= 0 ? '+' : ''}${n.offset} ms` : '–';
   $('dAge').textContent = n ? `${(n.age / 1000).toFixed(1)} s ago` : '–';
   $('dNeigh').textContent = String(mesh.neighbourCount(id));
+  meshNet.renderDrawer();
   const s = d?.samples ?? [];
   chart('chX', s.map((p) => p.ax), color, 'vX', 'm/s²');
   chart('chZ', s.map((p) => p.az), color, 'vZ', 'm/s²');
@@ -916,6 +934,13 @@ function playBrief(a: Alert, force = false) {
 // ---------------------------------------------------------------------------
 
 function onSnapshot(s: Snapshot) {
+  // Phones with no position yet (a GPS phone before its first usable fix) are connected but nowhere:
+  // they stay off the map and out of every pair and area, and are counted as "locating".
+  const locating = s.nodes.filter((n) => n.unplaced && n.status !== 'stale').length;
+  if (locating || s.nodes.some((n) => n.unplaced)) s = { ...s, nodes: s.nodes.filter((n) => !n.unplaced) };
+  const loc = $('locating');
+  loc.hidden = locating === 0;
+  if (locating) loc.textContent = `${locating} ${locating === 1 ? 'phone' : 'phones'} locating…`;
   snap = s;
   nodesById.clear();
   for (const n of s.nodes) nodesById.set(n.id, n);
@@ -933,6 +958,7 @@ function onSnapshot(s: Snapshot) {
   const clusters = s.clusters ?? [];
   mesh.update(s.nodes, s.waves, s.links ?? [], clusters, s.venue ?? { w: 24, h: 16 });
   areas.sync(s.zones, s.nodes);
+  meshNet.onSnapshot(s.mesh, s.nodes);
   // People each phone stands for (for the "Max people" hint).
   const ppl = clusters.reduce((n, c) => n + (c.people ?? 0), 0);
   const cnt = clusters.reduce((n, c) => n + (c.people != null ? c.count : 0), 0);
@@ -991,6 +1017,7 @@ function onSnapshot(s: Snapshot) {
   recBtn.textContent = s.recording ? `■ Stop and save "${s.recording}"` : '● Start recording';
   recBtn.classList.toggle('on', !!s.recording);
   if (drawerId && !nodesById.has(drawerId)) openDrawer(null);
+  demo.onMode(mode);
 
   updateQR();
   // Setup's last step: a real phone joined (simulated and replayed ones don't count).
@@ -1274,19 +1301,44 @@ $('fsBtn').addEventListener('click', () => {
 // "shown" = the modal from the top-bar button (any page); "auto" = inside the
 // Live map while nobody has joined; "hidden" = dismissed.
 let qrMode: 'auto' | 'shown' | 'hidden' = 'auto';
+/** The tower whose check-in code the modal shows; null = the ordinary join code. */
+let qrTower: Hardware | null = null;
+let joinUrl = '';
+const qrDefault = { title: $('qrTitle').textContent ?? '', caption: document.querySelector('#qr .qr-caption')!.textContent ?? '' };
 let onLivePage = false;
 onPage((p) => {
   onLivePage = p === 'live';
   updateQR();
 });
 $('qrBtn').addEventListener('click', () => {
-  qrMode = qrMode === 'shown' ? 'hidden' : 'shown';
+  qrMode = qrMode === 'shown' && !qrTower ? 'hidden' : 'shown';
+  qrTower = null;
   updateQR();
 });
 const closeQR = () => {
   qrMode = 'hidden';
   updateQR();
 };
+
+// A tower's check-in code reuses the join modal: same link with ?at=<key>.
+
+function renderQRContent() {
+  const key = qrTower?.key;
+  const img = $('qrImg') as HTMLImageElement;
+  const src = key ? `/api/qr.png?at=${encodeURIComponent(key)}` : '/api/qr.png';
+  if (!img.src.endsWith(src)) img.src = src;
+  $('qrTitle').textContent = qrTower ? `Check in at ${qrTower.name === 'This laptop' ? 'the control laptop' : qrTower.name}` : qrDefault.title;
+  document.querySelector('#qr .qr-caption')!.textContent = qrTower
+    ? 'Standing right here? Scan to join: Pulse puts you at this spot on the crowd map, no GPS or tapping needed.'
+    : qrDefault.caption;
+  $('qrUrl').textContent = key && joinUrl ? `${joinUrl}?at=${encodeURIComponent(key)}` : joinUrl;
+}
+
+function openTowerQR(h: Hardware) {
+  qrTower = h;
+  qrMode = 'shown';
+  updateQR();
+}
 $('qrClose').addEventListener('click', closeQR);
 // Click on the backdrop (not the card) closes; Esc closes.
 $('qr').addEventListener('click', (e) => e.target === $('qr') && closeQR());
@@ -1306,7 +1358,7 @@ $('qrPrint').addEventListener('click', () => {
   const img = ($('qrImg') as HTMLImageElement).src;
   w.document.write(
     `<!doctype html><title>Join Pulse</title><body style="font-family:Inter,system-ui,sans-serif;text-align:center;padding:40px">` +
-      `<h1 style="font-size:44px;margin:0 0 12px">Scan to join</h1>` +
+      `<h1 style="font-size:44px;margin:0 0 12px">${esc($('qrTitle').textContent ?? 'Scan to join')}</h1>` +
       `<img src="${esc(img)}" style="width:420px;image-rendering:pixelated" onload="setTimeout(()=>print(),200)"/>` +
       `<p style="font-size:22px;max-width:520px;margin:16px auto">${esc($('qrUrl').closest('.qr-text')!.querySelector('.qr-caption')!.textContent ?? '')}</p>` +
       `<p style="font-size:16px;color:#555">${esc($('qrUrl').textContent ?? '')}</p></body>`,
@@ -1315,6 +1367,8 @@ $('qrPrint').addEventListener('click', () => {
 });
 
 function updateQR() {
+  if (qrMode !== 'shown') qrTower = null;
+  renderQRContent();
   const auto = qrMode === 'auto' && onLivePage && snap?.mode === 'live' && snap.stats.phones === 0;
   const show = qrMode === 'shown' || auto;
   const qr = $('qr');
@@ -1371,7 +1425,8 @@ async function loadJoinInfo() {
         ? 'lan'
         : 'public';
   }
-  $('qrUrl').textContent = url;
+  joinUrl = url;
+  renderQRContent();
   const warn = $('qrWarn');
   warn.hidden = reach === 'public';
   warn.textContent =
@@ -1557,9 +1612,11 @@ async function loadHardware() {
     return;
   }
   lightKeys = list.filter((h) => h.zone).map((h) => h.zone!);
-  hwList = list;
-  hwOnline = list.filter((h) => h.online).length;
-  hwTotal = list.length;
+  // The laptop is a tower (a check-in point), not a board to keep online.
+  const boards = list.filter((h) => h.kind !== 'laptop');
+  hwList = boards;
+  hwOnline = boards.filter((h) => h.online).length;
+  hwTotal = boards.length;
   hwLoaded = true;
   mesh.setBoards(list);
   areas.onChange();
@@ -1570,9 +1627,9 @@ async function loadHardware() {
     signChip.classList.toggle('warn', hwOnline > 0 && hwOnline < hwTotal);
     signChip.title = !hwTotal ? 'no boards configured' : `${hwOnline} of ${hwTotal} boards online`;
   }
-  $('hwEmpty').hidden = list.length > 0;
-  const on = list.filter((h) => h.online).length;
-  $('hwSummary').textContent = list.length ? `${on} of ${list.length} online` : '';
+  $('hwEmpty').hidden = boards.length > 0;
+  const on = hwOnline;
+  $('hwSummary').textContent = boards.length ? `${on} of ${boards.length} online` : '';
   const heard = list.reduce((n, h) => n + (h.ble?.devices ?? 0), 0);
   const openDetails = new Set([...$('hw').querySelectorAll<HTMLDetailsElement>('details[open]')].map((d) => d.dataset.url));
   $('hw').replaceChildren(
@@ -1581,10 +1638,13 @@ async function loadHardware() {
       li.className = `hw-row ${h.online ? 'on' : 'off'}`;
       const host = h.url.replace(/^https?:\/\//, '');
       const lastAt = h.seenAgo != null ? fmtTime(Date.now() - h.seenAgo * 1000).slice(0, 5) : '';
-      const status = h.online
+      const laptop = h.kind === 'laptop';
+      const status = laptop
+        ? '<span class="muted">This computer</span>'
+        : h.online
         ? `<span class="ok-text">Online</span>${bars(h.rssi)}${h.uptime ? `<span class="muted">on for ${ago2(h.uptime * 1000)}</span>` : ''}`
         : `<span class="off-text">Offline${lastAt ? ` · last answered ${lastAt}` : ' · has not answered yet'}</span>`;
-      const fix = h.online
+      const fix = h.online || laptop
         ? ''
         : `<div class="hw-fix">Check its power and that it’s on the venue Wi-Fi (or plugged in by USB).${lastAt ? ` Last answered ${lastAt}.` : ''}</div>`;
       const details =
@@ -1599,12 +1659,20 @@ async function loadHardware() {
             .map((p) => `<b>${esc(p.name)}</b> ≈${p.dist.toFixed(1)} m${p.mapDist != null ? ` (${p.mapDist.toFixed(1)} m on the map)` : ''}`)
             .join(', ')}</div>`
         : '';
-      const shows = h.zone
+      // Check-in point: a QR code that places whoever scans it next to this tower.
+      const checkin =
+        h.x != null && h.key
+          ? `<div class="hw-checkin"><button class="sm" data-checkin>Check-in QR</button><span class="muted small">Phones that scan it are placed here (${h.x.toFixed(1)} m, ${h.y!.toFixed(1)} m)</span></div>`
+          : `<div class="hw-areas">Drag its marker onto the map to use it as a check-in point for phones</div>`;
+      const shows = laptop
+        ? ''
+        : h.zone
         ? `<div class="hw-areas">${h.areas?.length ? `Shows ${h.areas.map(esc).join(', ')}` : 'No area assigned yet: choose “Zone light ' + esc(h.zone) + '” on a watch area'}</div>`
         : '<div class="hw-areas">Shows the worst alert anywhere</div>';
       li.innerHTML =
         `<span class="hw-dot"></span><div class="hw-main"><div class="hw-top"><b>${esc(h.name)}</b>${lvl}</div>` +
-        `<div class="hw-sub">${status}</div>${fix}${ble}${peers}${shows}${details}</div>`;
+        `<div class="hw-sub">${status}</div>${fix}${ble}${peers}${shows}${checkin}${laptop ? '' : details}</div>`;
+      li.querySelector('[data-checkin]')?.addEventListener('click', () => openTowerQR(h));
       return li;
     }),
   );
@@ -1853,7 +1921,13 @@ function renderAlertCards() {
             `<label>Outcome <span class="muted">(optional)</span><input name="note" maxlength="200" placeholder="e.g. Opened side gate, crowd eased" /></label>` +
             `<label>Your name <span class="muted">(for the log)</span><input name="by" maxlength="40" placeholder="e.g. Maya, safety lead" /></label>` +
             `<div class="ac-btns"><button class="sm ${danger ? 'danger-btn' : 'primary'}" type="submit">${danger ? 'Resolve anyway' : 'Resolve'}</button><button class="sm ghost" type="button" data-cancel>Cancel</button></div></form>`
-          : `<div class="ac-btns">${acked}<button class="sm ghost" data-resolve>Resolve…</button></div>`);
+          : `<div class="ac-btns">${acked}<button class="sm ghost" data-resolve>Resolve…</button>` +
+            `${!a.test && (a.kind ?? 'wave') === 'wave' ? '<button class="ac-why" data-why>Why did it fire?</button>' : ''}</div>`);
+      el.querySelector('[data-why]')?.addEventListener('click', () => {
+        const pair = evidenceFor(a);
+        if (pair) void openExplain(pair);
+        else toast('No two neighbouring phones in that area right now to show the evidence for.', 'info');
+      });
       el.querySelector('[data-ack]')?.addEventListener('click', () => void alertAction(a, 'ack'));
       el.querySelector('[data-resolve]')?.addEventListener('click', () => {
         resolving = { id: a.id!, note: '' };
@@ -2303,6 +2377,26 @@ function closeExplain() {
   $('explain').hidden = true;
 }
 
+/**
+ * The pair of phones that best shows why a push alert fired: the strongest
+ * push travelling right now in (or into) the alert's zone, between real
+ * named phones if there is one; with no push at the moment, a neighbour
+ * pair in that zone (the panel then says which check it fails now).
+ */
+function evidenceFor(a: Alert): [string, string] | null {
+  if (!snap) return null;
+  const zone = (id: string) => nodesById.get(id)?.zone;
+  const named = (p: [string, string]) => (nodesById.get(p[0])?.name ? 1 : 0) + (nodesById.get(p[1])?.name ? 1 : 0);
+  const inZone = (p: [string, string]) => (zone(p[0]) === a.zone ? 1 : 0) + (zone(p[1]) === a.zone ? 1 : 0);
+  const waves = [...snap.waves].sort(
+    (x, y) => inZone([y.from, y.to]) - inZone([x.from, x.to]) || named([y.from, y.to]) - named([x.from, x.to]) || y.corr - x.corr,
+  );
+  if (waves.length && inZone([waves[0].from, waves[0].to]) > 0) return [waves[0].from, waves[0].to];
+  const links = (snap.links ?? []).filter((l) => inZone(l) === 2).sort((x, y) => named(y) - named(x));
+  if (links.length) return links[0];
+  return waves.length ? [waves[0].from, waves[0].to] : null;
+}
+
 async function openExplain(pair: [string, string]) {
   openDrawer(null);
   explainPair = pair;
@@ -2333,15 +2427,15 @@ async function refreshExplain() {
     return;
   }
   if (explainPair !== pair) return;
-  $('exPair').textContent = `${e.from.slice(0, 6)} → ${e.to.slice(0, 6)}`;
-  $('exA').textContent = e.from.slice(0, 6);
-  $('exB').textContent = e.to.slice(0, 6);
+  $('exPair').innerHTML = `${whoHTML(e.from)} → ${whoHTML(e.to)}`;
+  $('exA').textContent = who(e.from);
+  $('exB').textContent = who(e.to);
   const v = $('exVerdict');
   v.className = `st ${e.wave ? 'wave' : 'ok'}`;
   v.textContent = e.wave ? 'Push detected' : 'Not a push';
   const failed = e.checks.filter((c) => !c.pass);
   $('exSummary').textContent = e.wave
-    ? `${e.to.slice(0, 6)} repeats ${e.from.slice(0, 6)}'s motion ${Math.abs(e.lagMs)} ms later (similarity ${e.peak.toFixed(2)}): a push passing from one person to the next.`
+    ? `${who(e.to)} repeats ${who(e.from)}'s motion ${Math.abs(e.lagMs)} ms later (similarity ${e.peak.toFixed(2)}): a push passing from one person to the next.`
     : `Not counted as a push: ${failed.map((c) => c.name.toLowerCase()).join(', ') || 'below the thresholds'}.`;
   $('exWin').textContent = `${((e.a.length * e.stepMs) / 1000).toFixed(0)} s`;
   $('exPeak').textContent = `peak ${e.peak.toFixed(2)} at ${e.lagMs} ms`;
@@ -2480,3 +2574,19 @@ async function loadEval() {
   $('evalTable').hidden = false;
 }
 void loadEval();
+
+// ---------------------------------------------------------------------------
+// the judge demo: demo spot, dragging real phones, surge around the phones
+// ---------------------------------------------------------------------------
+
+const meshNet = initMeshNet({ mesh, toast, nameOf: who, selected: () => drawerId });
+
+const demo = initDemo({
+  mesh,
+  areas,
+  mode: () => lastMode || 'live',
+  toast,
+  pickOnMap: (label, done) => pickOnMap(label, false, (p) => done({ x: p.x, y: p.y })),
+  nameOf: who,
+  goLive,
+});

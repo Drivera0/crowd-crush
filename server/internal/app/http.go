@@ -24,13 +24,15 @@ import (
 func (a *App) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /ws/phone", a.Hub.ServePhone)
 	mux.HandleFunc("GET /ws/dash", a.Hub.ServeDash)
+	a.meshRoutes(mux)   // GET /api/mesh, POST /api/mesh/jam (mesh.go)
+	a.beaconRoutes(mux) // Bluetooth beacon positioning (beacons.go)
 
 	mux.HandleFunc("GET /api/config", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
-		d, geo := a.liveConfig(), a.venue.Geo
+		d, geo, demo := a.liveConfig(), a.venue.Geo, a.demo.On
 		a.mu.Unlock()
 		writeJSON(w, protocol.Config{VenueW: d.VenueW, VenueH: d.VenueH, Geo: geo,
-			Yellow: d.YellowScore, Red: d.RedScore, NeighbourRadius: d.NeighbourRadius})
+			Yellow: d.YellowScore, Red: d.RedScore, NeighbourRadius: d.NeighbourRadius, Demo: demo})
 	})
 	mux.HandleFunc("GET /api/areas", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, a.Areas())
@@ -206,15 +208,7 @@ func (a *App) Routes(mux *http.ServeMux) {
 			httpError(w, errors.New("no such phone"), http.StatusNotFound)
 			return
 		}
-		zone := ""
-		if !m.outside {
-			zone = p.det.ZoneOf(m.x, m.y)
-		}
-		d := protocol.NodeDetail{
-			ID: id, X: r2(m.x), Y: r2(m.y), Acc: m.acc, Src: m.src(), Outside: m.outside, UA: m.ua, Zone: zone,
-			Connected: m.connected, Synced: m.synced, RTT: m.rtt, Offset: m.offset,
-			JoinedAt: m.joinedAt, Messages: m.msgs, Samples: m.samples(),
-		}
+		d := nodeDetail(p, id, m)
 		a.mu.Unlock()
 		writeJSON(w, d)
 	})
@@ -301,7 +295,7 @@ func (a *App) Routes(mux *http.ServeMux) {
 		var req SimStart
 		if r.ContentLength != 0 {
 			if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
-				httpError(w, errors.New("want {people, participation, scenario}"), http.StatusBadRequest)
+				httpError(w, errors.New(`want {people, participation, scenario, realism, imperfections}: realism "ideal", "realistic" or "harsh"; imperfections {gps, carry, dropout} strengths 0–3`), http.StatusBadRequest)
 				return
 			}
 		}
@@ -333,6 +327,75 @@ func (a *App) Routes(mux *http.ServeMux) {
 			return
 		}
 		writeJSON(w, map[string]bool{"ok": true})
+	})
+	// ---- the judge demo (demo.go, hybrid.go) ----
+	mux.HandleFunc("PUT /api/node/{id}/pos", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			X *float64 `json:"x"`
+			Y *float64 `json:"y"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<12)).Decode(&req); err != nil || req.X == nil || req.Y == nil {
+			httpError(w, errors.New("want {x, y} in venue metres"), http.StatusBadRequest)
+			return
+		}
+		d, err := a.MovePhone(r.PathValue("id"), *req.X, *req.Y)
+		switch {
+		case errors.Is(err, ErrNoPhone):
+			httpError(w, err, http.StatusNotFound)
+		case err != nil:
+			httpError(w, err, http.StatusBadRequest)
+		default:
+			writeJSON(w, d)
+		}
+	})
+	mux.HandleFunc("GET /api/demo", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, a.Demo())
+	})
+	mux.HandleFunc("PUT /api/demo", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			protocol.DemoSpot
+			Arrange bool `json:"arrange"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<12)).Decode(&req); err != nil {
+			httpError(w, errDemo, http.StatusBadRequest)
+			return
+		}
+		d, err := a.SetDemo(req.DemoSpot, req.Arrange)
+		if err != nil {
+			httpError(w, err, http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, d)
+	})
+	mux.HandleFunc("GET /api/tower/{key}", func(w http.ResponseWriter, r *http.Request) {
+		t, err := a.Tower(r.PathValue("key"))
+		switch {
+		case errors.Is(err, ErrTowerUnplaced):
+			httpError(w, err, http.StatusConflict)
+		case err != nil:
+			httpError(w, errors.New("no such tower: this check-in code isn't for anything at this venue"), http.StatusNotFound)
+		default:
+			writeJSON(w, t)
+		}
+	})
+	mux.HandleFunc("GET /api/receipt/{id}", func(w http.ResponseWriter, r *http.Request) {
+		rc, err := a.Receipt(r.PathValue("id"))
+		if err != nil {
+			httpError(w, err, http.StatusNotFound)
+			return
+		}
+		writeJSON(w, rc)
+	})
+	mux.HandleFunc("POST /api/sim/surge-phones", func(w http.ResponseWriter, r *http.Request) {
+		res, err := a.SurgePhones()
+		switch {
+		case errors.Is(err, ErrNoPhones):
+			httpError(w, err, http.StatusConflict)
+		case err != nil:
+			httpError(w, err, http.StatusBadRequest)
+		default:
+			writeJSON(w, res)
+		}
 	})
 	mux.HandleFunc("POST /api/test-alert", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"zone": a.TestAlert()})

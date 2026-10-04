@@ -3,6 +3,8 @@
 #   pwsh scripts/flash-sign.ps1            # find the board, compile, upload, read its IP, update .env
 #   pwsh scripts/flash-sign.ps1 -Port COM7 # pick the port yourself
 #   pwsh scripts/flash-sign.ps1 -NoUpload  # just read the IP from a board that is already flashed
+#   pwsh scripts/flash-sign.ps1 -Beacon    # Bluetooth beacon "PULSE-S" instead of Wi-Fi: the sign is then driven over USB only
+#                                          # (set SIGN_URL=serial:auto yourself; .env is not touched)
 #
 # Needs the Arduino IDE 2 (its bundled arduino-cli is used) or arduino-cli on PATH,
 # and arduino/sign/arduino_secrets.h with your Wi-Fi name and password
@@ -11,6 +13,7 @@
 param(
   [string]$Port = '',
   [switch]$NoUpload,
+  [switch]$Beacon,
   [int]$TimeoutSec = 60
 )
 
@@ -57,10 +60,20 @@ if (-not $NoUpload) {
   Copy-Item (Join-Path $sketch 'sign.ino'), $secrets $tmp -Force
   & $cli core install arduino:renesas_uno | Out-Null
   Write-Host 'Compiling and uploading…'
-  & $cli compile --fqbn $fqbn --upload --port $Port $tmp
+  if ($Beacon) {
+    & $cli lib install ArduinoBLE | Out-Null
+    & $cli compile --fqbn $fqbn --build-property 'compiler.cpp.extra_flags=-DSIGN_BEACON=1' --upload --port $Port $tmp
+  } else {
+    & $cli compile --fqbn $fqbn --upload --port $Port $tmp
+  }
   if ($LASTEXITCODE -ne 0) { throw 'Upload failed. Close the Arduino IDE serial monitor if it is open, and try again.' }
   Remove-Item -Recurse -Force (Split-Path $tmp) -ErrorAction SilentlyContinue
   Start-Sleep -Seconds 2 # board resets after upload
+}
+
+if ($Beacon) {
+  Write-Host 'Sign flashed as Bluetooth beacon PULSE-S (no Wi-Fi). Drive it over USB: SIGN_URL=serial:auto, with the server running natively on this machine.'
+  exit 0
 }
 
 # ---- read "Sign ready: SIGN_URL=http://x.x.x.x" from the serial port

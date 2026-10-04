@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Long-press the app icon → "Change server". -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_stat_pulse"
+        android:shortcutId="server"
+        android:shortcutShortLabel="@string/shortcut_server">
+        <intent
+            android:action="dev.pulse.app.SETUP"
+            android:targetClass="dev.pulse.app.MainActivity"
+            android:targetPackage="dev.pulse.app" />
+    </shortcut>
+</shortcuts>

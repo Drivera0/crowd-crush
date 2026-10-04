@@ -18,7 +18,9 @@
         <button id="joinBtn" class="big">Join</button>
         <p class="fine">
           Shares motion numbers and where you are in the venue. GPS is turned into a spot on the venue map and
-          never stored. No name, contacts, audio or photos.
+          never stored. No name, contacts, audio or photos. Phones running Pulse near you pass each other the same
+          numbers (a random handle, a spot on the venue map, motion) so the crowd can still be heard when one
+          phone loses its connection.
         </p>
         <p id="joinErr" class="err" hidden></p>
       </section>
@@ -50,13 +52,17 @@
           <span id="conn">Connecting…</span>
           <span id="where" class="spot"></span>
         </div>
+        <!-- While this phone's state comes from the simulated crowd, say so. -->
+        <p id="drill" class="drill-tag" hidden>Simulated crowd around you — drill</p>
         <div class="centre">
+          <p id="iam" class="iam" hidden>You are <b id="iamName"></b><small>Find your dot on the big screen. Shake the phone to make it ripple.</small></p>
           <div id="icon" class="icon">📱</div>
-          <h2 id="headline">Hold your phone flat against your chest</h2>
-          <p id="sub" class="lead">Screen facing out, top of the phone up.</p>
+          <h2 id="headline">You are part of the network</h2>
+          <p id="sub" class="lead">Keep this page open. Your pocket or your hand is fine, any way up.</p>
         </div>
         <!-- Shown over everything when the server says this person should move. -->
         <div id="guide" class="guide" hidden>
+          <p id="guideDrill" class="drill-tag" hidden>Simulated crowd around you — drill</p>
           <p class="guide-kicker">Crowd danger near you</p>
           <h2 class="guide-title">Move this way</h2>
           <div class="arrow-wrap"><svg id="arrow" class="arrow" viewBox="0 0 100 100" aria-hidden="true"><path d="M50 6 L84 50 H62 V94 H38 V50 H16 Z" /></svg></div>
@@ -66,11 +72,59 @@
           <p class="guide-tip">Move diagonally, not against the push. Keep your arms up in front of your chest.</p>
         </div>
         <div class="bottom">
+          <p id="meshLine" class="fine mesh-line" hidden></p>
           <p id="stats" class="fine"></p>
           <p id="warn" class="err" hidden></p>
           <p id="screenTip" class="fine" hidden></p>
+          <!-- Offered a few seconds after joining: the screen has to stay on, so lock it against pocket taps. -->
+          <p id="pocketHint" class="pocket-hint" hidden>
+            <span>Phone going in a pocket? Pocket mode blacks out the screen and ignores touches.</span>
+            <button id="pocketHintGo" class="small">Pocket mode</button>
+            <button id="pocketHintNo" class="small ghost" aria-label="Dismiss">Not now</button>
+          </p>
+          <button id="pocketBtn" class="pocket-btn" hidden>Pocket mode</button>
+          <p id="pocketHelp" class="fine" hidden></p>
           <button id="moveBtn" class="small">I moved: place me again</button>
+          <button id="leaveBtn" class="small">Leave and see what was collected</button>
+          <label id="lostWrap" class="lost-sig" hidden><input id="lostSig" type="checkbox" /> Simulate lost signal</label>
         </div>
+        <div id="shakeFx" class="shake-fx" hidden><i></i><i></i><i></i><span>That's you on the big screen</span></div>
+      </section>
+
+      <!-- Pocket mode: a black sheet over everything that swallows touches; hold 2 s to unlock. Danger breaks through. -->
+      <div id="pocket" class="pocket" hidden role="dialog" aria-label="Pocket mode">
+        <div class="pocket-danger">
+          <p class="guide-kicker">Crowd danger</p>
+          <h2 id="pocketHead" class="guide-title">Crowd danger near you</h2>
+          <div id="pocketArrowWrap" class="arrow-wrap" hidden><svg id="pocketArrow" class="arrow" viewBox="0 0 100 100" aria-hidden="true"><path d="M50 6 L84 50 H62 V94 H38 V50 H16 Z" /></svg></div>
+          <p id="pocketTo" class="guide-to"></p>
+        </div>
+        <svg class="pocket-ring" viewBox="0 0 100 100" aria-hidden="true"><circle cx="50" cy="50" r="44" /></svg>
+        <p id="pocketLine" class="pocket-line">Pulse is running · hold 2 s to unlock</p>
+      </div>
+
+      <!-- 5. Left: the privacy receipt -->
+      <section id="receipt" class="screen" hidden>
+        <h2>You've left. Here is everything Pulse collected.</h2>
+        <p class="fine">The connection is closed and this page has stopped reading the sensors.</p>
+        <h3>Collected</h3>
+        <dl id="rcCollected" class="rc-list"></dl>
+        <h3>Where it is now</h3>
+        <ul id="rcKept" class="rc-plain"></ul>
+        <h3>Shared with nearby phones running Pulse</h3>
+        <ul class="rc-plain">
+          <li id="rcMesh">A random handle (not your session ID), your spot on the venue map, your area's alert level and your motion numbers went straight to the few phones linked to yours, so they could pass them on to the server and warn each other. No GPS coordinates, no name, nothing else.</li>
+        </ul>
+        <h3>Never collected</h3>
+        <ul class="rc-never">
+          <li>Your name</li>
+          <li>Contacts</li>
+          <li>Audio</li>
+          <li>Photos or video</li>
+          <li>GPS coordinates<small>if GPS is used it becomes metres in the room on arrival; latitude and longitude are never stored</small></li>
+          <li>Where you were before or after</li>
+        </ul>
+        <button id="rejoinBtn" class="big">Join again</button>
       </section>
     </main>
     <script type="module" src="./src/main.ts"></script>

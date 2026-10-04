@@ -19,15 +19,29 @@
 // over USB only (a small "USB" shows while calm) and keeps retrying Wi-Fi in
 // the background.
 //
-// No Bluetooth beacon here: the R4's Wi-Fi and Bluetooth share one radio
-// module and ArduinoBLE can't run alongside WiFiS3, so the sign doesn't show
-// up in the zone lights' "peers"; the dashboard places it from Wi-Fi only.
+// Beacon mode (SIGN_BEACON 1, e.g. scripts/flash-sign.ps1 -Beacon): the sign
+// advertises itself over Bluetooth as "PULSE-S", like the zone lights, so
+// phones and the other boards can use it as a third position anchor. The
+// R4's Wi-Fi and Bluetooth share one radio module and ArduinoBLE can't run
+// alongside WiFiS3, so a beacon sign has no Wi-Fi: it is driven over USB only
+// (SIGN_URL=serial:auto). Needs the ArduinoBLE library.
 //
 // Copy arduino_secrets.h.example to arduino_secrets.h and fill in your Wi-Fi.
 // The IP is printed on the Serial Monitor (115200 baud); set
 // SIGN_URL=http://<that ip> on the server.
 
+#ifndef SIGN_BEACON
+#define SIGN_BEACON 0
+#endif
+#ifndef BEACON_NAME
+#define BEACON_NAME "PULSE-S"
+#endif
+
+#if SIGN_BEACON
+#include <ArduinoBLE.h>
+#else
 #include <WiFiS3.h>
+#endif
 #include "Arduino_LED_Matrix.h"
 #include "arduino_secrets.h"
 
@@ -35,7 +49,9 @@
 const int ALARM_PIN = 7;
 
 ArduinoLEDMatrix matrix;
+#if !SIGN_BEACON
 WiFiServer server(80);
+#endif
 
 enum Level { CALM, YELLOW, RED };
 enum Route { NOT_FOUND, LEVEL, PULSE };
@@ -114,6 +130,25 @@ unsigned long wifiSince = 0;  // start of the current attempt (boot or loss)
 unsigned long lastBegin = 0;
 unsigned long lastPoll = 0;
 
+#if SIGN_BEACON
+bool bleUp = false;
+
+// beginBeacon starts a non-connectable advert carrying only the name.
+void beginBeacon() {
+  if (!BLE.begin()) {
+    Serial.println("ble: failed to start");
+    return;
+  }
+  BLE.setLocalName(BEACON_NAME);
+  BLE.setDeviceName(BEACON_NAME);
+  BLE.setConnectable(false);
+  bleUp = BLE.advertise();
+  Serial.print("ble: advertising as ");
+  Serial.println(bleUp ? BEACON_NAME : "(failed)");
+}
+
+void pollWiFi() {}
+#else
 void beginWiFi() {
   Serial.print("Connecting to ");
   Serial.println(SECRET_SSID);
@@ -145,17 +180,26 @@ void pollWiFi() {
   }
 }
 
-// usbOnly: Wi-Fi has been down for longer than the grace period.
-bool usbOnly() { return !wifiUp && millis() - wifiSince >= WIFI_GRACE_MS; }
+#endif
+
+// usbOnly: Wi-Fi has been down for longer than the grace period (always, in beacon mode).
+bool usbOnly() { return SIGN_BEACON || (!wifiUp && millis() - wifiSince >= WIFI_GRACE_MS); }
 
 void setup() {
   Serial.begin(115200);
   pinMode(ALARM_PIN, OUTPUT);
   matrix.begin();
   matrix.renderBitmap(bang, 8, 12);
+#if SIGN_BEACON
+  beginBeacon();
+#else
+  // The radio module's firmware version (Bluetooth beacon mode needs 0.2.0 or newer).
+  Serial.print("radio firmware ");
+  Serial.println(WiFi.firmwareVersion());
   WiFi.setTimeout(1000);
   wifiSince = millis();
   beginWiFi();
+#endif
 }
 
 const char* levelName() { return level == RED ? "red" : level == YELLOW ? "yellow" : "calm"; }
@@ -190,8 +234,13 @@ void statusJSON(char* body, size_t n) {
   for (int i = 0; zone[i] && j < 7; i++)
     if (zone[i] != '"' && zone[i] != '\\') z[j++] = zone[i];
   z[j] = 0;
+#if SIGN_BEACON
+  snprintf(body, n, "{\"kind\":\"sign\",\"level\":\"%s\",\"zone\":\"%s\",\"rssi\":0,\"uptime\":%lu,\"wifi\":false,\"name\":\"%s\",\"ble\":%s}",
+           levelName(), z, millis() / 1000, BEACON_NAME, bleUp ? "true" : "false");
+#else
   snprintf(body, n, "{\"kind\":\"sign\",\"level\":\"%s\",\"zone\":\"%s\",\"rssi\":%d,\"uptime\":%lu,\"wifi\":%s}",
            levelName(), z, wifiUp ? (int)WiFi.RSSI() : 0, millis() / 1000, wifiUp ? "true" : "false");
+#endif
 }
 
 // Parses "GET /level?v=red&zone=B HTTP/1.1" or "GET /pulse HTTP/1.1".
@@ -239,6 +288,7 @@ void pollSerial() {
   }
 }
 
+#if !SIGN_BEACON
 void serveClient() {
   WiFiClient client = server.available();
   if (!client) return;
@@ -283,6 +333,7 @@ void serveClient() {
   delay(1);
   client.stop();
 }
+#endif
 
 // renderBitmap is a macro that takes the frame's address, so it can't be
 // handed a ?: expression directly; route frames through a named parameter.
@@ -318,8 +369,12 @@ void render() {
 
 void loop() {
   pollSerial();
+#if SIGN_BEACON
+  BLE.poll();
+#else
   pollWiFi();
   if (wifiUp) serveClient();
+#endif
   render();
   delay(10);
 }

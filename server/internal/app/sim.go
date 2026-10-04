@@ -11,6 +11,7 @@ import (
 	"github.com/Drivera0/crowd-crush/server/internal/crowdsim"
 	"github.com/Drivera0/crowd-crush/server/internal/hub"
 	"github.com/Drivera0/crowd-crush/server/internal/protocol"
+	"github.com/Drivera0/crowd-crush/server/internal/store"
 )
 
 // The in-process crowd simulation (package crowdsim) is a third data source
@@ -27,17 +28,54 @@ import (
 const SimTickEvery = 50 * time.Millisecond
 
 // SimStart is POST /api/sim/start.
+//
+// Realism makes the simulated phones as messy as real ones (see
+// crowdsim/realism.go): "ideal" (the default: upright on the chest, exact
+// position, nothing lost), "realistic" (every imperfection at strength 1)
+// or "harsh" (strength 2). Imperfections overrides single strengths
+// (0–3, 0 = off) on top of the preset, e.g. {"realism": "ideal",
+// "imperfections": {"gps": 1}} is GPS error alone.
 type SimStart struct {
-	People        int     `json:"people"`
-	Participation float64 `json:"participation"`
-	Scenario      string  `json:"scenario"`
-	Seed          int64   `json:"seed,omitempty"` // 0 = random
+	People        int               `json:"people"`
+	Participation float64           `json:"participation"`
+	Scenario      string            `json:"scenario"`
+	Seed          int64             `json:"seed,omitempty"` // 0 = random
+	Realism       string            `json:"realism,omitempty"`
+	Imperfections *SimImperfections `json:"imperfections,omitempty"`
+}
+
+// SimImperfections are per-imperfection strengths; nil = the preset's.
+type SimImperfections struct {
+	GPS     *float64 `json:"gps,omitempty"`
+	Carry   *float64 `json:"carry,omitempty"`
+	Dropout *float64 `json:"dropout,omitempty"`
+}
+
+// realism resolves the preset and the overrides.
+func (r SimStart) realism() (crowdsim.Realism, error) {
+	rl, err := crowdsim.RealismPreset(r.Realism)
+	if err != nil {
+		return rl, err
+	}
+	if o := r.Imperfections; o != nil {
+		for _, f := range []struct {
+			v   *float64
+			dst *float64
+		}{{o.GPS, &rl.GPS}, {o.Carry, &rl.Carry}, {o.Dropout, &rl.Dropout}} {
+			if f.v != nil {
+				*f.dst = *f.v
+			}
+		}
+	}
+	return rl, rl.Validate()
 }
 
 type simRun struct {
 	mu   sync.Mutex // guards w; lock order: simRun.mu, then App.mu
 	w    *crowdsim.World
 	busy atomic.Bool
+
+	messy bool // phones with imperfections: messages arrive when they arrive
 
 	// Guarded by App.mu.
 	p       *pipeline
@@ -66,6 +104,10 @@ func (a *App) startSimAt(req SimStart, now int64) error {
 	if req.Seed == 0 {
 		req.Seed = time.Now().UnixNano()
 	}
+	rl, err := req.realism()
+	if err != nil {
+		return err
+	}
 	a.mu.Lock()
 	running := a.sim != nil
 	cfg := a.liveConfig()
@@ -75,14 +117,14 @@ func (a *App) startSimAt(req SimStart, now int64) error {
 		return errSimRunning
 	}
 	w, err := crowdsim.New(crowdsim.Config{W: cfg.VenueW, H: cfg.VenueH, People: req.People,
-		Participation: req.Participation, Scenario: req.Scenario, Seed: req.Seed, StartMs: now, Layout: layout})
+		Participation: req.Participation, Scenario: req.Scenario, Seed: req.Seed, StartMs: now, Layout: layout, Realism: rl})
 	if err != nil {
 		return err
 	}
 	// The operator knows roughly what share of the crowd runs Pulse; the
 	// density alerts need it to turn phones/m² into people/m².
 	cfg.Participation = req.Participation
-	s := &simRun{w: w, p: newPipeline(cfg), startMs: now, alertAt: -1}
+	s := &simRun{w: w, p: newPipeline(cfg), startMs: now, alertAt: -1, messy: !rl.Ideal()}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.sim != nil {
@@ -93,7 +135,8 @@ func (a *App) startSimAt(req SimStart, now int64) error {
 	a.sim = s
 	a.feedSim(s, w.Events(), now)
 	s.frame = protocol.SimFrame{Bodies: w.Bodies(), Action: w.Action}
-	log.Printf("sim: %d people, %d phones (participation %.2f), scenario %s", len(w.Agents()), w.Phones(), req.Participation, req.Scenario)
+	log.Printf("sim: %d people, %d phones (participation %.2f), scenario %s, phones: gps %.1f carry %.1f dropout %.1f",
+		len(w.Agents()), w.Phones(), req.Participation, req.Scenario, rl.GPS, rl.Carry, rl.Dropout)
 	return nil
 }
 
@@ -193,20 +236,59 @@ func (a *App) feedSim(s *simRun, ev []crowdsim.Event, now int64) {
 	for _, e := range ev {
 		switch e.Kind {
 		case crowdsim.EvHello:
+			if e.Auto {
+				// A GPS phone's hello has no position: it stays unplaced
+				// (counting toward nothing) until its first usable fix,
+				// exactly as a live one does (unplaced.go).
+				a.helloUnplacedIn(s.p, now, e.ID, "sim")
+				break
+			}
 			a.helloIn(s.p, now, e.ID, e.X, e.Y, "sim")
 		case crowdsim.EvSync:
 			a.syncIn(s.p, now, e.ID, e.Offset, e.RTT)
 		case crowdsim.EvPos:
 			a.posIn(s.p, now, e.ID, e.X, e.Y)
+		case crowdsim.EvGPS:
+			a.simGPSIn(s.p, now, e.ID, e.X, e.Y, e.Acc)
 		case crowdsim.EvMotion:
-			// recv = when the summary would have arrived: its own time.
-			if _, _, _, ok := a.motionIn(s.p, e.ID, e.M, e.M.T); ok {
+			// recv = when the summary would have arrived: its own time
+			// for an ideal phone; a messy one's arrive late and in clumps.
+			recv := e.M.T
+			if s.messy {
+				recv = now
+			}
+			if _, _, _, ok := a.motionIn(s.p, e.ID, e.M, recv); ok {
 				a.simMsgs++
 			}
 		case crowdsim.EvGone:
 			a.goneIn(s.p, now, e.ID)
 		}
 	}
+}
+
+// simGPSIn is a simulated phone's GPS-like fix, already in venue metres
+// (the sim has no latitude or longitude). From there it is treated exactly
+// as PhoneGPS treats a live fix: dropped when its accuracy is worse than
+// gpsMaxAcc, smoothed by accuracy (geo.Smoother), flagged outside and
+// clamped when it falls off the venue, so the node shows src "gps" and its
+// acc. Caller holds mu.
+func (a *App) simGPSIn(p *pipeline, now int64, id string, x, y, acc float64) {
+	m := p.meta[id]
+	if m == nil {
+		return
+	}
+	cfg := p.cfg()
+	if !(acc > 0 && acc <= cfg.GPSMaxAcc) {
+		return
+	}
+	x, y = m.gps.Add(x, y, acc)
+	m.acc = math.Max(0.1, math.Round(m.gps.Acc*10)/10)
+	m.x, m.y, m.outside = cfg.Place(x, y, m.acc) // as gpsLocked
+	if a.placedLocked(p, now, id, m) {
+		return // its first fix: recorded as its hello
+	}
+	p.place(id, m)
+	a.record(store.Record{K: store.KindPos, T: now, ID: id, X: store.F(r2(m.x)), Y: store.F(r2(m.y)), Acc: m.acc, Out: m.outside})
 }
 
 // simSeconds converts server time to sim time. Caller holds mu.

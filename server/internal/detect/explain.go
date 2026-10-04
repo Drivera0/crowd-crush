@@ -23,7 +23,9 @@ type pairRec struct {
 	a, b         *phone
 	handA, handB bool
 	swayA, swayB float64
+	walkA, walkB bool
 	preChain     bool // passed every per-pair test (before the chain test)
+	motion       bool // found by motion (a position only roughly known)
 }
 
 // Explain says why the latest step did or didn't call the neighbour pair
@@ -61,6 +63,9 @@ func (d *Detector) Explain(from, to string) (protocol.EdgeExplain, bool) {
 		}
 	}
 	lag, corr, second, ok := peaks(cs, ls.maxLag)
+	if ok && pr.motion {
+		second = math.Max(second, resolvedSecond(cs, lag, ls.maxLag))
+	}
 	if ok {
 		out.Peak, out.Second = round3(corr), round3(math.Max(0, second))
 		if e.LagMs == 0 && e.Corr == 0 { // not correlated in Step (gated): report the curve's own peak
@@ -73,6 +78,9 @@ func (d *Detector) Explain(from, to string) (protocol.EdgeExplain, bool) {
 	}
 	add("Both phones moving", pr.swayA >= cfg.EdgeMinSway && pr.swayB >= cfg.EdgeMinSway,
 		"sway %.2f and %.2f m/s², need %.2f", pr.swayA, pr.swayB, cfg.EdgeMinSway)
+	if pr.motion {
+		add("Neighbours by motion", true, "positions known to ±%.0f m and ±%.0f m: compared because they move together, not because of where the map puts them", a.acc, b.acc)
+	}
 	switch {
 	case pr.handA && pr.handB:
 		add("Not handling", false, "both phones are being handled (rotation over %.0f°/s)", cfg.HandlingRot)
@@ -84,6 +92,20 @@ func (d *Detector) Explain(from, to string) (protocol.EdgeExplain, bool) {
 		add("Not handling", false, "%s is being handled (rotation over %.0f°/s)", shortID(id), cfg.HandlingRot)
 	default:
 		add("Not handling", true, "neither phone is being handled")
+	}
+	if a.lev.on || b.lev.on { // only phones that send gravity are checked for walking
+		switch {
+		case pr.walkA && pr.walkB:
+			add("Not walking", false, "both phones bounce and swing to a step rhythm (walking, phone in a pocket)")
+		case pr.walkA || pr.walkB:
+			id := e.From
+			if pr.walkB {
+				id = e.To
+			}
+			add("Not walking", false, "%s bounces and swings to a step rhythm (walking, phone in a pocket)", shortID(id))
+		default:
+			add("Not walking", true, "no step rhythm")
+		}
 	}
 	if !ok {
 		add("Strong correlation", false, "not enough overlapping readings to correlate")
@@ -124,8 +146,12 @@ func chainCheck(cfg *Config, pr pairRec, e Edge) protocol.Check {
 		return protocol.Check{Name: name, Pass: true, Detail: "chain test off"}
 	case !pr.preChain:
 		return protocol.Check{Name: name, Pass: false, Detail: "not a wave edge, so there is no chain to check"}
+	case !e.Wave && pr.motion:
+		return protocol.Check{Name: name, Pass: false, Detail: fmt.Sprintf("isolated: no run of %d phones hit one after the other (the lags don't add up)", cfg.MinChain)}
 	case !e.Wave:
 		return protocol.Check{Name: name, Pass: false, Detail: fmt.Sprintf("isolated: no run of %d phones travelling the same way", cfg.MinChain)}
+	case pr.motion:
+		return protocol.Check{Name: name, Pass: true, Detail: fmt.Sprintf("part of a run of %d or more phones hit one after the other (the lags add up)", cfg.MinChain)}
 	}
 	return protocol.Check{Name: name, Pass: true, Detail: fmt.Sprintf("part of a run of %d or more phones travelling the same way", cfg.MinChain)}
 }

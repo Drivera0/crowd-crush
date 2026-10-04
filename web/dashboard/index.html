@@ -264,6 +264,37 @@
                   <ol id="log"></ol>
                   <p id="logEmpty" class="muted small">No incidents for this event yet.</p>
                 </div>
+
+                <details class="card demo-card" id="demoCard">
+                  <summary><h3>Demo with a few phones</h3><span class="meta">try it at a table</span></summary>
+                  <label class="demo-check">
+                    <input id="demoOn" type="checkbox" />
+                    <span><b>Demo spot</b><small>Phones that join line up in a row 0.6 m apart, in the order they join. No GPS, no tapping.</small></span>
+                  </label>
+                  <p id="demoWhere" class="sim-now"></p>
+                  <div class="row">
+                    <button id="demoPick" class="sm">Pick the spot on the map…</button>
+                    <button id="demoArrange" class="sm" data-tip="Put every connected phone back in the row, in the order they joined">Line up phones now</button>
+                  </div>
+                  <p class="muted small demo-tip">Each phone has a name and colour on its own screen. Drag a named dot to where that person really stands; shake a phone and its dot ripples.</p>
+                  <div class="ops-block">
+                    <h4>Phones inside a simulated crowd</h4>
+                    <p class="muted small">Starts a virtual crowd and packs it around the real phones. Their own screens turn red and point the way out, marked as a drill.</p>
+                    <div class="row">
+                      <button class="primary surge-btn">🌊 Surge around the phones</button>
+                      <button id="surgeStop" class="ghost" hidden>■ Stop simulation</button>
+                    </div>
+                    <p id="demoMsg" class="muted small" aria-live="polite"></p>
+                  </div>
+                  <div class="ops-block">
+                    <h4>Phones relaying for each other</h4>
+                    <p class="muted small">Closes the server connection of half the phones. They keep reporting through the phones next to them, and still get their warnings. Or jam one phone from its details panel.</p>
+                    <div class="row">
+                      <button id="jamHalf" class="sm">Jam half the phones</button>
+                    </div>
+                    <p id="jamMsg" class="muted small" aria-live="polite"></p>
+                  </div>
+                </details>
               </aside>
             </div>
           </section>
@@ -390,6 +421,9 @@
                       <button id="simStart" class="primary">▶ Start simulation</button>
                       <button id="simRestart" class="primary" hidden data-tip="The sliders differ from the running crowd">↻ Restart to apply</button>
                       <button id="simStop" class="ghost" hidden>■ Stop</button>
+                    </div>
+                    <div class="row">
+                      <button class="surge-btn" data-tip="Real phones stand in the virtual crowd. This packs the crowd around them (starts the simulation if needed)">🌊 Surge around the real phones</button>
                     </div>
                     <div id="simControls" class="sim-controls" hidden>
                       <h4>Steer the crowd</h4>
@@ -520,6 +554,9 @@
             <p id="mapSub" class="sub">Each dot is an attendee's phone at its real spot. Lines join phones close enough to compare readings; shaded circles are crowds packing together.</p>
           </div>
           <div id="legend">
+            <span id="locating" class="locating" hidden data-tip="Connected, but with no position yet (waiting for a usable GPS fix, or for a tap on the phone's map). Not counted anywhere until placed."></span>
+            <span id="meshCount" class="mesh-count" hidden data-tip="Phones that sent a reading in the last 2 seconds, and how many of those reach the server through another phone instead of their own connection."></span>
+            <label id="meshLayerWrap" class="mesh-layer" hidden data-tip="Direct phone-to-phone links (WebRTC). Packets travel along a link while one phone's data is being relayed through another."><input id="meshLayer" type="checkbox" checked /><i class="lg mesh-lg"></i>Mesh</label>
             <span><i class="lg ok"></i>Calm</span>
             <span><i class="lg swaying"></i>Swaying</span>
             <span><i class="lg wave"></i>In a push</span>
@@ -569,7 +606,7 @@
             <div class="d-head">
               <span id="dAvatar" class="d-avatar"></span>
               <div>
-                <div class="d-title">Attendee <span id="dId" class="mono"></span></div>
+                <div class="d-title"><span id="dName">Attendee</span> <span id="dId" class="mono"></span></div>
                 <div class="d-sub" id="dDevice">–</div>
               </div>
               <span id="dStatus" class="st"></span>
@@ -600,6 +637,12 @@
               <dt>Clock offset</dt><dd id="dOffset">–</dd>
               <dt>Last reading</dt><dd id="dAge">–</dd>
               <dt>Neighbours</dt><dd id="dNeigh">–</dd>
+              <dt>Mesh</dt><dd id="dMesh">–</dd>
+              <dt>Mesh data</dt><dd id="dMeshData">–</dd>
+              <dt>Mesh position</dt><dd id="dMeshPos">–</dd>
+            </dl>
+            <dl class="d-grid d-jam">
+              <dt>Lost-signal demo</dt><dd><button id="dJam" class="sm" hidden>Jam connection</button></dd>
             </dl>
             <p class="d-privacy">
               <svg viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z" /></svg>

@@ -1,6 +1,13 @@
 import './style.css';
 import type { Config, FromPhone, Hello, Motion, PhoneState, Pong, ToPhone } from '../../shared/protocol';
 import { wsURL } from '../../shared/protocol';
+import { demoShake, demoState, initLeave } from './demo';
+import type { Tower } from '../../shared/demo';
+import type { Clock, Jam, MeshPeers, PosSrc, Relay, Signal } from '../../shared/mesh';
+import { Mesh, type SelfPos } from './mesh';
+import { initPocket, pocketExit, pocketReady, pocketShake, pocketUpdate } from './pocket';
+import { initBeacons } from './beacons';
+import { initNative } from './native';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -84,6 +91,25 @@ let fix: { lat: number; lon: number; acc: number } | null = null;
 let mode: 'gps' | 'manual' = manual ? 'manual' : 'gps';
 let watchId: number | null = null;
 let lastSentFix: { lat: number; lon: number; t: number } | null = null;
+
+// Tower check-in: the join link of a tower's QR code carries ?at=<key>. The
+// phone is then placed next to that tower (and its GPS, if any, calibrated there).
+const atKey = new URLSearchParams(location.search).get('at');
+let tower: Tower | null = null;
+/** Why the check-in didn't work (unknown code, or the tower isn't on the map yet). */
+let towerNote = '';
+
+async function loadTower() {
+  if (!atKey) return;
+  try {
+    const r = await fetch(`/api/tower/${encodeURIComponent(atKey)}`);
+    const j = (await r.json()) as Tower & { error?: string };
+    if (r.ok) tower = j;
+    else towerNote = j.error ? `${j.error[0].toUpperCase()}${j.error.slice(1)}.` : 'That check-in code didn’t work.';
+  } catch {
+    towerNote = 'Couldn’t check in at that spot.';
+  }
+}
 
 async function loadConfig() {
   try {
@@ -230,6 +256,7 @@ $('venue').addEventListener('pointerup', () => (dragging = false));
 $('placeDone').addEventListener('click', () => {
   if (!draft) return;
   manual = draft;
+  placedAt = Date.now();
   save('pulse-spot-m', JSON.stringify(manual));
   mode = 'manual';
   stopGps();
@@ -239,7 +266,15 @@ $('placeDone').addEventListener('click', () => {
 
 function updateWhere() {
   $('where').textContent =
-    mode === 'gps' && fix ? `GPS ±${Math.round(fix.acc)} m` : manual ? 'Placed on map' : '';
+    tower && !manual
+      ? `Placed at ${tower.name}${fix && fix.acc <= GPS_MAX_ACC ? ` · GPS ±${Math.round(fix.acc)} m` : ''}`
+      : mode === 'gps' && fix
+        ? `GPS ±${Math.round(fix.acc)} m`
+        : manual
+          ? 'Placed on map'
+          : cfg.demo
+            ? 'Placed by staff'
+            : '';
 }
 
 // ---- 1. Join: motion permission must be asked inside the tap handler ----
@@ -282,37 +317,78 @@ $('joinBtn').addEventListener('click', async () => {
   startSensors();
   void (orientAsked ?? Promise.resolve('granted')).then((r) => r === 'granted' && startCompass());
   await loadConfig();
-  if (mode === 'manual' && manual) startLive();
+  await loadTower();
+  if (tower) {
+    // Checked in at a tower: placed next to it. With a GPS venue the fixes
+    // follow in the background, corrected by the check-in.
+    manual = null;
+    mode = 'gps';
+    placedAt = Date.now();
+    startLive();
+    $('moveBtn').textContent = 'I moved: place me on the map';
+    if (cfg.geo) void startGps();
+  } else if (towerNote && !manual && !cfg.demo && !cfg.geo) {
+    showPlace(`${towerNote} For now, tap where you’re standing.`);
+  } else if (mode === 'manual' && manual) startLive();
+  else if (cfg.demo) {
+    // Demo spot: the server lines phones up, no GPS and no tap.
+    startLive();
+    $('moveBtn').textContent = 'Place me on the map myself';
+  }
   else await locate();
 });
 
 // ---- motion: summarise every 100 ms ----
 
-let sum = { x: 0, y: 0, z: 0, n: 0, rot: 0 };
+let sum = { x: 0, y: 0, z: 0, n: 0, rot: 0, gx: 0, gy: 0, gz: 0, gn: 0 };
 let gravity: { x: number; y: number; z: number } | null = null;
 let totalSamples = 0;
 let sensorsOn = false;
 
+// Which way is down. The server levels every reading with it, so the phone
+// can sit in a pocket, a bag or a hand at any tilt. What the sensors give is
+// the reaction to gravity, (acceleration including gravity) − (acceleration):
+// it points up on Android (the W3C convention: +9.8 on the axis facing the
+// sky) and down on iPhones, which report every axis with the opposite sign.
+const DOWN_SIGN = isIOS ? 1 : -1;
+const G_RESEND_MS = 1000; // repeat g at least this often (a recording or a reconnect may have missed it)
+const G_RESEND_COS = Math.cos((3 * Math.PI) / 180); // … and whenever it has turned more than 3°
+let sentG: { v: [number, number, number]; t: number } | null = null;
+let sentHd: { v: number; t: number } | null = null;
+
 function onMotion(e: DeviceMotionEvent) {
   let x: number, y: number, z: number;
   const a = e.acceleration;
+  const g = e.accelerationIncludingGravity;
+  const hasG = !!g && g.x != null && g.y != null && g.z != null;
   if (a && a.x != null && a.y != null && a.z != null) {
     x = a.x;
     y = a.y;
     z = a.z;
+    if (hasG) {
+      // Sensor fusion (gyro) already split gravity off: use its split.
+      sum.gx += g!.x! - x;
+      sum.gy += g!.y! - y;
+      sum.gz += g!.z! - z;
+      sum.gn++;
+    }
   } else {
     // No gyro-fused acceleration: subtract a running mean (≈ gravity).
-    const g = e.accelerationIncludingGravity;
-    if (!g || g.x == null || g.y == null || g.z == null) return;
+    if (!hasG) return;
+    const gi = { x: g!.x!, y: g!.y!, z: g!.z! };
     const dt = (e.interval > 1 ? e.interval : e.interval * 1000) || 16; // ms (some browsers report seconds)
     const k = Math.min(1, dt / 1000); // ~1 s time constant
-    if (!gravity) gravity = { x: g.x, y: g.y, z: g.z };
-    gravity.x += k * (g.x - gravity.x);
-    gravity.y += k * (g.y - gravity.y);
-    gravity.z += k * (g.z - gravity.z);
-    x = g.x - gravity.x;
-    y = g.y - gravity.y;
-    z = g.z - gravity.z;
+    if (!gravity) gravity = gi;
+    gravity.x += k * (gi.x - gravity.x);
+    gravity.y += k * (gi.y - gravity.y);
+    gravity.z += k * (gi.z - gravity.z);
+    x = gi.x - gravity.x;
+    y = gi.y - gravity.y;
+    z = gi.z - gravity.z;
+    sum.gx += gravity.x;
+    sum.gy += gravity.y;
+    sum.gz += gravity.z;
+    sum.gn++;
   }
   const r = e.rotationRate;
   const rot = r ? Math.hypot(r.alpha ?? 0, r.beta ?? 0, r.gamma ?? 0) : 0;
@@ -342,7 +418,7 @@ const r3 = (v: number) => Math.round(v * 1000) / 1000;
 
 function flush() {
   if (sum.n === 0) return;
-  const m: Motion = {
+  const m: Motion & { hd?: number } = {
     type: 'm',
     t: Date.now(),
     ax: r3(sum.x / sum.n),
@@ -350,8 +426,40 @@ function flush() {
     az: r3(sum.z / sum.n),
     rot: r3(sum.rot),
   };
-  sum = { x: 0, y: 0, z: 0, n: 0, rot: 0 };
+  const g = downVector();
+  // This phone's own sway trace, for its mesh neighbours (mesh.ts).
+  mesh.addMotion(m.t, [m.ax, m.ay, m.az], g, m.rot);
+  // Compass heading of the phone's top edge, when it has one: only when it
+  // changed by 5° or more, or once a second.
+  if (heading !== null && canSend()) {
+    const hd = ((Math.round(heading) % 360) + 360) % 360;
+    if (!sentHd || Math.abs(((hd - sentHd.v + 540) % 360) - 180) >= 5 || m.t - sentHd.t >= 1000) {
+      m.hd = hd;
+      sentHd = { v: hd, t: m.t };
+    }
+  }
+  // The server keeps a phone's last g, so it only goes out when it changed
+  // (and once a second, and first thing on every connection).
+  if (g && canSend()) {
+    const dot = sentG ? g[0] * sentG.v[0] + g[1] * sentG.v[1] + g[2] * sentG.v[2] : -1;
+    if (!sentG || dot < G_RESEND_COS || m.t - sentG.t >= G_RESEND_MS) {
+      m.g = g;
+      sentG = { v: g, t: m.t };
+    }
+  }
+  sum = { x: 0, y: 0, z: 0, n: 0, rot: 0, gx: 0, gy: 0, gz: 0, gn: 0 };
   send(m);
+}
+
+/** Unit vector pointing down in the phone's own axes over the last 100 ms (2 decimals), or null if the sensors gave no gravity. */
+function downVector(): [number, number, number] | null {
+  if (sum.gn === 0) return null;
+  const n = Math.hypot(sum.gx, sum.gy, sum.gz) / sum.gn;
+  // Gravity is 9.8 m/s²; anything far from that is a broken sensor or free fall.
+  if (!(n > 4 && n < 16)) return null;
+  const k = DOWN_SIGN / (n * sum.gn);
+  const r = (v: number) => Math.round(v * k * 100) / 100 + 0; // + 0: no "-0"
+  return [r(sum.gx), r(sum.gy), r(sum.gz)];
 }
 
 // ---- WebSocket with automatic reconnect ----
@@ -361,9 +469,25 @@ let backoff = 500;
 let reconnectTimer = 0;
 let sent = 0;
 
-function send(msg: FromPhone) {
-  if (ws?.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(msg));
+/** The WebSocket is open and in use (not dropped for the lost-signal demo). */
+function wsUsable(): boolean {
+  return ws?.readyState === WebSocket.OPEN && !mesh.jammed;
+}
+
+/** There is some way to the server: the WebSocket, or a mesh neighbour. */
+function canSend(): boolean {
+  return wsUsable() || mesh.status().links > 0;
+}
+
+/**
+ * Send to the server: on the WebSocket when it works, else through a mesh
+ * neighbour (mesh.ts). Raw GPS never goes through another phone.
+ */
+function send(msg: FromPhone | { type: 'near' | 'mpos' | 'sig' | 'rtc' }) {
+  if (wsUsable()) {
+    ws!.send(JSON.stringify(msg));
+    if (msg.type === 'm') sent++;
+  } else if (msg.type !== 'gps' && mesh.relayUp(msg)) {
     if (msg.type === 'm') sent++;
   }
 }
@@ -372,11 +496,13 @@ function hello(): Hello {
   const h: Hello = { type: 'hello', id, ua: deviceLabel() };
   if (mode === 'gps' && fix) Object.assign(h, { lat: fix.lat, lon: fix.lon, acc: Math.round(fix.acc * 10) / 10 });
   else if (manual) Object.assign(h, { x: manual.x, y: manual.y });
+  if (tower && !manual) h.at = tower.key; // until the person places themselves by hand
   return h;
 }
 
 function connect() {
   clearTimeout(reconnectTimer);
+  if (mesh.jammed || left) return; // off the WebSocket on purpose
   setConn('Connecting…', '');
   const sock = new WebSocket(wsURL('/ws/phone'));
   ws = sock;
@@ -384,27 +510,148 @@ function connect() {
     backoff = 500;
     sock.send(JSON.stringify(hello()));
     lastSentFix = null;
-    setConn('Syncing clock…', 'syncing');
+    sentG = null; // a new connection is a new phone to the server: send g again
+    lastWsRx = Date.now();
+    gotState = false;
+    renderLive();
+    mesh.announce();
   };
   sock.onmessage = (ev) => {
-    const msg = JSON.parse(ev.data as string) as ToPhone;
+    const msg = JSON.parse(ev.data as string) as ServerMsg;
+    lastWsRx = Date.now();
     if (msg.type === 'ping') {
       sock.send(JSON.stringify({ type: 'pong', t0: msg.t0, t1: Date.now() } satisfies Pong));
-    } else if (msg.type === 'state') {
-      setConn('Connected', 'on');
-      applyState(msg.node, msg.zone);
-      applyGuidance(msg);
+    } else {
+      if (msg.type === 'state') gotState = true;
+      onServer(msg);
     }
   };
   sock.onclose = () => {
     if (ws !== sock) return;
     ws = null;
-    setConn('Reconnecting…', '');
-    applyState('connecting', '');
+    renderLive();
     reconnectTimer = window.setTimeout(connect, backoff);
     backoff = Math.min(backoff * 2, 5000);
   };
   sock.onerror = () => sock.close();
+}
+
+type ServerMsg = ToPhone | MeshPeers | Signal | Jam | Clock | Relay;
+
+/** A server → phone message, whether it came on the WebSocket or through a mesh neighbour. */
+function onServer(msg: ServerMsg) {
+  if (msg.type === 'state') {
+    // Staff (or the demo spot) moved this phone: that is an exact placement.
+    if (lastState?.x !== undefined && msg.x !== undefined && mode !== 'gps' && Math.hypot(msg.x - lastState.x, (msg.y ?? 0) - (lastState.y ?? 0)) > 0.3) placedAt = Date.now();
+    lastState = msg;
+    lastStateAt = Date.now();
+    renderLive();
+    applyGuidance(msg);
+    demoState(msg);
+  } else if (msg.type === 'shake') {
+    demoShake();
+    pocketShake();
+  } else if (msg.type === 'clock') {
+    if (Number.isFinite(msg.offset)) clockOffset = msg.offset;
+  } else if (msg.type !== 'ping') {
+    mesh.onServer(msg);
+  }
+}
+
+// ---- the phone-to-phone mesh (mesh.ts) ----
+
+let lastState: PhoneState | null = null;
+let lastStateAt = 0;
+let lastWsRx = 0;
+let gotState = false;
+let clockOffset = 0;
+/** When this phone was last placed exactly (a tap on the map, a tower check-in, the demo spot, staff). */
+let placedAt = Date.now();
+/** An exact placement counts as an anchor for this long; people move. */
+const ANCHOR_S = 120;
+/** Test aid: ?acc=8 makes this phone treat its own position as only good to ±8 m (like a GPS fix), so the mesh correction can be seen without GPS. */
+const fuzzyAcc = Number(new URLSearchParams(location.search).get('acc')) || 0;
+
+/** Where this phone thinks it is before its neighbours correct it, and how sure it is. */
+function selfPos(): SelfPos | null {
+  const st = lastState;
+  const age = (Date.now() - placedAt) / 1000;
+  const exact = (src: PosSrc, x: number, y: number): SelfPos =>
+    fuzzyAcc > 0 ? { x, y, s: fuzzyAcc, src: 'gps', anchored: false } : { x, y, s: 0.5 + 0.01 * age, src, anchored: age < ANCHOR_S };
+  if (manual) return exact('manual', manual.x, manual.y);
+  if (st?.x === undefined || st.y === undefined) return tower ? exact('tower', tower.x, tower.y) : null;
+  if (mode === 'gps' && cfg.geo && fix && fix.acc <= GPS_MAX_ACC) return { x: st.x, y: st.y, s: Math.max(3, fix.acc), src: 'gps', anchored: false };
+  if (tower) return exact('tower', st.x, st.y);
+  if (cfg.demo) return exact('demo', st.x, st.y);
+  return null; // not placed yet
+}
+
+const mesh: Mesh = new Mesh({
+  send,
+  wsUsable,
+  wsSend: (msg) => {
+    if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+  },
+  closeWs: () => {
+    clearTimeout(reconnectTimer);
+    const sock = ws;
+    ws = null; // onclose then doesn't reconnect
+    sock?.close();
+    renderLive();
+  },
+  reconnectWs: () => {
+    if (!ws && !left && sensorsOn) connect();
+  },
+  onServerMsg: (msg) => {
+    if (msg && typeof msg === 'object' && typeof (msg as { type?: unknown }).type === 'string') onServer(msg as ServerMsg);
+  },
+  // Through a relay the hello carries no id (the envelope names the phone by its handle) and no GPS.
+  hello: () => {
+    const h: Partial<Hello> = hello();
+    delete h.id;
+    delete h.lat;
+    delete h.lon;
+    delete h.acc;
+    return h;
+  },
+  self: selfPos,
+  zone: () => (lastState && Date.now() - lastStateAt < 5000 ? lastState.zone : ''),
+  clockOffset: () => clockOffset,
+  onChange: () => renderLive(),
+});
+(window as unknown as { pulseMesh: Mesh }).pulseMesh = mesh;
+
+$('lostSig').addEventListener('change', () => {
+  const box = $('lostSig') as HTMLInputElement;
+  if (!mesh.setJam(box.checked, true)) {
+    box.checked = false;
+    $('meshLine').textContent = 'No phone linked yet, so there is nothing to relay through.';
+    $('meshLine').hidden = false;
+  }
+});
+
+const zoneRank = { '': 0, calm: 0, yellow: 1, red: 2 } as const;
+
+/** Everything the live screen says about the connection and the crowd: from the server's last state, the WebSocket and the mesh. */
+function renderLive() {
+  const ms = mesh.status();
+  const up = ws?.readyState === WebSocket.OPEN && !mesh.jammed;
+  const fresh = !!lastState && Date.now() - lastStateAt < 6000;
+  if (up) setConn(fresh ? 'Connected' : 'Syncing clock…', fresh ? 'on' : 'syncing');
+  else if (ms.relaying) setConn('No connection — relaying through nearby phones', 'syncing');
+  else if (mesh.jammed) setConn('No connection — no phone in reach', '');
+  else setConn(ws ? 'Connecting…' : 'Reconnecting…', '');
+  const zone = fresh ? lastState!.zone : '';
+  const node = fresh ? lastState!.node : 'connecting';
+  // A neighbour's warning counts when it is worse than what the server last said (or the server can't be heard).
+  const byNeighbour = !!ms.warn && zoneRank[ms.warn] > zoneRank[zone];
+  applyState(byNeighbour && node === 'connecting' ? 'ok' : node, byNeighbour ? ms.warn! : zone, byNeighbour);
+  const line = $('meshLine');
+  const text = ms.links > 0 ? `Linked to ${ms.links} ${ms.links === 1 ? 'phone' : 'phones'} nearby` : '';
+  if (line.textContent !== text && !(text === '' && line.textContent?.startsWith('No phone linked'))) line.textContent = text;
+  line.hidden = !line.textContent;
+  $('lostWrap').hidden = !mesh.supported || (ms.links === 0 && !mesh.jammed);
+  ($('lostSig') as HTMLInputElement).checked = mesh.jammed;
 }
 
 function setConn(text: string, cls: '' | 'on' | 'syncing') {
@@ -418,28 +665,44 @@ function startLive() {
   $('moveBtn').textContent = mode === 'gps' ? 'GPS is off? Place me on the map' : 'I moved: place me again';
   if (!ws) connect();
   else if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(hello()));
+  mesh.start(); // links to nearby phones; needs no permission
+  pocketReady();
 }
 
 // ---- feedback from the server ----
 
-function applyState(node: string, zone: string) {
+/** What the screen shows right now, for pocket mode (pocket.ts). */
+let shown = { zone: '', byNeighbour: false };
+let guideAngle: number | null = null;
+
+function syncPocket() {
+  const move = guidance?.move && guideAngle !== null ? { angle: guideAngle, to: $('guideTo').textContent ?? '' } : null;
+  pocketUpdate({ zone: shown.zone, byNeighbour: shown.byNeighbour, move });
+}
+
+function applyState(node: string, zone: string, byNeighbour = false) {
+  shown = { zone, byNeighbour };
   const b = document.body;
   b.classList.toggle('node-handling', node === 'handling');
   b.classList.toggle('zone-yellow', zone === 'yellow');
   b.classList.toggle('zone-red', zone === 'red');
-  const [icon, head, sub] =
-    zone === 'red'
+  const [icon, head, sub] = byNeighbour
+    ? zone === 'red'
+      ? ['⚠️', 'Warned by a neighbour', 'Crowd danger close to you. Stay on your feet, arms up in front of your chest. Move sideways, not against the push.']
+      : ['👀', 'Warned by a neighbour', 'Pressure is building close to you. Keep your phone where it is, with this page open.']
+    : zone === 'red'
       ? ['⚠️', 'Crowd danger near you', 'Stay on your feet. Arms up in front of your chest. Move sideways, not against the push.']
       : node === 'handling'
-        ? ['✋', 'Phone is moving around', 'Hold it flat against your chest so it can feel the crowd.']
+        ? ['✋', 'Phone is moving around', 'Let it rest in your pocket or your hand so it can feel the crowd.']
         : zone === 'yellow'
-          ? ['👀', 'Pressure building nearby', 'Keep your phone flat against your chest.']
+          ? ['👀', 'Pressure building nearby', 'Keep your phone where it is, with this page open.']
           : node === 'connecting'
             ? ['📡', 'Connecting…', 'Hang on a second.']
-            : ['📱', 'Hold your phone flat against your chest', 'Screen facing out, top of the phone up. You are part of the network.'];
+            : ['📱', 'You are part of the network', 'Keep this page open. Your pocket or your hand is fine, any way up.'];
   $('icon').textContent = icon;
   $('headline').textContent = head;
   $('sub').textContent = sub;
+  syncPocket();
 }
 
 // ---- "Move this way": personal guidance from the server ----
@@ -471,7 +734,11 @@ function applyGuidance(s: PhoneState) {
   guidance = s;
   const g = $('guide');
   g.hidden = !s.move;
-  if (!s.move) return;
+  if (!s.move) {
+    guideAngle = null;
+    syncPocket();
+    return;
+  }
   // Buzz on Android when guidance starts (iPhones can't vibrate from a web page).
   const now = Date.now();
   if (!had || now - lastBuzz > 15_000) {
@@ -489,11 +756,13 @@ function drawGuidance() {
   const real = heading !== null && s.bearing !== undefined;
   const screenAngle = real ? s.bearing! + mapAngle - heading! : mapAngle;
   $('arrow').style.transform = `rotate(${screenAngle}deg)`;
+  guideAngle = screenAngle;
   $('guideTo').textContent = s.move.to ? `Toward ${s.move.to}` : s.move.reason === 'push' ? 'Out of the push, to the side' : 'Toward more space';
   $('guideNote').textContent = real
     ? 'The arrow points the real way. Turn until it points forward.'
     : 'The arrow is relative to the venue map below (stage at the top).';
   drawMiniMap(s);
+  syncPocket();
 }
 
 function drawMiniMap(s: PhoneState) {
@@ -510,7 +779,9 @@ function drawMiniMap(s: PhoneState) {
   g.fillStyle = 'rgba(255,255,255,0.25)';
   g.fillRect(ox + vw * k * 0.3, oy, vw * k * 0.4, 6); // stage edge
   if (s.x === undefined || s.y === undefined || !s.move) return;
-  const px = ox + s.x * k, py = oy + s.y * k;
+  // Where the phone is: its mesh-corrected position when its neighbours have one to offer, else the server's.
+  const mp = mesh.status().pos?.est;
+  const px = ox + Math.min(vw, Math.max(0, mp?.x ?? s.x)) * k, py = oy + Math.min(vh, Math.max(0, mp?.y ?? s.y)) * k;
   const len = Math.min(W, H) * 0.3;
   const ex = px + s.move.dx * len, ey = py + s.move.dy * len;
   g.strokeStyle = '#fff';
@@ -542,6 +813,14 @@ setInterval(() => {
   lastSamples = totalSamples;
   $('stats').textContent = `${hz} samples/s · ${sent} sent · id ${id.slice(0, 6)}`;
   if (hz > 0) $('warn').hidden = true;
+  // A socket that has gone silent (the server sends a state every 3 s) is dead even if the browser hasn't noticed.
+  if (ws?.readyState === WebSocket.OPEN && gotState && Date.now() - lastWsRx > 12_000) {
+    const sock = ws;
+    ws = null;
+    sock.close();
+    connect();
+  }
+  if (sensorsOn && !left) renderLive();
 }, 1000);
 
 // ---- keep the screen on ----
@@ -560,11 +839,40 @@ async function keepAwake() {
   $('screenTip').textContent = help.screen;
 }
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && sensorsOn) {
+  if (document.visibilityState === 'visible' && sensorsOn && !left) {
     void keepAwake();
-    if (!ws) connect();
+    if (!ws && !mesh.jammed) connect();
   }
 });
 void wakeLock;
+
+// ---- leave: close the connection for good, then show the privacy receipt (demo.ts) ----
+
+let left = false;
+initLeave({
+  id,
+  device: deviceLabel(),
+  sent: () => sent,
+  linked: () => mesh.status().links,
+  leave: () => {
+    left = true;
+    mesh.stop();
+    pocketExit();
+    clearTimeout(reconnectTimer);
+    const sock = ws;
+    ws = null; // onclose then doesn't reconnect
+    sock?.close();
+    window.removeEventListener('devicemotion', onMotion);
+    stopGps();
+    void wakeLock?.release().catch(() => {});
+  },
+});
+
+initPocket(isIOS);
+
+// Opt-in Bluetooth beacon positioning (Android Chrome only; nothing shows elsewhere): beacons.ts.
+initBeacons(id, (m) => ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify(m)));
+// Inside the Pulse Android app only (window.PulseNative): Bluetooth scan + advert after Join, screen-off running: native.ts.
+initNative(id, (m) => ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify(m)), hello);
 
 show('join');

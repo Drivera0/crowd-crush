@@ -167,7 +167,7 @@ func (a *App) feedReplay(r *replayState, pnow int64) {
 				ct = rec.T
 			}
 			m.addSample(protocol.Sample{T: ct, AX: rec.AX, AY: rec.AY, AZ: rec.AZ, Rot: rec.Rot})
-			p.det.Add(rec.ID, detect.Sample{T: ct, AX: rec.AX, AY: rec.AY, AZ: rec.AZ, Rot: rec.Rot})
+			p.det.Add(rec.ID, detect.Sample{T: ct, AX: rec.AX, AY: rec.AY, AZ: rec.AZ, Rot: rec.Rot, G: detect.Gravity(rec.G)})
 		case store.KindBye:
 			if m := p.meta[rec.ID]; m != nil {
 				m.connected, m.goneAt = false, rec.T
@@ -206,7 +206,7 @@ func (a *App) StartRecording(label string) (string, error) {
 	}
 	for _, p := range pipes {
 		for id, m := range p.meta {
-			if m.connected {
+			if m.connected && !m.unplaced {
 				w.Write(store.Record{K: store.KindHello, T: now, ID: id, X: store.F(r2(m.x)), Y: store.F(r2(m.y)),
 					Acc: m.acc, Out: m.outside, UA: m.ua})
 				if m.synced {

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"math"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/Drivera0/crowd-crush/server/internal/hub"
@@ -70,7 +69,7 @@ func (a *App) Hardware() []protocol.Hardware {
 		out[i] = h
 	}
 	mapDistances(out)
-	return out
+	return a.towersLocked(out, now)
 }
 
 func hardwareList(st []sign.Status, prev []protocol.Hardware, areas []protocol.Area, now int64) []protocol.Hardware {
@@ -146,21 +145,12 @@ func hwKey(h protocol.Hardware) string {
 }
 
 // ErrNoBoard: no board with that key in SIGN_URL.
-var ErrNoBoard = errors.New("no such board (want \"sign\" or a zone-light letter from SIGN_URL)")
+var ErrNoBoard = errors.New("no such board (want \"laptop\", \"sign\" or a zone-light letter from SIGN_URL)")
 
-// SetHardwarePos places a board on the venue map (clamped to the venue)
+// SetHardwarePos places a board (or this laptop) on the venue map (clamped to the venue)
 // and saves it in data/hardware.json.
 func (a *App) SetHardwarePos(key string, x, y float64) ([]protocol.Hardware, error) {
-	key = strings.TrimSpace(key)
-	if !strings.EqualFold(key, "sign") {
-		key = strings.ToUpper(key)
-	} else {
-		key = "sign"
-	}
-	known := false
-	for _, k := range a.opt.Sign.Keys() {
-		known = known || k == key
-	}
+	key, known := a.towerKey(key)
 	if !known {
 		return nil, ErrNoBoard
 	}

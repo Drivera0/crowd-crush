@@ -4,7 +4,8 @@ import { defineConfig } from 'vite';
 export default defineConfig({
   root: __dirname,
   base: '/',
-  build: { outDir: 'dist', emptyOutDir: true },
+  // Two pages: the phone page, and /beacons.html (the Bluetooth beacon check).
+  build: { outDir: 'dist', emptyOutDir: true, rollupOptions: { input: [`${__dirname}/index.html`, `${__dirname}/beacons.html`] } },
   server: {
     port: 5173,
     host: true,

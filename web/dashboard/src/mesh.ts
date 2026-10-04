@@ -11,6 +11,11 @@
 // people, coloured only above the watch density and red only above danger),
 // a crisp pulsing hull around each yellow/red cluster with a badge, and push
 // waves that light up only the links and phones they travel through.
+//
+// Real phones carry a generated name and colour ("Blue Otter"): a ring in
+// that colour, the name next to the dot while there are few of them, and a
+// burst of ripples while the phone is being shaken. Staff can drag one to
+// where it really is.
 
 import type { Cluster, Hardware, Level, Node, NodeStatus, SimFrame, SimState, VenueLayout, Wave } from '../../shared/protocol';
 
@@ -56,7 +61,11 @@ const SIM_MATCH_M = 1.5; // phone node ↔ simulated body matching radius
 const NEIGHBOURS = 3; // nearest bodies each node links to when the server sends no links
 const MAX_PACKETS = 260;
 
-interface Ripple { t0: number; style: string; max: number }
+interface Ripple { t0: number; style: string; max: number; w?: number }
+
+/** Names are drawn on the map while at most this many real phones are connected (otherwise on hover / selection). */
+const NAMES_MAX = 12;
+const SHAKE_RIPPLE_MS = 260;
 
 interface Body {
   id: string;
@@ -88,6 +97,8 @@ interface Body {
   nextBeat: number;
   simIdx: number;
   nbrs: Body[];
+  /** When the last shake ripple was started. */
+  shakeAt: number;
 }
 
 interface Link { a: Body; b: Body; grid: boolean; wave: boolean }
@@ -196,6 +207,13 @@ export class Mesh {
   showBoards = false;
   /** A board being dragged: drawn at this venue position until the server confirms. */
   boardDrag: { key: string; x: number; y: number } | null = null;
+  /** A real phone being dragged by staff: drawn at this venue position until the server confirms. */
+  nodeDrag: { id: string; x: number; y: number } | null = null;
+  /** Where joining phones are lined up (the demo spot), drawn when on. */
+  demoSpot: { on: boolean; x: number; y: number; spacing: number } | null = null;
+  /** Real phones with a name on the map right now. */
+  private named = 0;
+  private nameList: Body[] = [];
   private venue = { w: 24, h: 16 };
   /** World px per metre, and where the venue's top-left corner sits in world px. */
   private fit = { s: 30, ox: 0, oy: 0 };
@@ -207,6 +225,10 @@ export class Mesh {
   private theme: 'dark' | 'light' = 'dark';
   /** Zoom and pan: screen = world * k + (x, y). */
   view = { k: 1, x: 0, y: 0 };
+  /** Drawn above the neighbour lines, below the clusters and dots (the phone-to-phone mesh layer, meshnet.ts). */
+  overlay: ((g: CanvasRenderingContext2D, now: number) => void) | null = null;
+  /** No decorative "readings shared between neighbours" dots (the real mesh links are on screen). */
+  quietGossip = false;
   /** Drawn above the background, below everything else (custom areas). */
   underlay: ((g: CanvasRenderingContext2D, now: number) => void) | null = null;
 
@@ -260,10 +282,12 @@ export class Mesh {
     if (count > 0) this.perPhone = lerp(this.perPhone, clamp(people / count, 1, 50), 0.3);
 
     const seen = new Set<string>();
+    let named = 0;
     for (const n of nodes) {
       seen.add(n.id);
+      if (n.name && n.status !== 'stale') named++;
       let b = this.bodies.get(n.id);
-      const [rx, ry] = this.reported(n);
+      const [rx, ry] = this.nodeDrag?.id === n.id ? [this.nodeDrag.x, this.nodeDrag.y] : this.reported(n);
       if (!b) {
         const seed = hash(n.id);
         b = {
@@ -273,7 +297,7 @@ export class Mesh {
           x: 0, y: 0, hx: 0, hy: 0, sway: Math.min(2, n.sway),
           status: n.status, prevStatus: n.status, statusAt: now - COLOR_FADE_MS,
           stale: n.status === 'stale' ? 0.45 : 1, vis: 0, gone: false,
-          ripples: [], flash: 0, nextBeat: now + 400 + seed * 900, simIdx: -1, nbrs: [],
+          ripples: [], flash: 0, nextBeat: now + 400 + seed * 900, simIdx: -1, nbrs: [], shakeAt: 0,
         };
         this.bodies.set(n.id, b);
         this.listDirty = true;
@@ -300,7 +324,14 @@ export class Mesh {
         }
       }
       b.data = n;
+      // "That's me": a phone being shaken sends out ripples in its own colour.
+      if (n.shake && now - b.shakeAt > SHAKE_RIPPLE_MS) {
+        b.shakeAt = now;
+        b.flash = 1;
+        b.ripples.push({ t0: now, style: n.color ?? SOLID.ok, max: 9 * NODE_R, w: 4 });
+      }
     }
+    this.named = named;
     for (const b of this.bodies.values()) if (!seen.has(b.id) && !b.gone) b.gone = true;
     this.waves = waves;
     this.waveKeys.clear();
@@ -439,12 +470,16 @@ export class Mesh {
     for (const b of this.list) {
       const i = b.simIdx;
       if (i < 0) continue;
+      if (b.data.real) {
+        b.simIdx = -1; // a real phone is its own body
+        continue;
+      }
       const ok = i < n && ph[i] && !claim[i] && (C[i * 3] - b.rx) ** 2 + (C[i * 3 + 1] - b.ry) ** 2 < r2;
       if (ok) claim[i] = 1;
       else b.simIdx = -1;
     }
     for (const b of this.list) {
-      if (b.simIdx >= 0 || b.gone) continue;
+      if (b.simIdx >= 0 || b.gone || b.data.real || b.data.name) continue;
       let best = -1, bd = r2;
       for (let i = 0; i < n; i++) {
         if (!ph[i] || claim[i]) continue;
@@ -509,14 +544,14 @@ export class Mesh {
     const { x, y } = this.toWorld(sx, sy);
     for (const [i, b] of this.boards.entries()) {
       const p = this.boardPos(b, i);
-      if (Math.abs(p.x - x) < 16 && Math.abs(p.y - y) < 16) return b.zone || 'sign';
+      if (Math.abs(p.x - x) < 16 && Math.abs(p.y - y) < 16) return b.key ?? (b.zone || 'sign');
     }
     return null;
   }
 
   /** Where a board is drawn (world px): its saved spot, the drag in progress, or parked along the bottom edge. */
   private boardPos(b: Hardware, i: number) {
-    const key = b.zone || 'sign';
+    const key = b.key ?? (b.zone || 'sign');
     if (this.boardDrag?.key === key) return this.venueToWorld(this.boardDrag.x, this.boardDrag.y);
     if (b.x != null && b.y != null) return this.venueToWorld(b.x, b.y);
     return this.venueToWorld(1.5 + i * 2.5, this.venue.h - 1);
@@ -588,6 +623,27 @@ export class Mesh {
 
   resetView() {
     this.view = { k: 1, x: 0, y: 0 };
+  }
+
+  /** Staff drag a real phone: it follows the pointer at once (venue metres). null = let go. */
+  dragNode(id: string | null, x = 0, y = 0) {
+    if (!id) {
+      this.nodeDrag = null;
+      return;
+    }
+    this.nodeDrag = { id, x, y };
+    const b = this.bodies.get(id);
+    if (b) {
+      b.rx = b.tx = b.px = x;
+      b.ry = b.ty = b.py = y;
+      b.vx = b.vy = 0;
+      b.tw0 = -1;
+    }
+  }
+
+  /** Is this body a real phone with a generated name (the ones staff may drag)? */
+  isNamed(id: string) {
+    return !!this.bodies.get(id)?.data.name;
   }
 
   /** Body under a screen point, if any. */
@@ -738,7 +794,7 @@ export class Mesh {
     if (this.reduced) {
       this.packets.length = 0;
     } else {
-      this.gossip(now);
+      if (!this.quietGossip) this.gossip(now);
       this.spawnWavePackets(now);
     }
     this.deliver(now);
@@ -980,6 +1036,7 @@ export class Mesh {
     const pulse = this.reduced ? 0.5 : 0.5 + 0.5 * Math.sin(now / 320);
 
     this.drawVenue(g);
+    this.drawDemoSpot(g);
     if (!this.sim) this.drawLayout(g);
     this.drawSimGeometry(g);
     this.underlay?.(g, now);
@@ -1023,6 +1080,7 @@ export class Mesh {
       g.stroke();
     }
     g.setLineDash([]);
+    this.overlay?.(g, now);
 
     this.drawClusters(g, pulse);
     this.drawWaves(g, now, pulse);
@@ -1040,6 +1098,7 @@ export class Mesh {
     g.globalAlpha = 1;
 
     this.drawNodes(g, now, pulse);
+    this.drawNames(g);
     this.drawBadges(g);
 
     // Links of the selected phone: who it shares readings with.
@@ -1166,9 +1225,9 @@ export class Mesh {
       // Ripples: a status change or a push arriving.
       for (const rp of b.ripples) {
         const f = (now - rp.t0) / 900;
-        g.globalAlpha = (1 - f) * 0.7 * a;
+        g.globalAlpha = (1 - f) * (rp.w ? 0.9 : 0.7) * a;
         g.strokeStyle = rp.style;
-        g.lineWidth = 2 * (1 - f) + 0.5;
+        g.lineWidth = (rp.w ?? 2) * (1 - f) + 0.5;
         g.beginPath();
         g.arc(b.x, b.y, r + (this.reduced ? 4 : f * rp.max), 0, TAU);
         g.stroke();
@@ -1240,6 +1299,25 @@ export class Mesh {
         }
       }
 
+      // A real phone's own colour: a ring round the status dot (bolder among simulated people).
+      if (b.data.color && st !== 'stale') {
+        const real = !!b.data.real;
+        if (real) {
+          g.globalAlpha = 0.9 * a;
+          g.strokeStyle = outline;
+          g.lineWidth = 6;
+          g.beginPath();
+          g.arc(b.x, b.y, r + 5, 0, TAU);
+          g.stroke();
+        }
+        g.globalAlpha = a;
+        g.strokeStyle = b.data.color;
+        g.lineWidth = real ? 3.5 : 2.5;
+        g.beginPath();
+        g.arc(b.x, b.y, r + (real ? 5 : 3.5), 0, TAU);
+        g.stroke();
+      }
+
       if (this.hover === b.id || this.selected === b.id) {
         const sel = this.selected === b.id;
         g.globalAlpha = 1;
@@ -1254,6 +1332,92 @@ export class Mesh {
       }
     }
     g.globalAlpha = 1;
+  }
+
+  /**
+   * Names of the real phones, in each phone's colour, readable from across a
+   * table: all of them while there are few, else only the hovered / selected
+   * one. Neighbours stand 0.6 m apart, so labels alternate above and below
+   * the row on two levels each, joined to their dot by a thin line.
+   */
+  private drawNames(g: CanvasRenderingContext2D) {
+    const all = this.named > 0 && this.named <= NAMES_MAX;
+    const list = this.nameList;
+    list.length = 0;
+    for (const b of this.list) {
+      if (!b.data.name || b.vis <= 0.3 || b.status === 'stale') continue;
+      if (all || this.hover === b.id || this.selected === b.id) list.push(b);
+    }
+    if (!list.length) return;
+    list.sort((p, q) => p.x - q.x || p.y - q.y);
+    const light = this.theme === 'light';
+    const k = this.view.k;
+    const fs = (all && list.length <= 6 ? 15 : 13) / k;
+    g.font = `700 ${fs}px Inter, system-ui, sans-serif`;
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.lineJoin = 'round';
+    const tiers = [-1, 1, -2, 2];
+    for (let i = 0; i < list.length; i++) {
+      const b = list[i];
+      const t = list.length > 1 ? tiers[i % 4] : -1;
+      const off = NODE_R + 9 + fs * 0.7 + (Math.abs(t) - 1) * (fs * 1.35 + 4 / k);
+      const ly = b.y + Math.sign(t) * off;
+      const a = easeOut(b.vis);
+      const col = b.data.color ?? SOLID.ok;
+      // Leader line from the dot to its label.
+      g.globalAlpha = 0.55 * a;
+      g.strokeStyle = col;
+      g.lineWidth = 1.2 / k;
+      g.beginPath();
+      g.moveTo(b.x, b.y + Math.sign(t) * (NODE_R + 5));
+      g.lineTo(b.x, ly - Math.sign(t) * fs * 0.55);
+      g.stroke();
+      // The name on a pill of the map's background, so it reads over people and links.
+      const text = b.data.name!;
+      const w = g.measureText(text).width + 10 / k, h = fs * 1.35;
+      g.globalAlpha = 0.86 * a;
+      g.fillStyle = light ? '#ffffff' : '#0a0e15';
+      g.beginPath();
+      g.roundRect(b.x - w / 2, ly - h / 2, w, h, h / 2);
+      g.fill();
+      g.globalAlpha = a;
+      g.lineWidth = 1.2 / k;
+      g.strokeStyle = col;
+      g.stroke();
+      g.fillStyle = light ? '#0f172a' : '#f8fafc';
+      g.fillText(text, b.x, ly + fs * 0.04);
+    }
+    g.globalAlpha = 1;
+    g.textAlign = 'left';
+    g.textBaseline = 'alphabetic';
+  }
+
+  /** The demo spot: where the next phones that join will stand. */
+  private drawDemoSpot(g: CanvasRenderingContext2D) {
+    const d = this.demoSpot;
+    if (!d?.on) return;
+    const light = this.theme === 'light';
+    const sp = d.spacing > 0 ? d.spacing : 0.6;
+    g.strokeStyle = light ? 'rgba(15,23,42,0.45)' : 'rgba(226,232,240,0.5)';
+    g.fillStyle = light ? 'rgba(15,23,42,0.6)' : 'rgba(226,232,240,0.7)';
+    g.lineWidth = 1.2;
+    g.setLineDash([3, 3]);
+    for (let i = 0; i < 5; i++) {
+      const x = d.x + i * sp;
+      if (x > this.venue.w) break;
+      const p = this.venueToWorld(x, d.y);
+      g.globalAlpha = 1 - i * 0.15;
+      g.beginPath();
+      g.arc(p.x, p.y, NODE_R + 2, 0, Math.PI * 2);
+      g.stroke();
+    }
+    g.setLineDash([]);
+    g.globalAlpha = 1;
+    const p0 = this.venueToWorld(d.x, d.y);
+    g.font = '600 10px Inter, system-ui, sans-serif';
+    g.textAlign = 'left';
+    g.fillText('DEMO SPOT', p0.x - NODE_R - 2, p0.y + NODE_R + 16);
   }
 
   size() {
@@ -1415,7 +1579,7 @@ export class Mesh {
       g.fill();
       g.fillStyle = light ? '#ffffff' : '#0a0a0a';
       g.font = '700 12px Inter, system-ui, sans-serif';
-      g.fillText(b.zone || 'S', p.x, p.y + 4);
+      g.fillText(b.kind === 'laptop' ? 'PC' : b.zone || 'S', p.x, p.y + 4);
       g.font = '600 10px Inter, system-ui, sans-serif';
       g.fillStyle = light ? 'rgba(10,10,10,0.7)' : 'rgba(250,250,250,0.7)';
       g.fillText(b.name + (b.x == null ? ' · drag me' : ''), p.x, p.y + 26);
@@ -1656,6 +1820,12 @@ export class Mesh {
       g.arc(hp[p1 * 2], hp[p1 * 2 + 1], pad, a0, a1, false);
     }
     g.closePath();
+  }
+
+  /** Where a phone's dot is drawn (world px, the space overlays draw in); null = not on the map. */
+  bodyAt(id: string): { x: number; y: number } | null {
+    const b = this.bodies.get(id);
+    return b && !b.gone && b.vis > 0.05 ? b : null;
   }
 
   neighbourCount(id: string) {

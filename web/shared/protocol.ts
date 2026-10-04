@@ -22,6 +22,8 @@ export interface Hello {
   row?: number;
   col?: number;
   ua?: string;
+  /** The key of the tower whose check-in QR code the phone joined through (?at=<key>): placed next to it. */
+  at?: string;
 }
 
 /** The phone was placed or moved on the venue map (metres). */
@@ -54,6 +56,13 @@ export interface Motion {
   ay: number;
   az: number;
   rot: number;
+  /**
+   * Unit gravity vector in the device frame ([gx, gy, gz], 2 decimals): "down" as the phone sees it,
+   * so the server can level the sample however the phone is carried. Optional: the server holds the
+   * last value, so the phone sends it only when it changed. Never sent = upright against the chest
+   * (x, z horizontal, y vertical).
+   */
+  g?: [number, number, number];
 }
 
 export type FromPhone = Hello | Pos | Gps | Pong | Motion;
@@ -75,7 +84,14 @@ export interface PhoneState {
    * coordinates (x right, y down the map), toward lower density and, when one
    * is close enough in that direction, an open exit.
    */
-  move?: { dx: number; dy: number; to?: string; reason: 'push' | 'density' };
+  move?: {
+    dx: number;
+    dy: number;
+    to?: string;
+    reason: 'push' | 'density';
+    /** How far the arrow can be trusted, 0..1: 1 for a hand-placed phone, lower the rougher its GPS fix. Below 0.5 show a plain instruction instead of an arrow. */
+    conf?: number;
+  };
   /** Venue bearing (degrees clockwise from north of the map's "up"), when the venue is GPS-anchored: lets a phone with a compass point the arrow for real. */
   bearing?: number;
   /** This phone's position (venue metres), for the little map on its screen. */
@@ -84,9 +100,14 @@ export interface PhoneState {
   /** Venue size (metres), for the same map. */
   w?: number;
   h?: number;
+  /** This phone's generated name ("Blue Otter") and its colour (CSS hex), as on the dashboard map. */
+  name?: string;
+  color?: string;
+  /** This state comes from the crowd simulation running around the phone (a drill), not from the real crowd. */
+  sim?: boolean;
 }
 
-export type ToPhone = Ping | PhoneState;
+export type ToPhone = Ping | PhoneState | import('./demo').Shake;
 
 // ---- Server → dashboard ----
 
@@ -96,9 +117,19 @@ export interface Node {
   y: number;
   /** GPS accuracy radius in metres; 0 = placed by hand. */
   acc?: number;
-  src?: 'gps' | 'manual';
+  /** How the position was set: GPS, by hand, or by checking in at a tower (its QR code). */
+  src?: 'gps' | 'manual' | 'tower' | 'beacon';
   /** Outside the venue rectangle: counts toward nothing. */
   outside?: boolean;
+  /** A real phone's generated name and colour (absent for simulated and replayed phones). */
+  name?: string;
+  color?: string;
+  /** Being shaken right now ("that's me"). */
+  shake?: boolean;
+  /** Mode "sim": a real phone standing in the simulated crowd. */
+  real?: boolean;
+  /** Connected but not located yet (no x/y, no accepted GPS fix): x, y mean nothing and it counts toward nothing. Keep it off the map. */
+  unplaced?: boolean;
   status: NodeStatus;
   sway: number;
   rtt: number;
@@ -125,11 +156,15 @@ export interface Wave {
   to: string;
   lagMs: number;
   corr: number;
+  /** The pair was found by motion (GPS-placed phones, positions only good to metres), not by distance on the map. */
+  motion?: boolean;
 }
 
 /** A group of phones packed together. */
 export interface Cluster {
   id: string;
+  /** Median position accuracy of the cluster's phones (m); absent when they were placed by hand. Several metres = `est` is averaged over a disc about that wide: a lower bound on the tightest spot. */
+  acc?: number;
   x: number;
   y: number;
   r: number;
@@ -236,6 +271,8 @@ export interface Snapshot {
   };
   clusters: Cluster[];
   stats: Stats;
+  /** The phone-to-phone mesh: links between phones and how each reaches the server (absent in a replay). */
+  mesh?: import('./mesh').MeshFrame;
 }
 
 export interface Alert {
@@ -284,6 +321,8 @@ export interface Config {
   yellow: number; // zone score thresholds
   red: number;
   neighbourRadius: number;
+  /** The demo spot is on (GET /api/demo): the server places a phone that joins without a position. */
+  demo?: boolean;
 }
 
 /** Fixed features of the venue, in venue metres. */
@@ -349,6 +388,9 @@ export interface Area {
 /** GET /api/hardware: every sign and zone light, probed every 5 s. */
 export interface Hardware {
   name: string;
+  /** "laptop", "sign" or a zone-light letter: the key in PUT /api/hardware/{key}/pos and in a check-in link (?at=<key>). */
+  key?: string;
+  /** sign | zone-light | laptop (this computer: always online, no probe). */
   kind: string;
   url: string;
   zone?: string;
