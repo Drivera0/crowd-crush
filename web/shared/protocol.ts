@@ -268,6 +268,8 @@ export interface Hardware {
   zone?: string;
   online: boolean;
   lastSeen?: number;
+  /** Seconds since the board last answered, on the server's clock. */
+  seenAgo?: number;
   error?: string;
   rssi?: number;
   uptime?: number;
