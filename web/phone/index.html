@@ -15,14 +15,26 @@
       <section id="join" class="screen">
         <h1>Pulse</h1>
         <p class="lead">Early warning for crowd crushes, using the phones already in the crowd.</p>
+        <!-- Shown before Join when this browser can't work (plain http, an app's built-in browser). -->
+        <div id="envNote" class="env-note" hidden>
+          <p id="envText"></p>
+          <div class="env-actions">
+            <a id="envOpen" class="env-btn" hidden>Open in Chrome</a>
+            <button id="envCopy" class="small" type="button">Copy link</button>
+          </div>
+        </div>
         <button id="joinBtn" class="big">Join</button>
-        <p class="fine">
-          Shares motion numbers and where you are in the venue. GPS is turned into a spot on the venue map and
-          never stored. No name, contacts, audio or photos. Phones running Pulse near you pass each other the same
-          numbers (a random handle, a spot on the venue map, motion) so the crowd can still be heard when one
-          phone loses its connection.
-        </p>
-        <p id="joinErr" class="err" hidden></p>
+        <p id="joinErr" class="err" role="alert" hidden></p>
+        <p class="privacy">Shares motion numbers and your spot in the venue. No name, contacts, audio or photos.</p>
+        <details class="privacy-more">
+          <summary>What exactly is shared?</summary>
+          <p>
+            A random session ID, your spot on the venue map (in metres; if GPS is used it is turned into that spot and
+            never stored) and motion numbers ten times a second. Phones running Pulse near you pass each other the same
+            numbers (with a random handle instead of the ID) so the crowd can still be heard when one phone loses its
+            connection. Leave at any time to see everything that was collected.
+          </p>
+        </details>
       </section>
 
       <!-- 2. Locating -->
@@ -38,7 +50,8 @@
         <h2>Where are you?</h2>
         <p id="placeHint" class="fine">Tap where you're standing. Drag to adjust.</p>
         <div id="venue" class="venue" role="application" aria-label="Venue map">
-          <span class="stage">STAGE</span>
+          <span id="stageTag" class="stage">STAGE</span>
+          <svg id="venueSvg" class="venue-svg" aria-hidden="true"></svg>
           <span id="me" class="me" hidden></span>
         </div>
         <button id="placeDone" class="big" disabled>That's me</button>
@@ -55,6 +68,11 @@
         <!-- While this phone's state comes from the simulated crowd, say so. -->
         <p id="drill" class="drill-tag" hidden>Simulated crowd around you — drill</p>
         <div class="centre">
+          <!-- Demo spot: this phone's place in the row at the table (state.row). -->
+          <div id="rowCard" class="row-card" hidden>
+            <p class="row-n">You’re <b id="rowN"></b> in the row</p>
+            <p id="rowWhere" class="row-where"></p>
+          </div>
           <p id="iam" class="iam" hidden>You are <b id="iamName"></b><small>Find your dot on the big screen. Shake the phone to make it ripple.</small></p>
           <div id="icon" class="icon">📱</div>
           <h2 id="headline">You are part of the network</h2>
@@ -69,20 +87,20 @@
           <p id="guideTo" class="guide-to"></p>
           <canvas id="miniMap" class="mini-map" width="240" height="160" aria-label="Where you are and which way to go"></canvas>
           <p id="guideNote" class="guide-note"></p>
-          <p class="guide-tip">Move diagonally, not against the push. Keep your arms up in front of your chest.</p>
+          <p class="guide-tip">Move diagonally, not against the push.</p>
         </div>
         <div class="bottom">
           <p id="meshLine" class="fine mesh-line" hidden></p>
-          <p id="stats" class="fine"></p>
-          <p id="warn" class="err" hidden></p>
+          <!-- Numbers for troubleshooting: only with ?debug=1 (debug.ts). -->
+          <p id="stats" class="fine" hidden></p>
+          <p id="warn" class="err" role="alert" hidden></p>
+          <div id="warnFix" class="env-actions" hidden>
+            <a id="warnOpen" class="env-btn" hidden>Open in Chrome</a>
+            <button id="warnCopy" class="small" type="button">Copy link</button>
+          </div>
           <p id="screenTip" class="fine" hidden></p>
-          <!-- Offered a few seconds after joining: the screen has to stay on, so lock it against pocket taps. -->
-          <p id="pocketHint" class="pocket-hint" hidden>
-            <span>Phone going in a pocket? Pocket mode blacks out the screen and ignores touches.</span>
-            <button id="pocketHintGo" class="small">Pocket mode</button>
-            <button id="pocketHintNo" class="small ghost" aria-label="Dismiss">Not now</button>
-          </p>
-          <button id="pocketBtn" class="pocket-btn" hidden>Pocket mode</button>
+          <!-- Pocket mode: the screen has to stay on, so lock it against pocket taps. -->
+          <button id="pocketBtn" class="pocket-btn" hidden>Pocket mode <small>black screen, ignores taps</small></button>
           <p id="pocketHelp" class="fine" hidden></p>
           <button id="moveBtn" class="small">I moved: place me again</button>
           <button id="leaveBtn" class="small">Leave and see what was collected</button>
@@ -127,6 +145,21 @@
         <button id="rejoinBtn" class="big">Join again</button>
       </section>
     </main>
+    <!-- A browser too old for the page (no ES modules, or the script failed): say so instead of a dead Join button. -->
+    <script nomodule>
+      document.getElementById('joinErr').textContent = 'This browser is too old for Pulse. Open the link in an up-to-date Safari or Chrome.';
+      document.getElementById('joinErr').hidden = false;
+    </script>
+    <script>
+      setTimeout(function () {
+        if (window.__pulseBooted) return;
+        var e = document.getElementById('joinErr');
+        if (e && e.hidden) {
+          e.textContent = 'The page didn’t finish loading. Reload it; if that doesn’t help, open the link in an up-to-date Safari or Chrome.';
+          e.hidden = false;
+        }
+      }, 8000);
+    </script>
     <script type="module" src="./src/main.ts"></script>
   </body>
 </html>

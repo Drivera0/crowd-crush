@@ -178,6 +178,9 @@ func (a *App) locConfigFor(p *pipeline, sim bool) locate.Config {
 		g := crowdsim.LayoutGeometry(dc.VenueW, dc.VenueH, lay)
 		_, c.Walls = crowdsim.GeometryJSON(g)
 		c.Stage = g.StageOutline()
+		if s := a.sim; sim && s != nil {
+			c.Walls, c.Stage = s.geo.walls, s.geo.stage
+		}
 	}
 	return c
 }
@@ -344,6 +347,13 @@ func (l *locState) step(p *pipeline, now int64) {
 	for _, e := range l.est.Step(now, nil) {
 		m := p.meta[e.ID]
 		if m == nil {
+			continue
+		}
+		if m.pinned {
+			// Lined up at the demo spot (demo.go): staff put it exactly
+			// there and the person stands there; steps, neighbours or a
+			// shake must not drift it out of the row.
+			m.loc = locMeta{}
 			continue
 		}
 		x, y := cfg.Clamp(e.X, e.Y)

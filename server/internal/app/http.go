@@ -27,6 +27,7 @@ func (a *App) Routes(mux *http.ServeMux) {
 	a.meshRoutes(mux)   // GET /api/mesh, POST /api/mesh/jam (mesh.go)
 	a.beaconRoutes(mux) // Bluetooth beacon positioning (beacons.go)
 	a.locateRoutes(mux) // GET/PUT /api/locate: the position estimator (locate.go)
+	a.joinRoutes(mux)   // /api/join…: the QR link, its test, phones' join reports (join.go)
 
 	mux.HandleFunc("GET /api/config", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
@@ -165,11 +166,9 @@ func (a *App) Routes(mux *http.ServeMux) {
 		writeJSON(w, al)
 	})
 	a.escalationRoutes(mux)
+	a.tableRoutes(mux) // table demo + board test (tabledemo.go)
 	mux.HandleFunc("POST /api/alerts/clear", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, a.ClearAlerts())
-	})
-	mux.HandleFunc("GET /api/join", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, JoinURL(a.opt.PublicURL, r))
 	})
 	mux.HandleFunc("GET /api/hardware", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, a.Hardware())
@@ -291,6 +290,17 @@ func (a *App) Routes(mux *http.ServeMux) {
 		writeJSON(w, map[string]string{"mode": "live"})
 	})
 	mux.HandleFunc("GET /api/sim", func(w http.ResponseWriter, r *http.Request) {
+		// ?scenario=<id>: that scenario's venue (size, furniture, doors,
+		// exits) before it runs, for the picker's preview.
+		if scn := r.URL.Query().Get("scenario"); scn != "" {
+			st, err := a.simPreview(scn)
+			if err != nil {
+				httpError(w, err, http.StatusBadRequest)
+				return
+			}
+			writeJSON(w, st)
+			return
+		}
 		writeJSON(w, a.SimStatus())
 	})
 	mux.HandleFunc("POST /api/sim/start", func(w http.ResponseWriter, r *http.Request) {

@@ -68,7 +68,7 @@ func (p *fakePort) Close() error {
 
 func newFakeBoard() *fakeBoard { return &fakeBoard{lines: make(chan string, 20)} }
 
-func (b *fakeBoard) open(name string) (Port, error) {
+func (b *fakeBoard) open(name string, quiet bool) (Port, error) {
 	r, w := io.Pipe()
 	b.mu.Lock()
 	b.opens = append(b.opens, name)
@@ -98,12 +98,15 @@ func (b *fakeBoard) next(t *testing.T) string {
 
 func useFakes(t *testing.T, b *fakeBoard, ports []PortInfo) {
 	t.Helper()
-	oldOpen, oldList, oldRetry, oldSettle := openPort, listPorts, SerialRetry, SerialSettle
+	oldOpen, oldList, oldRetry, oldSettle, oldIdent := openPort, listPorts, SerialRetry, SerialSettle, SerialIdentify
 	openPort = b.open
 	listPorts = func() ([]PortInfo, error) { return ports, nil }
 	SerialRetry = 20 * time.Millisecond
 	SerialSettle = 10 * time.Millisecond
-	t.Cleanup(func() { openPort, listPorts, SerialRetry, SerialSettle = oldOpen, oldList, oldRetry, oldSettle })
+	SerialIdentify = 300 * time.Millisecond
+	t.Cleanup(func() {
+		openPort, listPorts, SerialRetry, SerialSettle, SerialIdentify = oldOpen, oldList, oldRetry, oldSettle, oldIdent
+	})
 }
 
 func TestSerialAutoWritesLevels(t *testing.T) {
@@ -114,6 +117,7 @@ func TestSerialAutoWritesLevels(t *testing.T) {
 		{Name: "/dev/cu.usbmodem1101", VID: "2341"},
 	})
 	c := New("serial:auto")
+	t.Cleanup(c.Close)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := c.Check(ctx); err != nil {
@@ -150,6 +154,7 @@ func TestSerialProbe(t *testing.T) {
 	b := newFakeBoard()
 	useFakes(t, b, nil)
 	c := New("A=serial:COM7")
+	t.Cleanup(c.Close)
 	if z := c.Zones(); len(z) != 1 || z[0] != "A" {
 		t.Fatalf("zones %v", z)
 	}
@@ -178,6 +183,7 @@ func TestSerialReconnectResends(t *testing.T) {
 	b := newFakeBoard()
 	useFakes(t, b, nil)
 	c := New("serial:/dev/ttyACM0")
+	t.Cleanup(c.Close)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	c.targets[0].ser.waitOpen(ctx)
@@ -202,6 +208,7 @@ func TestSerialNoBoard(t *testing.T) {
 	b := newFakeBoard()
 	useFakes(t, b, []PortInfo{{Name: "COM3", VID: "8087"}}) // some other USB device
 	c := New("serial:auto")
+	t.Cleanup(c.Close)
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	if err := c.Check(ctx); err == nil || !strings.Contains(err.Error(), "no Arduino") {
@@ -216,20 +223,25 @@ func TestSerialNoBoard(t *testing.T) {
 	}
 }
 
-func TestPickAuto(t *testing.T) {
+func TestCandidates(t *testing.T) {
 	cases := []struct {
 		ports []PortInfo
 		want  string
 	}{
 		{[]PortInfo{{Name: "COM3", VID: "8087"}, {Name: "COM9", VID: "10C4"}}, "COM9"},
-		{[]PortInfo{{Name: "/dev/ttyUSB0", VID: "10C4"}, {Name: "/dev/ttyACM0", VID: "2341"}}, "/dev/ttyACM0"},
+		{[]PortInfo{{Name: "/dev/ttyUSB0", VID: "10C4"}, {Name: "/dev/ttyACM0", VID: "2341"}}, "/dev/ttyACM0 /dev/ttyUSB0"},
 		{[]PortInfo{{Name: "/dev/tty.usbmodem1"}, {Name: "/dev/cu.usbmodem1"}}, "/dev/cu.usbmodem1"}, // fallback listing, no VIDs
+		{[]PortInfo{{Name: "/dev/cu.Bluetooth-Incoming-Port"}, {Name: "/dev/cu.SLAB_USBtoUART"}, {Name: "/dev/cu.usbserial-0001"}}, "/dev/cu.SLAB_USBtoUART /dev/cu.usbserial-0001"},
+		{[]PortInfo{{Name: "COM11", VID: "10C4"}, {Name: "COM9", VID: "10C4"}, {Name: "COM7", VID: "2341"}}, "COM7 COM9 COM11"},
 		{[]PortInfo{{Name: "COM3", VID: "8087"}}, ""},
 	}
 	for _, c := range cases {
-		got, _ := pickAuto(c.ports)
-		if got != c.want {
-			t.Errorf("pickAuto(%v) = %q, want %q", c.ports, got, c.want)
+		var got []string
+		for _, p := range Candidates(c.ports) {
+			got = append(got, p.Name)
+		}
+		if strings.Join(got, " ") != c.want {
+			t.Errorf("Candidates(%v) = %v, want %q", c.ports, got, c.want)
 		}
 	}
 }

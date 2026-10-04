@@ -31,7 +31,7 @@ Scan and connect mode are for the web page. The third, the app's own advert, nee
 
 **Connect mode** (no flag; works on any Android Chrome). The page connects to a board with standard Web Bluetooth and writes its random session id to it. The board measures the signal strength of that connection and the server reads it from the board (`GET /links`, about once a second). One Chrome pop-up per board: tap "Connect to a Pulse board", pick `PULSE-A`, then "Connect another" for `PULSE-B`.
 
-- Needs the zone-light firmware with connect mode (flash it with `pwsh scripts/flash-zone-lights.ps1`). The sign does not take connections.
+- Needs the zone-light firmware with connect mode (flash it with `scripts/boards.sh flash`, or `pwsh scripts/flash-zone-lights.ps1` on Windows). The sign does not take connections.
 - **At most 3 phones per board at a time** (the ESP32 Bluetooth stack's connection limit). A fourth is disconnected at once. So this is a proof for a few phones, not for a crowd.
 - A connected phone gives one distance per board it is connected to: one board = a ring, two = the line, three = 2-D. The sign can't be one of them, so connect mode alone tops out at the line between A and B until there is a third ESP32.
 - The board measures the phone here (not the phone the board), and a phone's radio is not an ESP32's, so connect mode has its own 1 m reference (`connTxPower1m`).

@@ -8,6 +8,8 @@ import { Mesh, type SelfPos } from './mesh';
 import { initPocket, pocketExit, pocketReady, pocketShake, pocketUpdate } from './pocket';
 import { initBeacons } from './beacons';
 import { initNative } from './native';
+import { browserLabel, chromeIntent, embedded, help as envHelp, isIOS, isMobile, reportJoin, type JoinReason } from './env';
+import { drawVenueMap } from './placemap';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -46,28 +48,16 @@ function deviceLabel(): string {
 }
 
 // iPhone and Android hide the same switches in different places, so every
-// "how do I fix this" message is per platform. iPadOS reports itself as a Mac.
-const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-const isSamsung = /SamsungBrowser/.test(navigator.userAgent);
+// "how do I fix this" message is per platform and per browser (env.ts).
+// iPadOS reports itself as a Mac.
 
 const help = {
-  motionDenied: isIOS
-    ? 'Motion access was denied. Tap aA in the address bar → Website Settings → Motion & Orientation Access → Allow, then reload.'
-    : 'Motion sensors are blocked for this site. Tap the icon left of the address → Permissions → Motion sensors → Allow, then reload.',
-  noMotion: isIOS
-    ? 'No motion data. Tap aA → Website Settings → allow Motion & Orientation Access, then reload. Low Power Mode can also pause sensors.'
-    : isSamsung
-      ? 'No motion data. In Samsung Internet: ⋮ → Settings → Sites and downloads → Site permissions → Motion sensors → Allow, then reload.'
-      : 'No motion data. Tap the icon left of the address → Permissions → Motion sensors → Allow, then reload.',
   locationDenied: isIOS
     ? 'Location is off for this site. Settings → Privacy & Security → Location Services → Safari Websites → While Using, then try again.'
     : 'Location is blocked for this site. Tap the icon left of the address → Permissions → Location → Allow, then try again.',
   imprecise: isIOS
     ? 'Your phone is only sharing an approximate location. Settings → Privacy & Security → Location Services → Safari Websites → turn on Precise Location.'
     : 'Your phone is only sharing an approximate location. When the browser asks, choose “Precise”, or turn on Settings → Location → Use precise location.',
-  screen: isIOS
-    ? 'Keep this page open with the screen on. iPhones pause web pages when locked.'
-    : 'Keep this page open with the screen on.',
 };
 
 type Screen = 'join' | 'locate' | 'place' | 'live';
@@ -215,6 +205,7 @@ function showPlace(hint?: string) {
   v.style.aspectRatio = `${cfg.venueW} / ${cfg.venueH}`;
   $('placeHint').textContent = hint ?? 'Tap where you’re standing. Drag to adjust.';
   $('tryGps').hidden = !cfg.geo;
+  void drawVenueMap(cfg.venueW, cfg.venueH); // areas, stage, exits and walls to orient by (placemap.ts)
   draft = manual;
   drawMe();
   show('place');
@@ -281,41 +272,110 @@ function updateWhere() {
 
 type PermissionFn = () => Promise<'granted' | 'denied'>;
 
-$('joinBtn').addEventListener('click', async () => {
-  const err = $('joinErr');
-  err.hidden = true;
-  // Both platforms only expose motion and GPS to HTTPS pages.
-  if (!window.isSecureContext) {
-    err.textContent = 'This page has to be opened over https:// (scan the QR code on the screen) for the sensors to work.';
-    err.hidden = false;
-    return;
+/** What the ?debug=1 panel shows (debug.ts). */
+const dbg = {
+  motionPerm: 'not asked' as string,
+  orientPerm: 'not asked' as string,
+  wakeLock: 'not asked' as string,
+  wsOpens: 0,
+  wsFails: 0,
+  lastClose: '',
+  lastError: '',
+  fields: { acc: false, accG: false, rot: false, interval: 0 },
+};
+
+/** A failure on the Join screen (or the live screen): the fix in words, the server told why. */
+function fail(where: 'join' | 'live', reason: JoinReason, text: string) {
+  dbg.lastError = `${reason}: ${text}`;
+  const el = $(where === 'join' ? 'joinErr' : 'warn');
+  el.textContent = text;
+  el.hidden = false;
+  if (where === 'live') showFixButtons('warnFix', 'warnOpen', reason === 'no-motion' || reason === 'socket' ? embedded : true);
+  reportJoin(id, reason);
+}
+
+/** Copy-link and (Android) open-in-Chrome buttons under a message. */
+function showFixButtons(box: string, open: string, on: boolean) {
+  $(box).hidden = !on;
+  const intent = chromeIntent(location.href);
+  const a = $(open) as HTMLAnchorElement;
+  a.hidden = !intent;
+  if (intent) a.href = intent;
+}
+
+async function copyLink(btn: HTMLElement) {
+  const link = `${location.origin}${location.pathname}${location.search}`;
+  try {
+    await navigator.clipboard.writeText(link);
+    btn.textContent = 'Copied: paste it in your browser';
+  } catch {
+    // Older browsers and some in-app ones: show the link to copy by hand.
+    btn.textContent = link;
   }
-  const req = (DeviceMotionEvent as unknown as { requestPermission?: PermissionFn }).requestPermission;
-  // iOS asks separately for the compass (orientation). Both prompts must start
-  // inside this tap, before any await, or Safari refuses them.
+}
+$('envCopy').addEventListener('click', () => void copyLink($('envCopy')));
+$('warnCopy').addEventListener('click', () => void copyLink($('warnCopy')));
+
+/** Before Join: say straight away when this browser can't work (http, an in-app browser). */
+function checkEnv() {
+  let text = '';
+  if (!window.isSecureContext) {
+    text = envHelp.insecure();
+    reportJoin(id, 'insecure');
+    ($('joinBtn') as HTMLButtonElement).disabled = true;
+    $('envCopy').hidden = true;
+  } else if (embedded) {
+    // Try anyway (some in-app browsers do pass motion on); this is the way out if not.
+    text = `${browserLabel().split(' (')[0]}’s built-in browser may block the motion sensors. If Join doesn’t work, open this page in ${isIOS ? 'Safari' : 'Chrome'}.`;
+  }
+  $('envNote').hidden = !text;
+  $('envText').textContent = text;
+  if (text) showFixButtons('envNote', 'envOpen', true);
+}
+
+$('joinBtn').addEventListener('click', async () => {
+  $('joinErr').hidden = true;
+  // Both platforms only expose motion (and GPS) to HTTPS pages.
+  if (!window.isSecureContext) return fail('join', 'insecure', envHelp.insecure());
+  const req = (window.DeviceMotionEvent as unknown as { requestPermission?: PermissionFn } | undefined)?.requestPermission;
+  // iOS 13+ asks separately for the compass (orientation). Both prompts must
+  // start inside this tap, before any await, or Safari refuses them.
   const orientReq = (window.DeviceOrientationEvent as unknown as { requestPermission?: PermissionFn } | undefined)?.requestPermission;
-  const orientAsked = typeof orientReq === 'function' ? orientReq.call(DeviceOrientationEvent).catch(() => 'denied' as const) : null;
+  let orientAsked: Promise<string> | null = null;
+  try {
+    orientAsked = typeof orientReq === 'function' ? orientReq.call(DeviceOrientationEvent).catch(() => 'denied') : null;
+  } catch {
+    orientAsked = Promise.resolve('denied');
+  }
+  if (!('DeviceMotionEvent' in window)) {
+    dbg.motionPerm = 'no API';
+    return fail('join', 'no-sensor', envHelp.noSensorApi());
+  }
   if (typeof req === 'function') {
+    dbg.motionPerm = 'asking';
     try {
       const r = await req.call(DeviceMotionEvent);
-      if (r !== 'granted') {
-        err.textContent = help.motionDenied;
-        err.hidden = false;
-        return;
-      }
+      dbg.motionPerm = r;
+      if (r !== 'granted') return fail('join', 'motion-denied', envHelp.motionDenied());
     } catch (e) {
-      err.textContent = `Couldn't ask for motion access (${e}). This page needs HTTPS.`;
-      err.hidden = false;
-      return;
+      dbg.motionPerm = `error: ${e}`;
+      return fail('join', 'perm-error', envHelp.permError(e));
     }
-  } else if (!('DeviceMotionEvent' in window)) {
-    err.textContent = 'This browser has no motion sensors.';
-    err.hidden = false;
-    return;
+  } else {
+    dbg.motionPerm = 'no prompt needed';
   }
+  if (!isMobile) {
+    // A laptop has the API but no sensor: say so now rather than after a silent wait.
+    $('joinErr').textContent = envHelp.noMotion();
+    $('joinErr').hidden = false;
+  }
+  save('pulse-joined', '1'); // a reload (the phone slept, the tab was discarded) carries on by itself where it can
   void keepAwake();
   startSensors();
-  void (orientAsked ?? Promise.resolve('granted')).then((r) => r === 'granted' && startCompass());
+  void (orientAsked ?? Promise.resolve('granted')).then((r) => {
+    dbg.orientPerm = orientAsked ? r : 'no prompt needed';
+    if (r === 'granted') startCompass();
+  });
   await loadConfig();
   await loadTower();
   if (tower) {
@@ -397,6 +457,14 @@ function onMotion(e: DeviceMotionEvent) {
   sum.z += z;
   sum.n++;
   sum.rot = Math.max(sum.rot, rot);
+  if (totalSamples % 64 === 0) {
+    // Which fields this phone's sensors fill in (no gyroscope = no acceleration/rotationRate), for ?debug=1.
+    dbg.fields = { acc: !!a && a.x != null, accG: hasG, rot: !!r && r.alpha != null, interval: e.interval };
+  }
+  if (totalSamples === 0) {
+    reportJoin(id, 'ok'); // clears a "no motion" this phone reported earlier
+    $('warnFix').hidden = true;
+  }
   totalSamples++;
 }
 
@@ -405,13 +473,10 @@ function startSensors() {
   sensorsOn = true;
   window.addEventListener('devicemotion', onMotion);
   setInterval(flush, 100);
+  // Some phones take a moment to start the sensors (and an in-app browser may never): wait, then say why.
   setTimeout(() => {
-    if (totalSamples === 0) {
-      const w = $('warn');
-      w.textContent = help.noMotion;
-      w.hidden = false;
-    }
-  }, 2500);
+    if (totalSamples === 0 && !left) fail('live', 'no-motion', envHelp.noMotion());
+  }, 3000);
 }
 
 const r3 = (v: number) => Math.round(v * 1000) / 1000;
@@ -465,6 +530,7 @@ function downVector(): [number, number, number] | null {
 // ---- WebSocket with automatic reconnect ----
 
 let ws: WebSocket | null = null;
+let wsFailsInARow = 0;
 let backoff = 500;
 let reconnectTimer = 0;
 let sent = 0;
@@ -504,9 +570,24 @@ function connect() {
   clearTimeout(reconnectTimer);
   if (mesh.jammed || left) return; // off the WebSocket on purpose
   setConn('Connecting…', '');
-  const sock = new WebSocket(wsURL('/ws/phone'));
+  let sock: WebSocket;
+  try {
+    sock = new WebSocket(wsURL('/ws/phone'));
+  } catch (e) {
+    dbg.lastError = `WebSocket: ${e}`;
+    reconnectTimer = window.setTimeout(connect, backoff);
+    return;
+  }
   ws = sock;
+  // A tunnel hiccup can leave a socket "connecting" for a long time: give up on it and retry.
+  const openTimer = window.setTimeout(() => {
+    if (sock.readyState === WebSocket.CONNECTING) sock.close();
+  }, 8000);
   sock.onopen = () => {
+    clearTimeout(openTimer);
+    dbg.wsOpens++;
+    wsFailsInARow = 0;
+    if (!$('warn').hidden && $('warn').textContent === envHelp.socket()) $('warn').hidden = true;
     backoff = 500;
     sock.send(JSON.stringify(hello()));
     lastSentFix = null;
@@ -526,9 +607,16 @@ function connect() {
       onServer(msg);
     }
   };
-  sock.onclose = () => {
+  sock.onclose = (ev) => {
+    clearTimeout(openTimer);
+    dbg.lastClose = `${ev.code}${ev.reason ? ` ${ev.reason}` : ''} at ${new Date().toLocaleTimeString()}`;
     if (ws !== sock) return;
     ws = null;
+    if (dbg.wsOpens === 0 || ev.code === 1006) {
+      dbg.wsFails++;
+      // Never connected, many times over: the page loads but the socket can't get through.
+      if (++wsFailsInARow >= 4 && dbg.wsOpens === 0) fail('live', 'socket', envHelp.socket());
+    }
     renderLive();
     reconnectTimer = window.setTimeout(connect, backoff);
     backoff = Math.min(backoff * 2, 5000);
@@ -548,6 +636,7 @@ function onServer(msg: ServerMsg) {
     renderLive();
     applyGuidance(msg);
     demoState(msg);
+    renderRow(msg);
   } else if (msg.type === 'shake') {
     demoShake();
     pocketShake();
@@ -556,6 +645,24 @@ function onServer(msg: ServerMsg) {
   } else if (msg.type !== 'ping') {
     mesh.onServer(msg);
   }
+}
+
+/**
+ * The demo spot lines phones up in join order (state.row): tell the person
+ * their number and where to stand, so the row at the table matches the row
+ * on the big screen (which runs left to right, #1 on the left).
+ */
+function renderRow(s: PhoneState) {
+  const r = s.row;
+  $('rowCard').hidden = !r;
+  if (!r) return;
+  $('rowN').textContent = `#${r.n}`;
+  $('rowWhere').textContent =
+    r.n === 1
+      ? 'Stand at the left end of the row, as you face the big screen.'
+      : r.newRow
+        ? 'The first row is full: start a second row at its left end. Your dot on the big screen shows where.'
+        : `Stand to the right of #${r.n - 1}${r.prev ? ` (${r.prev})` : ''}, as you face the big screen.`;
 }
 
 // ---- the phone-to-phone mesh (mesh.ts) ----
@@ -669,6 +776,32 @@ function startLive() {
   pocketReady();
 }
 
+/**
+ * Back on screen (woken up, back from another app, restored from the
+ * back/forward cache) or back online: a socket that has heard nothing for a
+ * few seconds is dead even when the browser hasn't noticed, so start a new
+ * one now instead of waiting for the backoff. Same id, so the server gives
+ * back the same place, name and slot.
+ */
+function revive(why: string) {
+  if (!sensorsOn || left || mesh.jammed) return;
+  void keepAwake();
+  backoff = 500;
+  if (ws && ws.readyState === WebSocket.OPEN && Date.now() - lastWsRx < 4000) return;
+  if (ws && ws.readyState === WebSocket.CONNECTING) return; // already on it
+  if (ws) {
+    const sock = ws;
+    ws = null; // its onclose then doesn't schedule another
+    try {
+      sock.close();
+    } catch {
+      /* already gone */
+    }
+  }
+  console.info(`pulse: reconnecting (${why})`);
+  connect();
+}
+
 // ---- feedback from the server ----
 
 /** What the screen shows right now, for pocket mode (pocket.ts). */
@@ -688,14 +821,14 @@ function applyState(node: string, zone: string, byNeighbour = false) {
   b.classList.toggle('zone-red', zone === 'red');
   const [icon, head, sub] = byNeighbour
     ? zone === 'red'
-      ? ['⚠️', 'Warned by a neighbour', 'Crowd danger close to you. Stay on your feet, arms up in front of your chest. Move sideways, not against the push.']
-      : ['👀', 'Warned by a neighbour', 'Pressure is building close to you. Keep your phone where it is, with this page open.']
+      ? ['⚠️', 'Warned by a neighbour', 'Stay on your feet, arms up in front of your chest.']
+      : ['👀', 'Warned by a neighbour', 'Pressure is building close to you. Keep this page open.']
     : zone === 'red'
-      ? ['⚠️', 'Crowd danger near you', 'Stay on your feet. Arms up in front of your chest. Move sideways, not against the push.']
+      ? ['⚠️', 'Crowd danger near you', 'Stay on your feet, arms up in front of your chest.']
       : node === 'handling'
         ? ['✋', 'Phone is moving around', 'Let it rest in your pocket or your hand so it can feel the crowd.']
         : zone === 'yellow'
-          ? ['👀', 'Pressure building nearby', 'Keep your phone where it is, with this page open.']
+          ? ['👀', 'Pressure building nearby', 'Keep this page open.']
           : node === 'connecting'
             ? ['📡', 'Connecting…', 'Hang on a second.']
             : ['📱', 'You are part of the network', 'Keep this page open. Your pocket or your hand is fine, any way up.'];
@@ -806,13 +939,17 @@ function drawMiniMap(s: PhoneState) {
   g.stroke();
 }
 
-// stats line, so testers can see it's alive
+// Once a second: is it alive? (The numbers themselves are in the ?debug=1 panel.)
 let lastSamples = 0;
+let hz = 0;
 setInterval(() => {
-  const hz = totalSamples - lastSamples;
+  hz = totalSamples - lastSamples;
   lastSamples = totalSamples;
   $('stats').textContent = `${hz} samples/s · ${sent} sent · id ${id.slice(0, 6)}`;
-  if (hz > 0) $('warn').hidden = true;
+  if (hz > 0 && $('warn').textContent === envHelp.noMotion()) {
+    $('warn').hidden = true;
+    $('warnFix').hidden = true;
+  }
   // A socket that has gone silent (the server sends a state every 3 s) is dead even if the browser hasn't noticed.
   if (ws?.readyState === WebSocket.OPEN && gotState && Date.now() - lastWsRx > 12_000) {
     const sock = ws;
@@ -824,27 +961,46 @@ setInterval(() => {
 }, 1000);
 
 // ---- keep the screen on ----
+// The Screen Wake Lock API: Chrome 84+, Samsung Internet 14+, Safari 16.4+.
+// The browser drops the lock whenever the page is hidden, so it is asked for
+// again on every return. Without it (iOS before 16.4, Low Power Mode, some
+// in-app browsers) the tip says how to keep the screen on by hand.
 
-let wakeLock: { release(): Promise<void> } | null = null;
+type Sentinel = { released?: boolean; release(): Promise<void>; addEventListener?(t: 'release', f: () => void): void };
+let wakeLock: Sentinel | null = null;
 async function keepAwake() {
-  try {
-    const wl = (navigator as unknown as { wakeLock?: { request(t: 'screen'): Promise<{ release(): Promise<void> }> } }).wakeLock;
-    if (wl) wakeLock = await wl.request('screen');
-  } catch {
-    /* denied (e.g. Low Power Mode): fall through to the tip */
+  const wl = (navigator as unknown as { wakeLock?: { request(t: 'screen'): Promise<Sentinel> } }).wakeLock;
+  if (!wl) dbg.wakeLock = 'not supported';
+  else if (!wakeLock || wakeLock.released) {
+    try {
+      const s = await wl.request('screen');
+      wakeLock = s;
+      dbg.wakeLock = 'held';
+      s.addEventListener?.('release', () => {
+        dbg.wakeLock = 'released (page hidden)';
+      });
+    } catch (e) {
+      wakeLock = null;
+      dbg.wakeLock = `refused: ${e instanceof Error ? e.name : e}`; // Low Power Mode, or not visible
+    }
   }
-  // Without a wake lock (older iPhones, Low Power Mode) the screen can lock and
-  // the page stops streaming, so say so.
-  $('screenTip').hidden = wakeLock !== null;
-  $('screenTip').textContent = help.screen;
+  $('screenTip').hidden = !!wakeLock && !wakeLock.released;
+  $('screenTip').textContent = envHelp.screen();
 }
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && sensorsOn && !left) {
-    void keepAwake();
-    if (!ws && !mesh.jammed) connect();
-  }
+  if (document.visibilityState === 'visible') revive('visible again');
 });
-void wakeLock;
+// Back from the back/forward cache (iOS Safari does this after a switch to another app).
+window.addEventListener('pageshow', (e) => {
+  if ((e as PageTransitionEvent).persisted) revive('restored from cache');
+});
+window.addEventListener('online', () => revive('back online'));
+window.addEventListener('error', (e) => {
+  dbg.lastError = `${e.message} (${(e.filename ?? '').split('/').pop()}:${e.lineno})`;
+});
+window.addEventListener('unhandledrejection', (e) => {
+  dbg.lastError = `promise: ${String((e as PromiseRejectionEvent).reason).slice(0, 160)}`;
+});
 
 // ---- leave: close the connection for good, then show the privacy receipt (demo.ts) ----
 
@@ -856,6 +1012,7 @@ initLeave({
   linked: () => mesh.status().links,
   leave: () => {
     left = true;
+    save('pulse-joined', ''); // "Join again" starts from the Join screen
     mesh.stop();
     pocketExit();
     clearTimeout(reconnectTimer);
@@ -876,3 +1033,50 @@ initBeacons(id, (m) => ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringi
 initNative(id, (m) => ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify(m)), hello);
 
 show('join');
+checkEnv();
+(window as unknown as { __pulseBooted: boolean }).__pulseBooted = true;
+
+// The page was reloaded after this person joined (the phone slept and the
+// browser threw the tab away, or a tunnel hiccup reloaded it). Where no
+// permission prompt is needed (Android, the app) carry straight on with the
+// same id, so the server gives back the same place in the row. An iPhone
+// must tap again: Safari only asks for motion inside a tap.
+if (load('pulse-joined') === '1' && window.isSecureContext) {
+  const needsTap = typeof (window.DeviceMotionEvent as unknown as { requestPermission?: unknown } | undefined)?.requestPermission === 'function';
+  if (needsTap) {
+    $('joinBtn').textContent = 'Carry on';
+    document.querySelector('#join .lead')!.textContent = 'You were already in. Tap to carry on where you were.';
+  } else {
+    $('joinBtn').click();
+  }
+}
+
+// ?debug=1: a panel with the sensor rate, permissions, socket and clock, for troubleshooting at the table (debug.ts, loaded only then).
+if (new URLSearchParams(location.search).has('debug')) {
+  void import('./debug').then((d) =>
+    d.startDebug(() => ({
+      id: id.slice(0, 8),
+      browser: browserLabel(),
+      secure: window.isSecureContext,
+      hz,
+      samples: totalSamples,
+      sent,
+      fields: dbg.fields,
+      motionPerm: dbg.motionPerm,
+      orientPerm: dbg.orientPerm,
+      compass: heading === null ? 'none' : `${Math.round(heading)}°`,
+      wakeLock: dbg.wakeLock,
+      socket: ws ? ['connecting', 'open', 'closing', 'closed'][ws.readyState] : mesh.jammed ? 'off (lost-signal demo)' : 'none',
+      lastRx: lastWsRx ? Math.round((Date.now() - lastWsRx) / 100) / 10 : -1,
+      opens: dbg.wsOpens,
+      fails: dbg.wsFails,
+      lastClose: dbg.lastClose,
+      clockOffset,
+      state: lastState,
+      mesh: mesh.status().links,
+      cfg: { demo: !!cfg.demo, geo: cfg.geo, w: cfg.venueW, h: cfg.venueH },
+      mode,
+      lastError: dbg.lastError,
+    })),
+  );
+}

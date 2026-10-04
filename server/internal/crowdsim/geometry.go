@@ -12,6 +12,14 @@ type Exit struct {
 	X0, Y0, X1, Y1 float64
 	Open           bool
 	nx, ny         float64 // outward normal
+	// Furnished venues (venue.go). Inner: a door between two rooms, not a
+	// way out of the venue. Emergency: used only when the alarm sounds.
+	// Rate > 0: a turnstile that lets one person through every 1/Rate s.
+	Inner, Emergency bool
+	Rate             float64
+	token            *Agent // turnstile: the person going through
+	tokenAt, nextAt  float64
+	regIn, regOut    int // rooms on the −normal and +normal sides (nav.go)
 }
 
 // mid is the middle of the gap.

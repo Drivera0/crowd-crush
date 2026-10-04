@@ -12,7 +12,6 @@
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
 const HOLD_MS = 2000;
-const HINT_AFTER_MS = 6000;
 
 export interface PocketView {
   zone: string; // '' | calm | yellow | red
@@ -25,8 +24,6 @@ export interface PocketView {
 let on = false;
 let view: PocketView = { zone: '', byNeighbour: false, move: null };
 let holdTimer = 0;
-let hintTimer = 0;
-let hintShown = false;
 let wasDanger = false;
 
 const danger = () => view.zone === 'red' || !!view.move;
@@ -40,7 +37,7 @@ function render() {
     $('pocketArrow').style.transform = `rotate(${view.move.angle}deg)`;
     $('pocketTo').textContent = view.move.to;
   } else {
-    $('pocketTo').textContent = 'Stay on your feet. Arms up in front of your chest.';
+    $('pocketTo').textContent = 'Stay on your feet.';
   }
   $('pocketHead').textContent = view.move ? 'Move this way' : view.byNeighbour ? 'Warned by a neighbour' : 'Crowd danger near you';
   $('pocketLine').textContent = danger()
@@ -83,7 +80,6 @@ function enter() {
   if (on) return;
   on = true;
   wasDanger = danger();
-  dismissHint();
   $('pocket').hidden = false;
   render();
   // Android: full screen hides the address bar and the system bars, so there is less to hit. iPhones have no full screen for pages.
@@ -123,21 +119,10 @@ function cancelHold() {
   $('pocket').classList.remove('holding');
 }
 
-function dismissHint() {
-  window.clearTimeout(hintTimer);
-  hintShown = true;
-  $('pocketHint').hidden = true;
-}
 
-/** Call when the phone goes live: shows the button and, a few seconds later, the hint. */
+/** Call when the phone goes live: shows the one Pocket mode button. */
 export function pocketReady() {
   $('pocketBtn').hidden = false;
-  $('pocketHelp').hidden = false;
-  if (hintShown || hintTimer) return;
-  hintTimer = window.setTimeout(() => {
-    if (!on && !hintShown && !$('live').hidden) $('pocketHint').hidden = false;
-    hintShown = true;
-  }, HINT_AFTER_MS);
 }
 
 export function initPocket(isIOS: boolean) {
@@ -145,8 +130,6 @@ export function initPocket(isIOS: boolean) {
     ? 'Want a hard lock? Turn on Guided Access (Settings → Accessibility), then triple-click the side button on this page.'
     : 'Want a hard lock? Pin this app: Settings → Security → App pinning, then pin the browser from the recent-apps screen.';
   $('pocketBtn').addEventListener('click', enter);
-  $('pocketHintGo').addEventListener('click', enter);
-  $('pocketHintNo').addEventListener('click', dismissHint);
   const el = $('pocket');
   // One finger (or the mouse) held down for two seconds; anything else is swallowed.
   el.addEventListener('pointerdown', (e) => {

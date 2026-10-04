@@ -50,8 +50,9 @@ func main() {
 	zoneRows := flag.Int("zone-rows", 0, "default zones down the venue (overrides config)")
 	escalate := flag.Duration("escalate-after", envDuration("PULSE_ESCALATE_AFTER", app.DefaultEscalateAfter), "re-announce a red alert nobody acknowledged after this long; 0 = never (env PULSE_ESCALATE_AFTER)")
 	check := flag.Bool("check", false, "test the services configured in .env and exit")
+	preflight := flag.Bool("preflight", false, "go/no-go list for the table demo, against the server already running on -addr, then exit")
 	dumpConfig := flag.Bool("dump-config", false, "print the detector config as JSON and exit")
-	publicURL := flag.String("public-url", os.Getenv("PUBLIC_URL"), "URL phones should open (for the QR code); default: the dashboard's own host")
+	publicURL := flag.String("public-url", os.Getenv("PUBLIC_URL"), "URL phones should open (the QR code); a link set in the dashboard wins over it; default: a running Cloudflare quick tunnel, else the dashboard's own host")
 	flag.Parse()
 
 	cfg := detect.DefaultConfig()
@@ -78,6 +79,9 @@ func main() {
 	}
 	if *check {
 		os.Exit(runCheck(*audioDir))
+	}
+	if *preflight {
+		os.Exit(runPreflight(*addr, *publicURL))
 	}
 	if *dumpConfig {
 		b, _ := json.MarshalIndent(cfg, "", "  ")
@@ -117,10 +121,8 @@ func main() {
 	a.Routes(mux)
 	mux.Handle("GET /audio/", http.StripPrefix("/audio/", http.FileServer(http.Dir(*audioDir))))
 	mux.HandleFunc("GET /api/qr.png", func(w http.ResponseWriter, r *http.Request) {
-		u := *publicURL
-		if u == "" {
-			u = requestBaseURL(r)
-		}
+		// The same URL as GET /api/join: staff setting, PUBLIC_URL, quick tunnel, then this request's host.
+		u := a.JoinInfo(r).URL
 		link := strings.TrimRight(u, "/") + "/"
 		// ?at=<key>: a tower's check-in code (the join link with ?at=<key>).
 		if at := r.URL.Query().Get("at"); at != "" {
@@ -137,14 +139,12 @@ func main() {
 			return
 		}
 		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "no-store") // the link can change without a restart
 		w.Header().Set("X-Phone-URL", u)
 		w.Write(png)
 	})
 	mux.HandleFunc("GET /api/phone-url", func(w http.ResponseWriter, r *http.Request) {
-		u := *publicURL
-		if u == "" {
-			u = requestBaseURL(r)
-		}
+		u := a.JoinInfo(r).URL
 		w.Header().Set("Content-Type", "text/plain")
 		fmt.Fprint(w, strings.TrimRight(u, "/")+"/")
 	})

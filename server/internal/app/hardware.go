@@ -80,7 +80,8 @@ func hardwareList(st []sign.Status, prev []protocol.Hardware, areas []protocol.A
 	out := make([]protocol.Hardware, 0, len(st))
 	for _, s := range st {
 		was := last[s.URL]
-		h := protocol.Hardware{URL: s.URL, Zone: s.Zone, Online: s.Online, Error: s.Err, LastSeen: was.LastSeen, Kind: "sign"}
+		h := protocol.Hardware{URL: s.URL, Zone: s.Zone, Online: s.Online, Error: s.Err, LastSeen: was.LastSeen, Kind: "sign",
+			Link: s.Link, Port: s.Port}
 		if s.Zone != "" {
 			h.Kind = "zone-light"
 		}
@@ -91,9 +92,15 @@ func hardwareList(st []sign.Status, prev []protocol.Hardware, areas []protocol.A
 			h.Online, h.Error = true, ""
 			h.Kind, h.RSSI, h.Uptime, h.Level, h.BLE = was.Kind, was.RSSI, was.Uptime, was.Level, was.BLE
 			h.Beacon, h.Peers = was.Beacon, was.Peers
+			h.Link, h.Port, h.FW, h.WiFi, h.SSID, h.IP = was.Link, was.Port, was.FW, was.WiFi, was.SSID, was.IP
+		}
+		if s.Online && s.Pulse == nil && was.LastSeen > 0 {
+			// Online, but its status line was missed this time: keep the last one's details.
+			h.FW, h.WiFi, h.SSID, h.IP = was.FW, was.WiFi, was.SSID, was.IP
 		}
 		if p := s.Pulse; p != nil {
 			h.Kind, h.RSSI, h.Uptime, h.Level = p.Kind, p.RSSI, p.Uptime, p.Level
+			h.FW, h.WiFi, h.SSID, h.IP = p.FW, p.WiFi, p.SSID, p.IP
 			h.Beacon = p.Name
 			h.Peers = nil
 			for _, pe := range p.Peers {
@@ -109,6 +116,11 @@ func hardwareList(st []sign.Status, prev []protocol.Hardware, areas []protocol.A
 		h.Name = "Sign"
 		if s.Zone != "" {
 			h.Name = "Zone light " + s.Zone
+		}
+		if h.Online {
+			// Firmware in the board vs the sketch in this checkout.
+			h.FWWant = sign.WantFW(h.Kind)
+			h.FWOld = h.FWWant != "" && sign.FWHash(h.FW) != h.FWWant
 		}
 		h.Areas = lightAreas(areas, s.Zone)
 		out = append(out, h)

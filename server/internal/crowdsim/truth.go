@@ -135,17 +135,21 @@ func (w *World) AdvanceTo(nowMs int64) {
 	}
 }
 
-// Bodies is everyone as [x, y, pressure, hasPhone, density] for the
-// dashboard: x, y to the centimetre, pressure in whole N/m, density =
-// PackedDensity to one decimal.
-func (w *World) Bodies() [][5]float64 {
-	out := make([][5]float64, len(w.agents))
+// Bodies is everyone as [x, y, pressure, hasPhone, density, heading, state]
+// for the dashboard: x, y to the centimetre, pressure in whole N/m,
+// density = PackedDensity to one decimal, heading = the body's facing in
+// whole degrees (0 = +x, clockwise on the map since y points down), state
+// = StStanding … StPushing (person.go).
+func (w *World) Bodies() [][7]float64 {
+	out := make([][7]float64, len(w.agents))
 	for i, a := range w.agents {
 		ph := 0.0
 		if a.phone != nil {
 			ph = 1
 		}
-		out[i] = [5]float64{math.Round(a.X*100) / 100, math.Round(a.Y*100) / 100, math.Round(a.Pressure), ph, round1(w.PackedDensity(a))}
+		deg := math.Round(a.face * 180 / math.Pi)
+		deg = math.Mod(deg+720, 360)
+		out[i] = [7]float64{math.Round(a.X*100) / 100, math.Round(a.Y*100) / 100, math.Round(a.Pressure), ph, round1(w.PackedDensity(a)), deg, float64(w.wireState(a))}
 	}
 	return out
 }
@@ -167,7 +171,8 @@ func (w *World) PackedDensity(a *Agent) float64 {
 // Status describes the world for GET /api/sim (the app adds the alert time).
 func (w *World) Status() protocol.SimStatus {
 	s := protocol.SimStatus{Running: true, T: round1(w.T), People: len(w.agents), Phones: w.Phones(),
-		Participation: w.Participation, Action: w.Action}
+		Participation: w.Participation, Action: w.Action, Scenario: w.Scenario(),
+		Venue: &protocol.VenueSize{W: w.G.W, H: w.G.H}, Furniture: w.vs.furniture}
 	s.Exits, s.Walls = GeometryJSON(w.G)
 	tr := w.truth
 	s.Truth = &protocol.SimTruth{MaxDensity: round2(tr.MaxDensity), MaxPressure: math.Round(tr.MaxPressure), Crushing: tr.Crushing}
@@ -183,6 +188,14 @@ func GeometryJSON(g *Geometry) ([]protocol.SimExit, [][4]float64) {
 	exits := make([]protocol.SimExit, len(g.Exits))
 	for i, e := range g.Exits {
 		exits[i] = protocol.SimExit{ID: e.ID, Name: e.Name, X0: round2(e.X0), Y0: round2(e.Y0), X1: round2(e.X1), Y1: round2(e.Y1), Open: e.Open}
+		switch {
+		case e.Inner:
+			exits[i].Kind = "door"
+		case e.Rate > 0:
+			exits[i].Kind = "turnstile"
+		case e.Emergency:
+			exits[i].Kind = "emergency"
+		}
 	}
 	walls := make([][4]float64, len(g.Walls))
 	for i, s := range g.Walls {

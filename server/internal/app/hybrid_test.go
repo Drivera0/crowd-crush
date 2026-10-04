@@ -214,7 +214,7 @@ func TestHybridSurgeSpots(t *testing.T) {
 // hybrid step in the loop is bit-for-bit the simulation without it, and
 // there is nothing to surge around.
 func TestHybridNoPhones(t *testing.T) {
-	run := func(hybrid bool) ([][5]float64, []protocol.Node) {
+	run := func(hybrid bool) ([][7]float64, []protocol.Node) {
 		r := newHybridRun(t, 0, 0, 0)
 		if err := r.a.startSimAt(SimStart{People: 120, Participation: 0.6, Seed: 3}, simT0); err != nil {
 			t.Fatal(err)

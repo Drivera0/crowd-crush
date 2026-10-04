@@ -3,43 +3,38 @@
 #   pwsh scripts/flash-sign.ps1            # find the board, compile, upload, read its IP, update .env
 #   pwsh scripts/flash-sign.ps1 -Port COM7 # pick the port yourself
 #   pwsh scripts/flash-sign.ps1 -NoUpload  # just read the IP from a board that is already flashed
+#   pwsh scripts/flash-sign.ps1 -NoEnv     # don't touch .env
 #   pwsh scripts/flash-sign.ps1 -Beacon    # Bluetooth beacon "PULSE-S" instead of Wi-Fi: the sign is then driven over USB only
 #                                          # (set SIGN_URL=serial:auto yourself; .env is not touched)
 #
-# Needs the Arduino IDE 2 (its bundled arduino-cli is used) or arduino-cli on PATH,
-# and arduino/sign/arduino_secrets.h with your Wi-Fi name and password
-# (copied from arduino_secrets.h.example on first run). The R4 only joins 2.4 GHz networks.
+# Needs the Arduino IDE 2 (its bundled arduino-cli is used) or arduino-cli on PATH.
+# arduino/sign/arduino_secrets.h holds the Wi-Fi name and password (optional: without it the sign
+# works over USB only; copied from arduino_secrets.h.example on first run). The R4 only joins 2.4 GHz networks.
+# The firmware gets a build id (pulse_build.h) so `pwsh scripts/boards.ps1 status` can say if it is current.
+# Close the Arduino IDE serial monitor and stop a Pulse server that drives the sign over USB first.
 
 param(
   [string]$Port = '',
   [switch]$NoUpload,
+  [switch]$NoEnv,
   [switch]$Beacon,
   [int]$TimeoutSec = 60
 )
 
 $ErrorActionPreference = 'Stop'
+. "$PSScriptRoot/boards-lib.ps1"
 $repo = Split-Path -Parent $PSScriptRoot
 $sketch = Join-Path $repo 'arduino/sign'
 $secrets = Join-Path $sketch 'arduino_secrets.h'
 $fqbn = 'arduino:renesas_uno:unor4wifi'
+$cli = Get-ArduinoCli
 
-# ---- arduino-cli
-$cli = (Get-Command arduino-cli -ErrorAction SilentlyContinue).Source
-if (-not $cli) {
-  $bundled = Join-Path $env:LOCALAPPDATA 'Programs\Arduino IDE\resources\app\lib\backend\resources\arduino-cli.exe'
-  if (Test-Path $bundled) { $cli = $bundled }
-}
-if (-not $cli) { throw 'arduino-cli not found. Install Arduino IDE 2 (https://www.arduino.cc/en/software) or arduino-cli.' }
-
-# ---- Wi-Fi secrets
+# ---- Wi-Fi secrets (optional)
 if (-not (Test-Path $secrets)) {
   Copy-Item (Join-Path $sketch 'arduino_secrets.h.example') $secrets
   Write-Host "Created $secrets"
   Write-Host 'Put your Wi-Fi name and password in it (2.4 GHz; a phone hotspot works), then run this again.'
-  exit 1
-}
-if ((Get-Content $secrets -Raw) -match '"your-wifi"|"your-password"') {
-  Write-Host "Fill in your Wi-Fi name and password in $secrets first, then run this again."
+  Write-Host 'Or skip Wi-Fi: the sign works over USB (SIGN_URL=serial:auto). Run this again to flash it as is.'
   exit 1
 }
 
@@ -55,19 +50,19 @@ Write-Host "Board on $Port"
 
 # ---- compile and upload (from a local copy: arduino-cli can't build from a \\wsl$ path)
 if (-not $NoUpload) {
-  $tmp = Join-Path $env:TEMP 'pulse-sign-build\sign'
-  New-Item -ItemType Directory -Force $tmp | Out-Null
-  Copy-Item (Join-Path $sketch 'sign.ino'), $secrets $tmp -Force
+  $root = Join-Path $env:TEMP 'pulse-sign-build'
+  Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue
+  $b = New-SketchBuildDir $sketch 'sign' $root
   & $cli core install arduino:renesas_uno | Out-Null
-  Write-Host 'Compiling and uploading…'
+  Write-Host "Compiling and uploading firmware $($b.Fw)…"
   if ($Beacon) {
     & $cli lib install ArduinoBLE | Out-Null
-    & $cli compile --fqbn $fqbn --build-property 'compiler.cpp.extra_flags=-DSIGN_BEACON=1' --upload --port $Port $tmp
+    & $cli compile --fqbn $fqbn --build-property 'compiler.cpp.extra_flags=-DSIGN_BEACON=1' --upload --port $Port $b.Dir
   } else {
-    & $cli compile --fqbn $fqbn --upload --port $Port $tmp
+    & $cli compile --fqbn $fqbn --upload --port $Port $b.Dir
   }
-  if ($LASTEXITCODE -ne 0) { throw 'Upload failed. Close the Arduino IDE serial monitor if it is open, and try again.' }
-  Remove-Item -Recurse -Force (Split-Path $tmp) -ErrorAction SilentlyContinue
+  if ($LASTEXITCODE -ne 0) { throw 'Upload failed. Close the Arduino IDE serial monitor (and stop Pulse if it drives the sign over USB), and try again. Still stuck: double-tap the RESET button and retry.' }
+  Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue
   Start-Sleep -Seconds 2 # board resets after upload
 }
 
@@ -76,30 +71,37 @@ if ($Beacon) {
   exit 0
 }
 
-# ---- read "Sign ready: SIGN_URL=http://x.x.x.x" from the serial port
+# ---- ask the sign over USB for its status until it has joined Wi-Fi
 Write-Host "Waiting up to $TimeoutSec s for the sign to join Wi-Fi…"
-$sp = New-Object System.IO.Ports.SerialPort $Port, 115200
-$sp.ReadTimeout = 1000
-$sp.DtrEnable = $true
+$sp = Open-BoardPort $Port $true
 $url = $null
+$st = $null
 $deadline = (Get-Date).AddSeconds($TimeoutSec)
 try {
-  $sp.Open()
   while (-not $url -and (Get-Date) -lt $deadline) {
-    try { $line = $sp.ReadLine() } catch [TimeoutException] { continue }
-    $line = $line.Trim()
-    if ($line) { Write-Host "  sign: $line" }
-    if ($line -match 'SIGN_URL=(http://[0-9.]+)') { $url = $Matches[1] }
+    $s = Get-BoardStatus $sp 3
+    if ($s) {
+      $st = $s
+      if ($s.wifi -and $s.ip) { $url = "http://$($s.ip)" }
+      elseif ($s.wifi) {
+        # Older firmware has no "ip": fall back to its boot line.
+        $line = Wait-BoardLine $sp 'Sign ready:' 2
+        if ($line -match 'SIGN_URL=(http://[0-9.]+)') { $url = $Matches[1] }
+      }
+    }
+    if (-not $url) { Start-Sleep -Seconds 1 }
   }
 } finally {
   if ($sp.IsOpen) { $sp.Close() }
 }
+if ($st) { Write-Host "  sign: firmware $($st.fw), level $($st.level), Wi-Fi $(if ($st.wifi) { $st.ssid } else { "not joined (trying $($st.ssid))" })" }
 if (-not $url) {
-  Write-Host 'No IP yet. Check the Wi-Fi name/password, that the network is 2.4 GHz, then press the board''s RESET button and run:'
-  Write-Host "  pwsh scripts/flash-sign.ps1 -NoUpload -Port $Port"
+  Write-Host 'No Wi-Fi yet. The sign still works over USB (SIGN_URL=serial:auto with the server running natively on this PC).'
+  Write-Host 'For Wi-Fi: check the name/password (2.4 GHz), or set a network over USB: pwsh scripts/boards.ps1 wifi'
   exit 1
 }
 Write-Host "Sign is at $url"
+if ($NoEnv) { exit 0 }
 
 # ---- SIGN_URL in .env (keeps any per-zone boards listed after the first entry)
 $envFile = Join-Path $repo '.env'

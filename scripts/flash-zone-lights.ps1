@@ -1,109 +1,118 @@
 # Flash the Pulse zone lights (ESP32 DevKit V1, one per zone) from Windows and add them to SIGN_URL.
-# Each board is then told its zone (GET /level?v=calm&zone=X) so its Bluetooth beacon reads PULSE-X.
+# Each board keeps the zone it already knows (stored in its flash); one that has none gets its letter
+# from arduino/zone-light/zones.map (by MAC) or the next free one, sent over USB ("L calm X"), so its
+# Bluetooth beacon reads PULSE-X. No Wi-Fi is needed for any of this.
 #
-#   pwsh scripts/flash-zone-lights.ps1                 # every ESP32 plugged in → zones A, B, … in port order
-#   pwsh scripts/flash-zone-lights.ps1 -Zones B,A      # pick which zone each board (in port order) shows
-#   pwsh scripts/flash-zone-lights.ps1 -NoUpload       # just read the IPs from boards already flashed
+#   pwsh scripts/flash-zone-lights.ps1                 # every ESP32 plugged in, one at a time
+#   pwsh scripts/flash-zone-lights.ps1 -Ports COM9     # just this one
+#   pwsh scripts/flash-zone-lights.ps1 -Zones B,A      # force the zone of each board (in port order)
+#   pwsh scripts/flash-zone-lights.ps1 -NoUpload       # just read zones and addresses from boards already flashed
+#   pwsh scripts/flash-zone-lights.ps1 -NoEnv          # don't touch .env
 #
-# Needs the CP210x USB driver (Windows Update → Optional updates, or silabs.com), the
-# "esp32 by Espressif" core in arduino-cli, and arduino/zone-light/arduino_secrets.h with
-# your Wi-Fi (copied from the sign's on first run). ESP32s only join 2.4 GHz networks.
+# Needs the CP210x USB driver (Windows Update → Optional updates, or silabs.com) and the
+# "esp32 by Espressif" core in arduino-cli (installed if missing). arduino/zone-light/arduino_secrets.h
+# is optional (Wi-Fi; copied from the sign's if missing). ESP32s only join 2.4 GHz networks.
+# Close any serial monitor and stop a Pulse server that drives the boards over USB first.
 
 param(
   [string[]]$Zones = @(),
   [string[]]$Ports = @(),
   [switch]$NoUpload,
-  [int]$TimeoutSec = 40
+  [switch]$NoEnv,
+  [int]$TimeoutSec = 30
 )
 
 $ErrorActionPreference = 'Stop'
+. "$PSScriptRoot/boards-lib.ps1"
 $repo = Split-Path -Parent $PSScriptRoot
 $sketch = Join-Path $repo 'arduino/zone-light'
 $secrets = Join-Path $sketch 'arduino_secrets.h'
 # Huge APP partition: Wi-Fi + Bluetooth + web server don't fit the default 1.2 MB app slot.
 $fqbn = 'esp32:esp32:esp32:PartitionScheme=huge_app'
+$cli = Get-ArduinoCli
 
-# ---- arduino-cli
-$cli = (Get-Command arduino-cli -ErrorAction SilentlyContinue).Source
-if (-not $cli) {
-  $bundled = Join-Path $env:LOCALAPPDATA 'Programs\Arduino IDE\resources\app\lib\backend\resources\arduino-cli.exe'
-  if (Test-Path $bundled) { $cli = $bundled }
-}
-if (-not $cli) { throw 'arduino-cli not found. Install Arduino IDE 2 or arduino-cli.' }
-
-# ---- Wi-Fi secrets (reuse the sign's if this sketch has none)
+# ---- Wi-Fi secrets: optional (reuse the sign's if this sketch has none)
 if (-not (Test-Path $secrets)) {
   $signSecrets = Join-Path $repo 'arduino/sign/arduino_secrets.h'
   if (Test-Path $signSecrets) { Copy-Item $signSecrets $secrets }
-  else {
-    Copy-Item (Join-Path $sketch 'arduino_secrets.h.example') $secrets
-    Write-Host "Put your Wi-Fi name and password in $secrets, then run this again."
-    exit 1
-  }
+  else { Write-Host 'No arduino_secrets.h: building without Wi-Fi (USB only). Set Wi-Fi later with: pwsh scripts/boards.ps1 wifi' }
 }
 
 # ---- boards: CP210x / CH340 USB-serial ports
-if (-not $Ports) {
-  $Ports = Get-CimInstance Win32_PnPEntity |
-    Where-Object { $_.PNPDeviceID -match 'VID_(10C4|1A86)' -and $_.Name -match '\((COM\d+)\)' } |
-    ForEach-Object { if ($_.Name -match '\((COM\d+)\)') { $Matches[1] } } |
-    Sort-Object { [int]($_ -replace 'COM', '') }
-}
+if (-not $Ports) { $Ports = @(Get-BoardPorts | Where-Object { -not $_.Arduino } | ForEach-Object { $_.Port }) }
 if (-not $Ports) {
   throw 'No ESP32 found. Install the CP210x driver (Windows Update → Optional updates, or silabs.com) and use a data USB cable.'
 }
-if (-not $Zones) { $Zones = for ($i = 0; $i -lt $Ports.Count; $i++) { [string][char](65 + $i) } }
-if ($Zones.Count -lt $Ports.Count) { throw "Got $($Ports.Count) boards but only $($Zones.Count) zones." }
-Write-Host ("Boards: " + (($Ports | ForEach-Object -Begin { $i = 0 } -Process { "$_ → zone $($Zones[$i++])" }) -join ', '))
+Write-Host ("Boards: " + ($Ports -join ', '))
 
-# ---- compile once (from a local copy: arduino-cli can't build from a \\wsl$ path), upload to each
+# ---- compile once, upload to each, one at a time
 if (-not $NoUpload) {
-  $tmp = Join-Path $env:TEMP 'pulse-zone-build\zone-light'
-  New-Item -ItemType Directory -Force $tmp | Out-Null
-  Copy-Item (Join-Path $sketch 'zone-light.ino'), $secrets $tmp -Force
-  $build = Join-Path $env:TEMP 'pulse-zone-build\out'
-  Write-Host 'Compiling…'
-  & $cli compile --fqbn $fqbn --output-dir $build $tmp
+  $tmp = Join-Path $env:TEMP 'pulse-zone-build'
+  Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+  $b = New-SketchBuildDir $sketch 'zone-light' $tmp
+  $build = Join-Path $tmp 'out'
+  & $cli core install esp32:esp32 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json | Out-Null
+  Write-Host "Compiling firmware $($b.Fw)…"
+  & $cli compile --fqbn $fqbn --output-dir $build $b.Dir
   if ($LASTEXITCODE -ne 0) { throw 'Compile failed.' }
   foreach ($p in $Ports) {
     Write-Host "Uploading to $p… (if it sticks at 'Connecting…', hold the BOOT button)"
-    & $cli upload --fqbn $fqbn --port $p --input-dir $build $tmp
-    if ($LASTEXITCODE -ne 0) { throw "Upload to $p failed. Close any serial monitor on it and retry." }
+    & $cli upload --fqbn $fqbn --port $p --input-dir $build $b.Dir
+    if ($LASTEXITCODE -ne 0) { throw "Upload to $p failed. Close any serial monitor on it (and stop Pulse if it drives it over USB) and retry." }
   }
-  Remove-Item -Recurse -Force (Split-Path $tmp) -ErrorAction SilentlyContinue
+  Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }
 
-# ---- read "Zone light ready: http://x.x.x.x" from each board (reset it first so it prints again)
+# ---- zone map (MAC → letter)
+$map = @{}
+$mapFile = Join-Path $sketch 'zones.map'
+if (Test-Path $mapFile) {
+  Get-Content $mapFile | Where-Object { $_ -match '^\s*([0-9A-Fa-f]{4})\s*=\s*([A-Za-z0-9_-]+)' } | ForEach-Object {
+    $null = $_ -match '^\s*([0-9A-Fa-f]{4})\s*=\s*([A-Za-z0-9_-]+)'
+    $map[$Matches[1].ToUpper()] = $Matches[2].ToUpper()
+  }
+}
+
+# ---- ask each board over USB who it is; give a zone to one that has none
 $found = @{}
-for ($i = 0; $i -lt $Ports.Count; $i++) {
-  $p = $Ports[$i]
-  $sp = New-Object System.IO.Ports.SerialPort $p, 115200
-  $sp.ReadTimeout = 1000
-  $url = $null
+$used = @{}
+$want = @{}
+for ($i = 0; $i -lt $Ports.Count; $i++) { if ($Zones.Count -gt $i) { $want[$Ports[$i]] = $Zones[$i].ToUpper() } }
+foreach ($p in $Ports) {
+  $sp = Open-BoardPort $p $false
   try {
-    $sp.Open()
-    # EN/RTS pulse resets the ESP32 so it prints its address again.
-    $sp.DtrEnable = $false; $sp.RtsEnable = $true; Start-Sleep -Milliseconds 120; $sp.RtsEnable = $false
-    $deadline = (Get-Date).AddSeconds($TimeoutSec)
-    while (-not $url -and (Get-Date) -lt $deadline) {
-      try { $line = $sp.ReadLine().Trim() } catch [TimeoutException] { continue }
-      if ($line -match 'ready: (http://[0-9.]+)') { $url = $Matches[1] }
+    $st = Get-BoardStatus $sp $TimeoutSec
+    if (-not $st) { Write-Host "  ${p}: no answer over USB (old firmware? run without -NoUpload)"; continue }
+    $z = $st.zone
+    if ($want[$p]) { $z = $want[$p] }
+    elseif (-not $z -and $map[$st.mac]) { $z = $map[$st.mac] }
+    elseif (-not $z) { foreach ($c in [char[]]'ABCDEFGHIJKLMNOPQRSTUVWXYZ') { if (-not $used["$c"] -and -not ($map.Values -contains "$c")) { $z = "$c"; break } } }
+    if ($z -ne $st.zone) {
+      $sp.Write("L $($st.level) $z`n")
+      Start-Sleep -Milliseconds 300
+      $st = Get-BoardStatus $sp 3
     }
+    $used[$z] = $true
+    # Just flashed: give it a moment to join Wi-Fi (USB works either way).
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while (-not $st.wifi -and $st.ssid -and (Get-Date) -lt $deadline) {
+      Start-Sleep -Seconds 2
+      $s2 = Get-BoardStatus $sp 3
+      if ($s2) { $st = $s2 }
+    }
+    $wifi = if ($st.wifi) { "on $($st.ssid) at http://$($st.ip)" } else { "no Wi-Fi yet ($(if ($st.ssid) { "trying $($st.ssid)" } else { 'none set' }))" }
+    Write-Host "  $p → $($st.name) (MAC $($st.mac)), firmware $($st.fw), $wifi"
+    $found[$z] = if ($st.wifi -and $st.ip) { "http://$($st.ip)" } else { 'serial:auto' }
   } finally {
     if ($sp.IsOpen) { $sp.Close() }
   }
-  if ($url) {
-    Write-Host "  $p → zone $($Zones[$i]) at $url"
-    $found[$Zones[$i]] = $url
-    # Tell it its zone right away so its Bluetooth beacon says PULSE-<zone> (the board keeps it in flash).
-    # It was just reset, so it's calm anyway; the server sends the live level on its next update.
-    try { Invoke-WebRequest "$url/level?v=calm&zone=$($Zones[$i])" -TimeoutSec 5 -UseBasicParsing | Out-Null }
-    catch { Write-Host "  (couldn't set zone on $url yet; the server will on its next update)" }
-  } else {
-    Write-Host "  ${p}: no address within $TimeoutSec s (check Wi-Fi name/password, 2.4 GHz)."
-  }
 }
 if (-not $found.Count) { exit 1 }
+
+if ($NoEnv) {
+  Write-Host ('Boards: ' + (($found.Keys | Sort-Object | ForEach-Object { "$_=$($found[$_])" }) -join ','))
+  exit 0
+}
 
 # ---- SIGN_URL in .env: keep the main sign and other zones, replace these zones
 $envFile = Join-Path $repo '.env'
@@ -119,4 +128,4 @@ if ($text -match '(?m)^SIGN_URL=') { $text = $text -replace '(?m)^SIGN_URL=.*$',
 else { $text = $text.TrimEnd() + "`nSIGN_URL=$value`n" }
 [System.IO.File]::WriteAllText($envFile, $text.Replace("`r`n", "`n"))
 Write-Host "SIGN_URL=$value"
-Write-Host 'Restart the server and press "Run test alert" on the dashboard.'
+Write-Host 'Restart the server and press "Run test alert" on the dashboard. (serial:auto entries need the server running natively on this PC, not in WSL.)'

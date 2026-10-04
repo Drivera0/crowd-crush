@@ -15,12 +15,29 @@
 // and the phones running the Pulse Android app that this board hears advertising (below),
 //   "heard":[{"id":"1a2b3c4d","rssi":-63,"age":1}]
 // GET /links → {"links":[...],"heard":[...]}: just those two, cheap enough for the server to poll every second.
+// /pulse also carries "fw" (firmware build id: content hash of this sketch + build date),
+// "wifi" (joined or not) and "ssid" (the network it is on or trying).
+//
+// USB serial (115200 baud), one command per line, so the board needs no Wi-Fi
+// when it is plugged into the laptop running the server (A=serial:auto):
+//   L <calm|yellow|red> [zone]  set the level (and learn the zone), exactly like /level
+//   S                           reply with one /pulse-shaped JSON line
+//   W <ssid><TAB><password>     save a Wi-Fi network in flash and join it now (tried before
+//   W <ssid> <password>         the built-in ones); the password is never printed. Without a
+//   W -                         tab the last space splits them. "W -" forgets the saved one.
+// Anything else the board prints ("ble: …", "level …") is a log line, never JSON.
+//
+// Wi-Fi is optional: the board boots, scans, advertises and answers USB at once,
+// and keeps trying its networks in the background (the saved one, then
+// SECRET_SSID, SECRET_SSID2, SECRET_SSID3 from arduino_secrets.h; 15 s each).
 //
 // Onboard blue LED (GPIO 2), no wiring needed:
-//   joining Wi-Fi = solid on (stays on if Wi-Fi is wrong)
-//   calm, alone   = 1 blink every 2 s
-//   calm, linked  = 2 blinks every 2 s (another Pulse board is heard)
-//   calm, phone   = 3 blinks every 2 s (a phone is connected or its app is heard)
+//   solid on      = nobody is talking to it and no Wi-Fi yet (booting, or Wi-Fi wrong and no USB server)
+//   slow fade     = on Wi-Fi, waiting for the server to talk to it
+//   calm, in touch with the server (over USB or Wi-Fi, in the last 20 s), count the blinks:
+//     1 blink every 2 s  = alone
+//     2 blinks every 2 s = another Pulse board is heard
+//     3 blinks every 2 s = a phone is connected or its app is heard
 //   yellow        = slow even blink, half a second on, half a second off
 //   red           = rapid strobe
 //
@@ -71,7 +88,9 @@
 //
 // Arduino IDE: install "esp32 by Espressif", board "ESP32 Dev Module",
 // Tools → Partition Scheme → "Huge APP" (Wi-Fi + Bluetooth don't fit the default).
-// Copy arduino_secrets.h.example → arduino_secrets.h. Or: pwsh scripts/flash-zone-lights.ps1
+// Copy arduino_secrets.h.example → arduino_secrets.h (optional: Wi-Fi only). Or simply:
+// scripts/boards.sh flash (Mac / Linux), pwsh scripts/flash-zone-lights.ps1 (Windows),
+// which also stamp the build id ("fw"). On a table, plug it into the laptop: A=serial:auto.
 
 #include <WiFi.h>
 #include <WebServer.h>
@@ -83,6 +102,39 @@
 #include <BLEServer.h>
 #include <esp_gap_ble_api.h>
 #include "arduino_secrets.h"
+// pulse_build.h is written by scripts/boards.sh / the flash scripts: #define PULSE_FW "<hash> <date>".
+#if __has_include("pulse_build.h")
+#include "pulse_build.h"
+#endif
+#ifndef PULSE_FW
+#define PULSE_FW "dev"
+#endif
+
+// Wi-Fi networks, tried in order after the one saved over USB (W command).
+// SECRET_SSID2/3 are optional: a secrets file without them still builds.
+#ifndef SECRET_SSID
+#define SECRET_SSID ""
+#define SECRET_PASS ""
+#endif
+#if defined(SECRET_SSID2) && !defined(SECRET_PASS2)
+#define SECRET_PASS2 ""
+#endif
+#if defined(SECRET_SSID3) && !defined(SECRET_PASS3)
+#define SECRET_PASS3 ""
+#endif
+struct WifiNet { const char* ssid; const char* pass; };
+const WifiNet BUILTIN_NETS[] = {
+  {SECRET_SSID, SECRET_PASS},
+#ifdef SECRET_SSID2
+  {SECRET_SSID2, SECRET_PASS2},
+#endif
+#ifdef SECRET_SSID3
+  {SECRET_SSID3, SECRET_PASS3},
+#endif
+};
+const int BUILTIN_NET_COUNT = sizeof BUILTIN_NETS / sizeof BUILTIN_NETS[0];
+const unsigned long WIFI_TRY_MS = 15000;    // per network before moving on to the next
+const unsigned long CONTACT_FRESH_MS = 20000; // "in touch with the server" if it talked to us this recently
 
 #ifndef TX_POWER_1M
 #define TX_POWER_1M -64 // dBm one Pulse board hears from another 1 m away (measured: A↔B at 1 m, median of 26 scans, Oct 3 2026)
@@ -115,6 +167,15 @@ enum Level { CALM, WARN, DANGER };
 Level level = CALM;
 String zone = "";    // learned from /level, kept in flash
 char macTag[5] = ""; // last 4 hex digits of the Wi-Fi MAC
+
+// Wi-Fi and server contact (loop task only).
+String savedSsid = "", savedPass = ""; // set over USB (W), kept in flash
+int netIdx = -1;                       // network being tried: -1 = none yet
+String curSsid = "";
+unsigned long netSince = 0;
+bool wifiUp = false, httpStarted = false;
+unsigned long lastContact = 0; // last command from the server, over HTTP or USB
+bool inTouch() { return lastContact && millis() - lastContact < CONTACT_FRESH_MS; }
 
 // Beacon name, written by the web handler, read by the Bluetooth task.
 char beaconName[16] = "PULSE-";
@@ -192,19 +253,36 @@ void copyBeaconName(char* out, size_t len) {
   portEXIT_CRITICAL(&nameMux);
 }
 
-void handleLevel() {
-  String v = server.arg("v");
+// Applies a level word ("red", "yellow", anything else = calm) and, if given, the zone (from HTTP or USB).
+void applyLevel(const String& v, const String* zoneArg) {
   level = v == "red" ? DANGER : v == "yellow" ? WARN : CALM;
-  if (server.hasArg("zone")) {
-    String z = cleanTag(server.arg("zone"));
+  if (zoneArg) {
+    String z = cleanTag(*zoneArg);
     if (z.length() && z != zone) {
       zone = z;
       prefs.putString("zone", zone); // only on change: spares the flash
       setBeaconName();
     }
   }
+  lastContact = millis();
   Serial.printf("level %s zone %s\n", v.c_str(), zone.c_str());
+}
+
+void handleLevel() {
+  String z = server.arg("zone");
+  applyLevel(server.arg("v"), server.hasArg("zone") ? &z : nullptr);
   server.send(200, "text/plain", "ok\n");
+}
+
+// Copies s into out for a JSON string: drops quotes, backslashes and control characters.
+void jsonSafe(const String& s, char* out, size_t len) {
+  size_t j = 0;
+  for (unsigned i = 0; i < s.length() && j + 1 < len; i++) {
+    char c = s[i];
+    if (c == '"' || c == '\\' || (unsigned char)c < 0x20) continue;
+    out[j++] = c;
+  }
+  out[j] = 0;
 }
 
 float estimateDistance(int rssi) {
@@ -259,11 +337,13 @@ void handleLinks() {
   len += snprintf(buf + len, sizeof buf - len, ",\"heard\":");
   len += heardJson(buf + len, sizeof buf - len - 2);
   snprintf(buf + len, sizeof buf - len, "}");
+  lastContact = millis();
   server.sendHeader("Access-Control-Allow-Origin", "*");
   server.send(200, "application/json", buf);
 }
 
-void handlePulse() {
+// Writes the /pulse JSON (also the reply to "S" over USB); returns the length.
+int pulseJson(char* buf, size_t size) {
   Peer snap[MAX_PEERS];
   int n;
   portENTER_CRITICAL(&peerMux);
@@ -273,28 +353,159 @@ void handlePulse() {
   char name[16];
   copyBeaconName(name, sizeof name);
 
-  static char buf[2900]; // 8 peers × ~55 bytes + ~300 bytes of status + 3 links × ~70 bytes + 24 heard × ~45 bytes
   unsigned long now = millis();
-  int len = snprintf(buf, sizeof buf,
+  char ssid[40];
+  jsonSafe(curSsid, ssid, sizeof ssid);
+  int len = snprintf(buf, size,
            "{\"kind\":\"zone-light\",\"name\":\"%s\",\"mac\":\"%s\",\"zone\":\"%s\",\"level\":\"%s\",\"ip\":\"%s\","
-           "\"rssi\":%d,\"uptime\":%lu,\"ble\":{\"devices\":%d,\"near\":%d,\"scans\":%lu,\"age\":%lu},\"peers\":[",
-           name, macTag, zone.c_str(), levelName(level), WiFi.localIP().toString().c_str(), WiFi.RSSI(), now / 1000,
+           "\"rssi\":%d,\"uptime\":%lu,\"fw\":\"%s\",\"wifi\":%s,\"ssid\":\"%s\","
+           "\"ble\":{\"devices\":%d,\"near\":%d,\"scans\":%lu,\"age\":%lu},\"peers\":[",
+           name, macTag, zone.c_str(), levelName(level), wifiUp ? WiFi.localIP().toString().c_str() : "",
+           wifiUp ? (int)WiFi.RSSI() : 0, now / 1000, PULSE_FW, wifiUp ? "true" : "false", ssid,
            bleDevices, bleNear, bleScans, bleLastScan ? (now - bleLastScan) / 1000 : 0UL);
   bool first = true;
-  for (int i = 0; i < n && len < (int)sizeof buf - 1700; i++) {
+  for (int i = 0; i < n && len < (int)size - 1700; i++) {
     unsigned long age = now - snap[i].seen;
     if (age > PEER_TIMEOUT_MS) continue;
-    len += snprintf(buf + len, sizeof buf - len, "%s{\"name\":\"%s\",\"rssi\":%d,\"dist\":%.1f,\"age\":%lu}",
+    len += snprintf(buf + len, size - len, "%s{\"name\":\"%s\",\"rssi\":%d,\"dist\":%.1f,\"age\":%lu}",
                     first ? "" : ",", snap[i].name, snap[i].rssi, estimateDistance(snap[i].rssi), age / 1000);
     first = false;
   }
-  len += snprintf(buf + len, sizeof buf - len, "],\"links\":");
+  len += snprintf(buf + len, size - len, "],\"links\":");
   len += linksJson(buf + len, 320);
-  len += snprintf(buf + len, sizeof buf - len, ",\"heard\":");
-  len += heardJson(buf + len, sizeof buf - len - 2);
-  snprintf(buf + len, sizeof buf - len, "}");
+  len += snprintf(buf + len, size - len, ",\"heard\":");
+  len += heardJson(buf + len, size - len - 2);
+  len += snprintf(buf + len, size - len, "}");
+  return len;
+}
+
+static char pulseBuf[3000]; // 8 peers × ~55 bytes + ~400 bytes of status + 3 links × ~70 bytes + 24 heard × ~45 bytes
+
+void handlePulse() {
+  pulseJson(pulseBuf, sizeof pulseBuf);
+  lastContact = millis();
   server.sendHeader("Access-Control-Allow-Origin", "*");
-  server.send(200, "application/json", buf);
+  server.send(200, "application/json", pulseBuf);
+}
+
+// ---- Wi-Fi: optional, tried in the background ----
+
+// The i-th network to try: the one saved over USB first, then the built-in ones. False = none there.
+bool netAt(int i, String& ssid, String& pass) {
+  if (savedSsid.length()) {
+    if (i == 0) { ssid = savedSsid; pass = savedPass; return true; }
+    i--;
+  }
+  if (i < 0 || i >= BUILTIN_NET_COUNT) return false;
+  ssid = BUILTIN_NETS[i].ssid;
+  pass = BUILTIN_NETS[i].pass;
+  return true;
+}
+
+int netCount() { return (savedSsid.length() ? 1 : 0) + BUILTIN_NET_COUNT; }
+
+// Starts joining the next usable network (skipping empty and placeholder names).
+void tryNextNet() {
+  int n = netCount();
+  for (int k = 0; k < n; k++) {
+    netIdx = (netIdx + 1) % n;
+    String ssid, pass;
+    if (!netAt(netIdx, ssid, pass) || !ssid.length() || ssid == "your-wifi") continue;
+    curSsid = ssid;
+    netSince = millis();
+    WiFi.disconnect();
+    WiFi.begin(ssid.c_str(), pass.c_str());
+    Serial.printf("wifi: trying %s\n", ssid.c_str());
+    return;
+  }
+  curSsid = "";
+  netSince = millis(); // nothing configured: look again later (a W command restarts at once)
+}
+
+// Notices Wi-Fi coming up or dropping and moves on to the next network while it's down. Never blocks.
+void pollWiFi(unsigned long now) {
+  static unsigned long lastPoll = 0;
+  if (now - lastPoll < 250) return;
+  lastPoll = now;
+  bool connected = WiFi.status() == WL_CONNECTED;
+  if (connected && !wifiUp) {
+    wifiUp = true;
+    if (!httpStarted) {
+      server.begin();
+      httpStarted = true;
+    }
+    Serial.printf("Zone light ready: http://%s (%s)\n", WiFi.localIP().toString().c_str(), curSsid.c_str());
+  } else if (!connected && wifiUp) {
+    wifiUp = false;
+    netSince = now; // the stack reconnects by itself; after WIFI_TRY_MS move on
+    Serial.println("wifi: lost; retrying in the background (USB still works)");
+  } else if (!connected && now - netSince >= WIFI_TRY_MS) {
+    tryNextNet();
+  }
+}
+
+// ---- USB serial commands ----
+
+char serialBuf[160];
+int serialLen = 0;
+
+void handleSerialLine(char* s) {
+  while (*s == ' ') s++;
+  if (s[0] == 'S' && (s[1] == 0 || s[1] == ' ')) {
+    lastContact = millis();
+    int len = pulseJson(pulseBuf, sizeof pulseBuf - 2);
+    pulseBuf[len++] = '\n';
+    Serial.write((const uint8_t*)pulseBuf, len); // one write: never interleaved with the Bluetooth task's log lines
+  } else if (s[0] == 'L' && s[1] == ' ') {
+    char* lv = s + 2;
+    while (*lv == ' ') lv++;
+    char* z = strchr(lv, ' ');
+    if (z) {
+      *z++ = 0;
+      while (*z == ' ') z++;
+    }
+    String zs = z ? String(z) : String();
+    applyLevel(String(lv), z && *z ? &zs : nullptr);
+  } else if (s[0] == 'W' && (s[1] == ' ' || s[1] == '\t')) {
+    char* arg = s + 2;
+    while (*arg == ' ') arg++;
+    if (strcmp(arg, "-") == 0) {
+      savedSsid = savedPass = "";
+      prefs.remove("wssid");
+      prefs.remove("wpass");
+      Serial.println("wifi: forgot the saved network");
+    } else {
+      char* sep = strchr(arg, '\t');
+      if (!sep) sep = strrchr(arg, ' ');
+      if (sep) *sep++ = 0;
+      if (!*arg || strlen(arg) > 32 || (sep && strlen(sep) > 63)) {
+        Serial.println("wifi: want W <ssid><TAB><password> (ssid up to 32, password up to 63 characters)");
+        return;
+      }
+      savedSsid = arg;
+      savedPass = sep ? sep : "";
+      prefs.putString("wssid", savedSsid);
+      prefs.putString("wpass", savedPass);
+      Serial.printf("wifi: saved %s; joining it now\n", savedSsid.c_str()); // never the password
+    }
+    lastContact = millis();
+    wifiUp = false;
+    netIdx = -1; // start over from the saved network
+    tryNextNet();
+  }
+}
+
+void pollSerial() {
+  while (Serial.available() > 0) {
+    char c = Serial.read();
+    if (c == '\n') {
+      serialBuf[serialLen] = 0;
+      handleSerialLine(serialBuf);
+      serialLen = 0;
+    } else if (c != '\r' && serialLen < (int)sizeof serialBuf - 1) {
+      serialBuf[serialLen++] = c;
+    }
+  }
 }
 
 // If the advert is from the Pulse Android app, writes the 8 hex characters of its id (lower case) to out and returns true.
@@ -584,23 +795,16 @@ void setup() {
   snprintf(macTag, sizeof macTag, "%02X%02X", mac[4], mac[5]);
   prefs.begin("pulse", false);
   zone = cleanTag(prefs.getString("zone", ""));
+  savedSsid = prefs.getString("wssid", "");
+  savedPass = prefs.getString("wpass", "");
   setBeaconName();
-  WiFi.begin(SECRET_SSID, SECRET_PASS);
-  Serial.print("Connecting");
-  unsigned long t0 = millis();
-  while (WiFi.status() != WL_CONNECTED) {
-    unsigned long p = (millis() - t0) % 600;
-    (void)p;
-    ledcWrite(BLUE, 255); // solid: joining Wi-Fi
-    delay(10);
-    if ((millis() - t0) % 500 < 10) Serial.print(".");
-  }
-  Serial.printf("\nZone light ready: http://%s\n", WiFi.localIP().toString().c_str());
+  Serial.printf("\nPulse zone light %s, firmware %s. USB commands: L <level> [zone], S, W <ssid> <password>\n", macTag, PULSE_FW);
   server.on("/level", handleLevel);
   server.on("/pulse", handlePulse);
   server.on("/links", handleLinks);
   server.onNotFound([] { server.send(404, "text/plain", "try /level?v=red, /pulse or /links\n"); });
-  server.begin();
+  // Wi-Fi joins in the background (pollWiFi); Bluetooth, the LEDs and USB work from now on.
+  tryNextNet();
   xTaskCreatePinnedToCore(bleTask, "ble", 8192, nullptr, 1, nullptr, 0);
 }
 
@@ -612,18 +816,15 @@ int breathe(unsigned long t, unsigned long period, int lo, int hi) {
 }
 
 void loop() {
-  server.handleClient();
+  pollSerial();
+  if (httpStarted) server.handleClient();
   unsigned long t = millis();
   serviceLinks(t);
+  pollWiFi(t);
 
-  if (WiFi.status() != WL_CONNECTED) {
-    WiFi.reconnect();
-    ledcWrite(BLUE, 255);
-    delay(5);
-    return;
-  }
-
-  // Onboard blue LED: count the blinks. 1 = alone, 2 = linked to another
+  // Onboard blue LED. While calm: solid = nobody is talking to the board and
+  // no Wi-Fi; slow fade = on Wi-Fi, waiting for the server; counted blinks =
+  // the server is in touch (USB or Wi-Fi): 1 = alone, 2 = linked to another
   // Pulse board, 3 = a phone is connected or heard. Yellow and red override.
   bool linked = peerCount > 0;
   int phones = heardCount;
@@ -634,7 +835,7 @@ void loop() {
   bool linkFlash = lp < (unsigned long)blinks * 300 && (lp % 300) < 120;
   int pwm;
   switch (level) {
-    case CALM: pwm = linkFlash ? 255 : 0; break;
+    case CALM: pwm = inTouch() ? (linkFlash ? 255 : 0) : wifiUp ? breathe(t, 3000, 0, 200) : 255; break;
     case WARN: pwm = (t % 1000) < 500 ? 255 : 0; break;
     default:   pwm = (t % 140) < 70 ? 255 : 0; break;
   }
