@@ -16,10 +16,9 @@ Do these in order. Nothing past step 1 is required for the demo to work: every s
 
 ```sh
 git clone https://github.com/Drivera0/crowd-crush && cd crowd-crush
-git checkout main-85y2r6
 make build           # or: cd web && npm install && npm run build && cd .. && go build -o bin/pulse ./server/cmd/pulse
 ./bin/pulse          # dashboard: http://localhost:8080/dash/
-make sim             # in a second terminal: 8 fake phones (or: go run ./server/cmd/sim -n 8 -scenario wave)
+make sim             # in a second terminal: 24 fake phones (or: go run ./server/cmd/sim -n 8 -scenario wave)
 ```
 
 ## 2. `.env`
