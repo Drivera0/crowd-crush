@@ -23,7 +23,11 @@ const PAGES: Record<Page, { title: string; sub: string; map?: { title: string; s
   areas: {
     title: 'Areas & alerts',
     sub: 'Mark risky spots and decide what raises an alert.',
-    map: { title: 'Watch areas', sub: 'Draw with the tools on the left. Click an area to select it, drag to move it.', draw: true },
+    map: {
+      title: 'Watch areas',
+      sub: 'Pick a shape in the toolbar, then drag on the map. Click an area to select it, drag it to move it, press Delete to remove it.',
+      draw: true,
+    },
   },
   hardware: {
     title: 'Hardware',
@@ -33,14 +37,14 @@ const PAGES: Record<Page, { title: string; sub: string; map?: { title: string; s
   sim: {
     title: 'Simulation',
     sub: 'A virtual crowd you can steer into a crush.',
-    map: { title: 'Simulated crowd', sub: 'Grey dots are people without the app; coloured dots carry Pulse. Red glow = body pressure.' },
+    map: { title: 'Simulated crowd', sub: 'Grey dots are people without the app; coloured dots carry Pulse. Red glow = crush pressure.' },
   },
   recordings: {
     title: 'Replays & drills',
     sub: 'Rehearse with saved runs and test the alert chain.',
     map: { title: 'Crowd map', sub: 'Replays play through the same detector as live phones.' },
   },
-  settings: { title: 'Settings', sub: 'Services, system health and privacy.' },
+  settings: { title: 'Settings', sub: 'Privacy, and technical details for your technician.' },
 };
 
 // Put the map into the DOM straight away (in the Live page's slot).
@@ -87,3 +91,55 @@ function fromHash(): Page {
 
 window.addEventListener('hashchange', () => show(fromHash()));
 show(fromHash());
+
+// ---------------------------------------------------------------------------
+// Tooltips for every [data-tip]: one floating element, placed below (or above,
+// or beside for the map toolbar) and clamped inside the viewport, so tips near
+// an edge never get cut off or cause sideways scrolling.
+// ---------------------------------------------------------------------------
+
+const tip = document.createElement('div');
+tip.className = 'tip';
+tip.setAttribute('role', 'tooltip');
+tip.hidden = true;
+document.body.append(tip);
+let tipFor: HTMLElement | null = null;
+
+function placeTip(el: HTMLElement) {
+  const text = el.dataset.tip;
+  if (!text) return hideTip();
+  tipFor = el;
+  tip.textContent = text;
+  tip.hidden = false;
+  const r = el.getBoundingClientRect();
+  const t = tip.getBoundingClientRect();
+  const pad = 8;
+  let x: number, y: number;
+  if (el.closest('.toolbar')) {
+    x = r.right + 8;
+    y = r.top + r.height / 2 - t.height / 2;
+  } else {
+    x = r.left + r.width / 2 - t.width / 2;
+    y = r.bottom + 6;
+    if (y + t.height > innerHeight - pad) y = r.top - t.height - 6;
+  }
+  x = Math.max(pad, Math.min(innerWidth - t.width - pad, x));
+  y = Math.max(pad, Math.min(innerHeight - t.height - pad, y));
+  tip.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
+}
+function hideTip() {
+  tipFor = null;
+  tip.hidden = true;
+}
+document.addEventListener('pointerover', (e) => {
+  const el = (e.target as HTMLElement).closest?.<HTMLElement>('[data-tip]');
+  if (el && el !== tipFor) placeTip(el);
+  else if (!el && tipFor) hideTip();
+});
+document.addEventListener('focusin', (e) => {
+  const el = (e.target as HTMLElement).closest?.<HTMLElement>('[data-tip]');
+  if (el && (e.target as HTMLElement).matches(':focus-visible')) placeTip(el);
+});
+document.addEventListener('focusout', hideTip);
+document.addEventListener('pointerdown', hideTip);
+window.addEventListener('scroll', hideTip, true);
