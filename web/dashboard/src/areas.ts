@@ -67,6 +67,13 @@ export class Areas {
   onNode: (id: string | null) => void = () => {};
   /** Fires when saving to the server fails. */
   onError: (msg: string) => void = () => {};
+  /**
+   * One-shot map pick for simulation actions: the next press on the map is
+   * delivered in venue metres (with the drag vector for direction), instead
+   * of selecting, panning or drawing. Cleared after use or on Escape.
+   */
+  pick: { label: string; arrow: boolean; done: (p: { x: number; y: number; dx: number; dy: number }) => void } | null = null;
+  private pickDrag: { x0: number; y0: number; x1: number; y1: number } | null = null;
 
   constructor(private canvas: HTMLCanvasElement, private mesh: Mesh) {
     canvas.addEventListener('pointerdown', (e) => this.down(e));
@@ -89,6 +96,8 @@ export class Areas {
       const typing = (e.target as HTMLElement).closest('input, textarea, select');
       if (e.key === 'Escape') {
         this.draft = null;
+        this.pick = null;
+        this.pickDrag = null;
         this.setTool('select');
       } else if (!typing && (e.key === 'Delete' || e.key === 'Backspace') && this.selected) {
         this.remove(this.selected);
@@ -131,7 +140,7 @@ export class Areas {
   private save() {
     window.clearTimeout(this.saveTimer);
     this.saveTimer = window.setTimeout(async () => {
-      const body: Area[] = this.list.map(({ id, name, sens, poly }) => ({ id, name, sens, poly }));
+      const body: Area[] = this.list.map(({ id, name, sens, poly, light }) => ({ id, name, sens, poly, ...(light ? { light } : {}) }));
       try {
         const r = await fetch('/api/areas', {
           method: 'PUT',
@@ -170,6 +179,15 @@ export class Areas {
     const a = this.get(id);
     if (!a) return;
     a.sens = a.sens === 'high' ? 'normal' : 'high';
+    this.save();
+    this.onChange();
+  }
+
+  /** Which zone light shows this area ("" = none). */
+  setLight(id: string, light: string) {
+    const a = this.get(id);
+    if (!a) return;
+    a.light = light || undefined;
     this.save();
     this.onChange();
   }
@@ -279,6 +297,11 @@ export class Areas {
   private down(e: PointerEvent) {
     const scr = this.screen(e);
     const p = this.metres(e);
+    if (this.pick) {
+      this.canvas.setPointerCapture(e.pointerId);
+      this.pickDrag = { x0: p.x, y0: p.y, x1: p.x, y1: p.y };
+      return;
+    }
     this.start = p;
     this.press = { x: scr.x, y: scr.y, node: null, moved: false };
     this.canvas.setPointerCapture(e.pointerId);
@@ -303,6 +326,11 @@ export class Areas {
   private move(e: PointerEvent) {
     const scr = this.screen(e);
     const p = this.metres(e);
+    if (this.pickDrag) {
+      this.pickDrag.x1 = p.x;
+      this.pickDrag.y1 = p.y;
+      return;
+    }
     if (this.press && Math.hypot(scr.x - this.press.x, scr.y - this.press.y) > 4) this.press.moved = true;
     if (this.drag) {
       const a = this.get(this.drag.id);
@@ -340,6 +368,14 @@ export class Areas {
 
   private up(e: PointerEvent) {
     if (this.canvas.hasPointerCapture(e.pointerId)) this.canvas.releasePointerCapture(e.pointerId);
+    if (this.pick && this.pickDrag) {
+      const { x0, y0, x1, y1 } = this.pickDrag;
+      const done = this.pick.done;
+      this.pick = null;
+      this.pickDrag = null;
+      done({ x: x0, y: y0, dx: x1 - x0, dy: y1 - y0 });
+      return;
+    }
     const press = this.press;
     this.press = null;
     this.pan = null;
@@ -412,6 +448,25 @@ export class Areas {
       g.fill();
       g.fillStyle = a.level !== 'calm' ? '#ffffff' : light ? '#0f172a' : '#e6ebf2';
       g.fillText(text, x + 14, y + 4);
+    }
+
+    if (this.pickDrag && this.pick?.arrow) {
+      const a = this.mesh.venueToWorld(this.pickDrag.x0, this.pickDrag.y0);
+      const b = this.mesh.venueToWorld(this.pickDrag.x1, this.pickDrag.y1);
+      const ang = Math.atan2(b.y - a.y, b.x - a.x);
+      g.strokeStyle = 'rgba(239,68,68,0.9)';
+      g.fillStyle = 'rgba(239,68,68,0.9)';
+      g.lineWidth = 3;
+      g.beginPath();
+      g.moveTo(a.x, a.y);
+      g.lineTo(b.x, b.y);
+      g.stroke();
+      g.beginPath();
+      g.moveTo(b.x, b.y);
+      g.lineTo(b.x - 12 * Math.cos(ang - 0.45), b.y - 12 * Math.sin(ang - 0.45));
+      g.lineTo(b.x - 12 * Math.cos(ang + 0.45), b.y - 12 * Math.sin(ang + 0.45));
+      g.closePath();
+      g.fill();
     }
 
     if (this.draft) {

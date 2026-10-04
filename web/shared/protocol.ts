@@ -133,10 +133,18 @@ export interface Stats {
   medianRtt: number;
 }
 
+/** Simulated people (only in mode "sim"): [x, y, pressure N/m, hasPhone 0|1]. */
+export interface SimFrame {
+  bodies: [number, number, number, number][];
+  t: number;
+  action: string;
+}
+
 export interface Snapshot {
   type: 'snapshot';
   t: number;
-  mode: 'live' | 'replay';
+  mode: 'live' | 'replay' | 'sim';
+  sim?: SimFrame;
   replay?: string;
   progress?: number;
   recording?: string;
@@ -197,7 +205,66 @@ export interface Area {
   name: string;
   sens: 'normal' | 'high';
   poly: Point[];
+  /** Zone light that shows this area (its letter in SIGN_URL); absent = none. */
+  light?: string;
 }
+
+/** GET /api/hardware: every sign and zone light, probed every 5 s. */
+export interface Hardware {
+  name: string;
+  kind: string;
+  url: string;
+  zone?: string;
+  online: boolean;
+  lastSeen?: number;
+  error?: string;
+  rssi?: number;
+  uptime?: number;
+  level?: string;
+  ble?: { devices: number; near: number; scans: number; age: number };
+  areas?: string[];
+}
+
+/** GET /api/sim: the in-process crowd simulation (Social Force Model). */
+export interface SimExit {
+  id: string;
+  name: string;
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+  open: boolean;
+}
+
+export interface SimState {
+  running: boolean;
+  t?: number;
+  people?: number;
+  phones?: number;
+  participation?: number;
+  action?: string;
+  exits?: SimExit[];
+  walls?: [number, number, number, number][];
+  truth?: {
+    maxDensity: number;
+    maxPressure: number;
+    crushing: number;
+    /** Seconds since start when the simulated crowd first became dangerous. */
+    dangerAt?: number | null;
+    /** Seconds since start of Pulse's first red alert. */
+    alertAt?: number | null;
+    /** dangerAt − alertAt: positive = Pulse warned first. */
+    leadSeconds?: number | null;
+  };
+}
+
+export type SimAction =
+  | { type: 'calm' | 'stage' | 'disperse' }
+  | { type: 'surge'; strength: number }
+  | { type: 'attract'; x: number; y: number }
+  | { type: 'shove'; x: number; y: number; dx: number; dy: number }
+  | { type: 'exit'; id: string; open: boolean }
+  | { type: 'spawn'; x: number; y: number; n: number };
 
 /** One 100 ms motion summary as the server received it (phone clock). */
 export interface Sample {

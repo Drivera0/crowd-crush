@@ -8,7 +8,7 @@
 // red packets in the direction the push travels. Clusters (where the crowd is
 // packing together) are drawn underneath with their density and trend.
 
-import type { Cluster, Level, Node, NodeStatus, Wave } from '../../shared/protocol';
+import type { Cluster, Level, Node, NodeStatus, SimFrame, SimState, Wave } from '../../shared/protocol';
 
 type RGB = [number, number, number];
 
@@ -85,6 +85,8 @@ export class Mesh {
   private waveSpawn = new Map<string, number>();
   private serverLinks: [string, string][] = [];
   private clusters: Cluster[] = [];
+  private sim: SimFrame | null = null;
+  private simGeo: SimState | null = null;
   private venue = { w: 24, h: 16 };
   /** World px per metre, and where the venue's top-left corner sits in world px. */
   private fit = { s: 30, ox: 0, oy: 0 };
@@ -152,6 +154,13 @@ export class Mesh {
     }
     for (const b of this.bodies.values()) if (!seen.has(b.id)) b.gone = true;
     this.waves = waves;
+  }
+
+  /** Simulated people (null when not simulating) and the venue's walls and exits. */
+  setSim(frame: SimFrame | null, geo: SimState | null) {
+    this.sim = frame;
+    if (geo) this.simGeo = geo;
+    if (!frame) this.simGeo = null;
   }
 
   setTheme(t: 'dark' | 'light') {
@@ -467,8 +476,10 @@ export class Mesh {
     g.setTransform(this.dpr * k, 0, 0, this.dpr * k, this.dpr * vx, this.dpr * vy);
     const bodies = [...this.bodies.values()];
     this.drawVenue(g);
+    this.drawSimGeometry(g);
     this.underlay?.(g, now);
     this.drawClusters(g, now);
+    this.drawSimBodies(g);
 
     // GPS accuracy: the true spot is somewhere in this circle.
     for (const b of bodies) {
@@ -721,6 +732,62 @@ export class Mesh {
     g.lineTo(ox + 5 * s, oy + H + 12);
     g.stroke();
     g.fillText(`5 m · venue ${this.venue.w} × ${this.venue.h} m`, ox + 5 * s + 8, oy + H + 16);
+  }
+
+  /** Walls, the stage barrier and exits of the simulated venue. */
+  private drawSimGeometry(g: CanvasRenderingContext2D) {
+    const geo = this.simGeo;
+    if (!geo || !this.sim) return;
+    const light = this.theme === 'light';
+    g.lineCap = 'round';
+    g.strokeStyle = light ? 'rgba(15,23,42,0.55)' : 'rgba(203,213,225,0.55)';
+    g.lineWidth = 3;
+    for (const [x0, y0, x1, y1] of geo.walls ?? []) {
+      const a = this.venueToWorld(x0, y0), b = this.venueToWorld(x1, y1);
+      g.beginPath();
+      g.moveTo(a.x, a.y);
+      g.lineTo(b.x, b.y);
+      g.stroke();
+    }
+    g.font = '600 10px Inter, system-ui, sans-serif';
+    g.textAlign = 'center';
+    for (const e of geo.exits ?? []) {
+      const a = this.venueToWorld(e.x0, e.y0), b = this.venueToWorld(e.x1, e.y1);
+      g.strokeStyle = e.open ? 'rgba(34,197,94,0.95)' : 'rgba(239,68,68,0.95)';
+      g.lineWidth = 5;
+      g.setLineDash(e.open ? [] : [4, 4]);
+      g.beginPath();
+      g.moveTo(a.x, a.y);
+      g.lineTo(b.x, b.y);
+      g.stroke();
+      g.setLineDash([]);
+      g.fillStyle = g.strokeStyle;
+      g.fillText(e.open ? 'EXIT' : 'CLOSED', (a.x + b.x) / 2, (a.y + b.y) / 2 - 6);
+    }
+    g.textAlign = 'left';
+  }
+
+  /** Simulated people: phone carriers are drawn as nodes; the rest are grey, tinted by how hard they're squeezed. */
+  private drawSimBodies(g: CanvasRenderingContext2D) {
+    if (!this.sim) return;
+    const r = Math.max(2, 0.22 * this.fit.s);
+    const light = this.theme === 'light';
+    for (const [x, y, pressure, phone] of this.sim.bodies) {
+      const p = this.venueToWorld(x, y);
+      // 0 → grey; ~1500 N/m and up → red (crowd-crush pressure).
+      const k = Math.min(1, pressure / 1500);
+      if (k > 0.05) {
+        g.fillStyle = `rgba(239,${Math.round(140 * (1 - k))},${Math.round(60 * (1 - k))},${0.25 + 0.5 * k})`;
+        g.beginPath();
+        g.arc(p.x, p.y, r * (1.6 + k), 0, Math.PI * 2);
+        g.fill();
+      }
+      if (phone) continue;
+      g.fillStyle = light ? 'rgba(100,116,139,0.55)' : 'rgba(148,163,184,0.45)';
+      g.beginPath();
+      g.arc(p.x, p.y, r * 0.8, 0, Math.PI * 2);
+      g.fill();
+    }
   }
 
   /** Where the crowd packs together: a soft disc per cluster with its density and trend. */
