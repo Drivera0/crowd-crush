@@ -92,6 +92,10 @@ func validAreas(in []protocol.Area, cfg detect.Config) ([]protocol.Area, error) 
 		if ar.Name == "" {
 			ar.Name = ar.ID
 		}
+		ar.Light = strings.ToUpper(strings.TrimSpace(ar.Light))
+		if !validLight(ar.Light) {
+			return nil, fmt.Errorf("area %q: light must be a short letter/number like A", ar.ID)
+		}
 		poly := make([]protocol.Point, len(ar.Poly))
 		for j, pt := range ar.Poly {
 			if !finite(pt[0]) || !finite(pt[1]) {
@@ -116,6 +120,55 @@ func cloneAreas(in []protocol.Area) []protocol.Area {
 }
 
 func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
+
+// validLight accepts "" or a zone-light key as written in SIGN_URL (A, B, ZONE2).
+func validLight(s string) bool {
+	if len(s) > 8 {
+		return false
+	}
+	for _, r := range s {
+		if !(r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// lightLevels adds what each zone light should show to the sign levels:
+// the worst level among the areas assigned to it, and calm for lights with
+// no area (when drawn areas replace the default zones, nothing else would
+// ever reset them). Caller holds mu.
+func (a *App) lightLevels(levels map[string]string, lights []string) {
+	assigned := map[string]bool{}
+	for _, ar := range a.areas {
+		if ar.Light == "" {
+			continue
+		}
+		lv, ok := levels[ar.ID]
+		if !ok {
+			continue
+		}
+		if !assigned[ar.Light] || levelRank[lv] > levelRank[levels[ar.Light]] {
+			levels[ar.Light] = lv
+		}
+		assigned[ar.Light] = true
+	}
+	for _, l := range lights {
+		if _, ok := levels[l]; !ok {
+			levels[l] = protocol.LevelCalm
+		}
+	}
+}
+
+// lightFor is the light assigned to a zone, if any. Caller holds mu.
+func (a *App) lightFor(zone string) string {
+	for _, ar := range a.areas {
+		if ar.ID == zone {
+			return ar.Light
+		}
+	}
+	return ""
+}
 
 // ---- venue ----
 
