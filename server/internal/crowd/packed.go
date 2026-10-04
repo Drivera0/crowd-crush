@@ -30,11 +30,20 @@ import (
 // PackedTauMs is the smoothing time of a phone's local density.
 const PackedTauMs = 1500
 
+// PackedMoveSpeed (m/s): a phone whose net speed over its recent positions
+// (up to FlowWindowMs) is at least this is moving (Packed.Moving).
+const PackedMoveSpeed = 0.1
+
 // Packed is one phone's crush level.
 type Packed struct {
 	Dens  float64 // estimated people per m² around it
 	Level string  // calm | yellow | red
 	Crush float64 // 0..1 (Crush01 of Dens)
+	// Moving: the phone itself has been walking (net PackedMoveSpeed or
+	// more over the last few seconds, placed to within FlowMaxAcc): someone
+	// moving along a dense aisle is in a queue, not pinned, so a yellow is
+	// shown calm (flow.go). Red is never masked.
+	Moving bool
 }
 
 type packedState struct {
@@ -45,11 +54,14 @@ type packedState struct {
 
 // PackedTracker follows every phone's crush level. Not safe for concurrent use.
 type PackedTracker struct {
-	st map[string]*packedState
+	st    map[string]*packedState
+	moves moves
 }
 
 // NewPackedTracker creates a tracker.
-func NewPackedTracker() *PackedTracker { return &PackedTracker{st: map[string]*packedState{}} }
+func NewPackedTracker() *PackedTracker {
+	return &PackedTracker{st: map[string]*packedState{}, moves: moves{}}
+}
 
 // Crush01 puts an estimated density on the 0..1 scale the dashboard draws:
 // 0 up to half the watch density (standing free), 0.35 at watch, 0.7 at
@@ -82,6 +94,9 @@ func (t *PackedTracker) Update(now int64, pts []Point, cfg Config, open func(x, 
 	th := detect.Thresholds{Yellow: cfg.Watch, Red: cfg.Danger,
 		YMargin: cfg.Watch * cfg.Margin, RMargin: cfg.Danger * cfg.Margin, Hold: cfg.HoldMs}
 	out := make(map[string]Packed, len(pts))
+	if cfg.flowOn() {
+		t.moves.add(now, pts, cfg.FlowMaxAcc)
+	}
 	r2 := LocalR * LocalR
 	for _, p := range pts {
 		r, rr := LocalR, r2
@@ -109,7 +124,14 @@ func (t *PackedTracker) Update(now int64, pts []Point, cfg Config, open func(x, 
 		}
 		s.t = now
 		s.level.Update(now, s.dens, th)
-		out[p.ID] = Packed{Dens: s.dens, Level: s.level.Level, Crush: Crush01(s.dens, cfg.Watch, cfg.Danger)}
+		pk := Packed{Dens: s.dens, Level: s.level.Level, Crush: Crush01(s.dens, cfg.Watch, cfg.Danger)}
+		if vx, vy, ok := t.moves.velocity(p.ID); ok && cfg.flowOn() && math.Hypot(vx, vy) >= PackedMoveSpeed {
+			pk.Moving = true
+			if pk.Level == protocol.LevelYellow && s.dens < cfg.flowWatch() {
+				pk.Level = protocol.LevelCalm
+			}
+		}
+		out[p.ID] = pk
 	}
 	for id := range t.st {
 		if _, ok := out[id]; !ok {

@@ -53,6 +53,13 @@ type Info struct {
 	ETA    float64 `json:"secondsUntilDangerous,omitempty"`
 	Rate   float64 `json:"densityRisePerMinute,omitempty"`
 	Danger float64 `json:"dangerDensity,omitempty"`
+	// Motion: what the crowd at the densest spot is doing, in words
+	// ("packed and barely moving", "packing in: people arriving and nobody
+	// getting out", "dense but moving: people are getting out"); "" when
+	// positions are too rough to tell. Leaving: people per metre per second
+	// getting out of that spot.
+	Motion  string  `json:"crowdMotion,omitempty"`
+	Leaving float64 `json:"peopleLeavingPerMetrePerSecond,omitempty"`
 
 	// Exit is the name of the open exit nearest the problem (from the venue
 	// layout), "" if the venue has none.
@@ -151,6 +158,9 @@ func template(in Info) Briefing {
 				out("Open space ahead of them now.", "Open space ahead of them now, toward %s.")}
 		}
 		if in.Level != "red" {
+			if in.Motion != "" {
+				return Briefing{fmt.Sprintf("%s: people bunching up near %.0f, %.0f, %s.", at, in.X, in.Y, in.Motion), "Watch closely."}
+			}
 			return Briefing{fmt.Sprintf("%s: people bunching up near %.0f, %.0f.", at, in.X, in.Y), "Watch closely."}
 		}
 		return Briefing{
@@ -225,6 +235,7 @@ Reply as JSON with two fields, to be read aloud over a radio:
 Name the place exactly as the "where" field says; never read out zoneId.
 If the data has a "staffAction", that is the action staff chose for this area: use it verbatim as "action".
 Otherwise, if the data has a "nearestExit", name that exit in the action as the way out.
+If the data has a "crowdMotion", say it in the headline: it is why the crowding matters (packed and still, or packing in).
 No markdown, no numbers with decimals, under 40 words in total.`
 
 // briefSchema is the structured-output schema for a briefing.

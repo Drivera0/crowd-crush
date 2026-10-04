@@ -12,6 +12,10 @@
 // cluster's densest well-supported spot: a large crowd with a packed front
 // reads as packed, not as its thin average. Est is the one density number:
 // cluster levels, early warning, area density rules and briefings use it.
+//
+// A dense cluster that people are still getting out of (flow.go) raises no
+// early warning and its yellow is shown calm: an aisle emptying a hall is a
+// queue, not a crush building. Red is never masked.
 package crowd
 
 import (
@@ -88,6 +92,11 @@ type Config struct {
 	// that is wider than LocalR, and a cluster of such phones is at least
 	// that wide. 0 = positions are taken as exact.
 	AccDisc float64
+	// Flow (flow.go): a dense crowd that people are still getting out of is
+	// held to FlowWatch, not Watch, and raises no early warning.
+	// FlowMinOut 0 = off; FlowWatch 0 = Danger.
+	FlowMinOut, FlowWatch, FlowMaxAcc float64
+	FlowMemoryMs                      int64
 }
 
 // Early-warning rate estimate: least-squares slope of the estimated density
@@ -106,7 +115,8 @@ func ConfigFrom(c detect.Config) Config {
 	return Config{Eps: c.ClusterEps, MinPts: c.ClusterMinPts, TrendMs: c.ClusterTrendMs,
 		Watch: c.DensityWatch, Danger: c.DensityDanger, Participation: c.Participation,
 		Margin: c.Margin, HoldMs: c.HoldMs, EarlyWarnS: c.EarlyWarnS, EarlyFloor: c.EarlyFloor,
-		AccDisc: c.DensityAccDisc}
+		AccDisc: c.DensityAccDisc, FlowMinOut: c.FlowMinOut,
+		FlowWatch: c.FlowWatch, FlowMaxAcc: c.FlowMaxAcc, FlowMemoryMs: c.FlowMemoryMs}
 }
 
 // Cluster is one group of phones.
@@ -137,6 +147,16 @@ type Cluster struct {
 	ETA  float64
 	// Early: the projection holds (ETA set, Est ≥ EarlyFloor × Danger).
 	Early bool
+	// Motion of the crowd at the densest spot (flow.go): Speed is the net
+	// speed of the phones within LocalR of (PeakX, PeakY) (m/s); In and Out
+	// are the people per second crossing into and out of that disc; Flow =
+	// Out per metre of the disc's width (people per metre per second).
+	// FlowKnown: enough phones placed well enough to tell; Flowing: people
+	// are getting out (FlowMinOut), now or within FlowMemoryMs, so the
+	// cluster is not on watch below FlowWatch and raises no early warning.
+	Speed, Flow, In, Out float64
+	FlowKnown, Flowing   bool
+	inN, outN            int // phones that crossed in / out
 }
 
 // Area of the cluster's disc, m² (at least 1).
@@ -170,6 +190,10 @@ type track struct {
 	earlySince int64 // when the projection started holding (0 = not)
 	// earlyRaised: an early warning was reported in this yellow stretch.
 	earlyRaised bool
+	flowAt      int64  // when people were last seen getting out (0 = never)
+	flowing     bool   // the held flowing answer (flow.go)
+	flowSince   int64  // when the instant answer started to differ from it (0 = it doesn't)
+	shown       string // the level last reported (state.Level, unless flow masks a yellow)
 }
 
 // Tracker follows clusters over time. Not safe for concurrent use.
@@ -177,10 +201,11 @@ type Tracker struct {
 	cfg    Config
 	tracks []*track
 	seq    int
+	moves  moves // recent positions per phone (flow.go)
 }
 
 // NewTracker creates a tracker.
-func NewTracker(cfg Config) *Tracker { return &Tracker{cfg: cfg} }
+func NewTracker(cfg Config) *Tracker { return &Tracker{cfg: cfg, moves: moves{}} }
 
 // SetConfig changes the settings, keeping the tracked clusters.
 func (t *Tracker) SetConfig(cfg Config) { t.cfg = cfg }
@@ -192,8 +217,12 @@ func (t *Tracker) Update(now int64, pts []Point) ([]Cluster, []Change) {
 	cfg := t.cfg
 	groups := DBSCAN(pts, cfg.Eps, cfg.MinPts)
 	found := make([]Cluster, len(groups))
+	if cfg.flowOn() {
+		t.moves.add(now, pts, cfg.FlowMaxAcc)
+	}
 	for i, g := range groups {
 		found[i] = describe(pts, g, cfg.Participation, cfg.AccDisc)
+		t.flow(&found[i], pts, now)
 	}
 
 	// Greedy nearest matching of new clusters to tracks.
@@ -240,7 +269,7 @@ func (t *Tracker) Update(now int64, pts []Point) ([]Cluster, []Change) {
 	for fi := range found {
 		if owner[fi] == nil {
 			t.seq++
-			tr := &track{id: fmt.Sprintf("c%d", t.seq), born: now, state: detect.NewLevelState()}
+			tr := &track{id: fmt.Sprintf("c%d", t.seq), born: now, state: detect.NewLevelState(), shown: protocol.LevelCalm}
 			t.tracks = append(t.tracks, tr)
 			owner[fi] = tr
 		}
@@ -281,6 +310,12 @@ func (t *Tracker) Update(now int64, pts []Point) ([]Cluster, []Change) {
 		f.ID = tr.id
 		f.Trend = t.trend(tr, now)
 		f.Rate, f.ETA, f.Early = t.project(tr, f.Est)
+		t.flowState(tr, &f, now)
+		if f.Flowing {
+			// People are getting out: the rise is a route filling, which
+			// drains. No projection.
+			f.ETA, f.Early = 0, false
+		}
 		from, to, changed := tr.state.Update(now, f.Est, th)
 		if changed && to == protocol.LevelCalm && f.Early {
 			// Still projected to be dangerous soon (a floor below the
@@ -311,11 +346,21 @@ func (t *Tracker) Update(now int64, pts []Point) ([]Cluster, []Change) {
 		if tr.state.Level != protocol.LevelYellow {
 			tr.earlyRaised = false
 		}
+		// The level shown: the state machine's, except that a flowing crowd
+		// below FlowWatch is not on watch (red is never masked, so its
+		// timing is the density's alone).
 		f.Level = tr.state.Level
-		tr.c = f
-		if changed {
-			changes = append(changes, Change{T: now, Cluster: f, From: from, To: to, Early: early})
+		if f.Level == protocol.LevelYellow && f.Flowing && f.Est < cfg.flowWatch() {
+			f.Level = protocol.LevelCalm
 		}
+		tr.c = f
+		switch {
+		case f.Level != tr.shown:
+			changes = append(changes, Change{T: now, Cluster: f, From: tr.shown, To: f.Level, Early: early && f.Level == protocol.LevelYellow})
+		case changed && early && from == to:
+			changes = append(changes, Change{T: now, Cluster: f, From: from, To: to, Early: true})
+		}
+		tr.shown = f.Level
 		out = append(out, f)
 	}
 	// Forget clusters gone for longer than the grace period.
@@ -325,10 +370,10 @@ func (t *Tracker) Update(now int64, pts []Point) ([]Cluster, []Change) {
 			keep = append(keep, tr)
 			continue
 		}
-		if tr.state.Level != protocol.LevelCalm {
+		if tr.shown != protocol.LevelCalm {
 			c := tr.c
 			c.Level, c.Trend = protocol.LevelCalm, Dispersing
-			changes = append(changes, Change{T: now, Cluster: c, From: tr.state.Level, To: protocol.LevelCalm})
+			changes = append(changes, Change{T: now, Cluster: c, From: tr.shown, To: protocol.LevelCalm})
 		}
 	}
 	t.tracks = keep
