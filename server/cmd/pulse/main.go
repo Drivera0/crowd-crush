@@ -150,6 +150,9 @@ func main() {
 	})
 	mux.Handle("/dash/", http.StripPrefix("/dash/", spa(filepath.Join(*webDir, "dashboard", "dist"))))
 	mux.HandleFunc("GET /dash", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/dash/", http.StatusFound) })
+	// The pitch deck (docs/deck): /deck/ is the scrolling overview, /deck/present.html the full-screen version for a tablet.
+	mux.Handle("GET /deck/", http.StripPrefix("/deck/", http.FileServer(http.Dir(filepath.Join("docs", "deck")))))
+	mux.HandleFunc("GET /deck", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/deck/present.html", http.StatusFound) })
 	mux.Handle("/", spa(filepath.Join(*webDir, "phone", "dist")))
 
 	srv := &http.Server{Addr: *addr, Handler: logRequests(mux), ReadHeaderTimeout: 10 * time.Second}
