@@ -134,7 +134,11 @@ func (l *level) split(ax, ay, az float64) (h1, v, h2 float64) {
 // rhythm) doesn't let the phone through in between.
 func (d *Detector) walking(p *phone, maxLag int) bool {
 	cfg := &d.cfg
-	if !p.lev.on || cfg.WalkRhythm <= 0 {
+	// A roughly placed phone (motion.go) is gated whether or not it sends
+	// gravity: its pairs are picked by motion alone, among everyone within
+	// metres, and people walking to the same beat or setting off together
+	// would otherwise pair up. Without gravity it is taken as upright.
+	if !(p.lev.on || (p.acc > 0 && cfg.AccPairScale > 0)) || cfg.WalkRhythm <= 0 {
 		return false
 	}
 	if p.sway >= cfg.EdgeMinSway && p.vrms >= cfg.WalkMinVert {

@@ -22,6 +22,16 @@ import (
 //   - Stability: the direction is smoothed (EMA, GuideTauMs) and the one
 //     shown only changes when the smoothed one turns more than GuideHoldDeg
 //     away from it, so the arrow doesn't jitter.
+//   - Rough positions (GuideIn.Acc > 0, a GPS fix good to ± Acc metres): the
+//     fine gradient at a dot that may be 5 m from its owner is noise. The
+//     direction is then the expected one over where the owner may really
+//     be: the gradient of the density smoothed by the phone's own position
+//     error (and each other phone's), which far from a crowd's centre is
+//     simply "away from it". Near the centre that gradient is weak and says
+//     little; the direction then leans on the least dense way out at long
+//     range (GuideProbeM + 2σ away, inside the venue). A push direction
+//     worked out from rough positions is not used. Move.Conf says how much
+//     the arrow can be trusted (roughConf).
 const (
 	GuideSigma   = 1.5  // m
 	GuideProbeM  = 2.0  // m
@@ -34,6 +44,23 @@ const (
 	pushForward  = 0.4  // how much of the push direction is added to the sideways move
 	flatGrad     = 0.05 // |∇ρ|·σ below this fraction of ρ counts as flat
 	edgeMargin   = 0.3  // m: a probe this close to the venue edge counts as outside
+	// AccToSigma: a reported accuracy radius is the 68 % radius of a
+	// two-dimensional error; per axis that is a σ of radius / 1.51.
+	AccToSigma = 1.51
+	// roughGradFull: a relative gradient |∇ρ|·h/ρ of this much or more (the
+	// phone is about a kernel width from the crowd's centre) is trusted
+	// fully; below it the long-range probe is mixed in.
+	roughGradFull = 0.5
+	// GuideConfAcc: Move.Conf = 1 / (1 + (Acc / GuideConfAcc)²): 0.64 at
+	// 3 m, 0.5 at 4 m, 0.28 at 6.4 m, 0.14 at 10 m. Set from the evaluation
+	// (docs/EVAL.md): against the arrow worked out from everyone's true
+	// position, an arrow from a phone that reports ± 3 m is within 45° in
+	// 50–66 % of cases; from one that reports ± 6 m in 38 %, with as many
+	// pointing more than 90° wrong (a random arrow: 25 % and 50 %).
+	GuideConfAcc = 4.0
+	// GuideMinConf: below this an arrow should not be shown (the phone gets
+	// a plain instruction instead).
+	GuideMinConf = 0.5
 	lessCrowded  = "less crowded side"
 	reasonPush   = "push"
 	reasonDense  = "density"
@@ -57,8 +84,10 @@ type Geom struct {
 // is the push's travel direction (any length; zero = unknown, treated as
 // density).
 type GuideIn struct {
-	ID           string
-	X, Y         float64
+	ID   string
+	X, Y float64
+	// Acc is the accuracy radius of X, Y (m); 0 = exact.
+	Acc          float64
 	Reason       string
 	PushX, PushY float64
 	// Leave, when set, is an area the phone should get out of (an area
@@ -73,6 +102,11 @@ type Move struct {
 	DX, DY float64
 	To     string
 	Reason string
+	// Conf is how far the arrow can be trusted, 0..1: 1 for a phone placed
+	// by hand, lower the rougher its position (GuideConfAcc). Below
+	// GuideMinConf a plain instruction ("move to where there is more room")
+	// is more honest than an arrow.
+	Conf float64
 }
 
 type guideState struct {
@@ -99,7 +133,7 @@ func (g *Guide) Update(now int64, pts []Point, participation float64, geom Geom,
 		keep[p.ID] = true
 		rx, ry, ex, ey, exit := Direction(pts, participation, geom, p)
 		reason := reasonDense
-		if p.Reason == reasonPush && math.Hypot(p.PushX, p.PushY) > 1e-9 {
+		if p.Reason == reasonPush && math.Hypot(p.PushX, p.PushY) > 1e-9 && p.Acc <= 0 {
 			reason = reasonPush
 		}
 		s := g.st[p.ID]
@@ -124,7 +158,7 @@ func (g *Guide) Update(now int64, pts []Point, participation float64, geom Geom,
 		if exit != "" && s.dx*ex+s.dy*ey >= math.Cos(GuideExitDeg*math.Pi/180) {
 			to = exit
 		}
-		out[p.ID] = Move{DX: s.dx, DY: s.dy, To: to, Reason: reason}
+		out[p.ID] = Move{DX: s.dx, DY: s.dy, To: to, Reason: reason, Conf: Conf(p.Acc)}
 	}
 	for id := range g.st {
 		if !keep[id] {
@@ -181,7 +215,9 @@ func Direction(pts []Point, participation float64, geom Geom, p GuideIn) (dx, dy
 		return bx, by
 	}
 
-	if p.Reason == reasonPush && math.Hypot(p.PushX, p.PushY) > 1e-9 {
+	if p.Acc > 0 {
+		dx, dy = roughDirection(pts, geom, p)
+	} else if p.Reason == reasonPush && math.Hypot(p.PushX, p.PushY) > 1e-9 {
 		l := math.Hypot(p.PushX, p.PushY)
 		px, py := p.PushX/l, p.PushY/l
 		// Sideways, on the less dense (and open) side, a little with the push.
@@ -243,6 +279,92 @@ func Direction(pts []Point, participation float64, geom Geom, p GuideIn) (dx, dy
 		dx, dy, exit = lx, ly, "" // whatever else, get out of the area
 	}
 	return dx, dy, ex, ey, exit
+}
+
+// Conf is Move.Conf for a position with accuracy radius acc (m).
+func Conf(acc float64) float64 {
+	if !(acc > 0) {
+		return 1
+	}
+	return 1 / (1 + (acc/GuideConfAcc)*(acc/GuideConfAcc))
+}
+
+// roughDirection is the density direction for a phone whose position is
+// only known to ± p.Acc (see the comment at the top): the gradient of the
+// density smoothed by the position errors where it is clear, the least
+// dense way out at long range where it is not.
+func roughDirection(pts []Point, geom Geom, p GuideIn) (dx, dy float64) {
+	s := p.Acc / AccToSigma
+	own := s * s
+	gx, gy, rho := kdeGradVar(pts, p.X, p.Y, own)
+	h := math.Sqrt(GuideSigma*GuideSigma + own)
+	w := 0.0
+	if rho > 0 {
+		w = math.Min(1, math.Hypot(gx, gy)*h/rho/roughGradFull)
+	}
+	gdx, gdy := norm(-gx, -gy)
+	// Long range: the least dense direction that stays inside the venue.
+	l := GuideProbeM + 2*s
+	px, py, best := 0.0, 0.0, math.Inf(1)
+	for k := 0; k < GuideProbes; k++ {
+		th := 2 * math.Pi * float64(k) / GuideProbes
+		ux, uy := math.Cos(th), math.Sin(th)
+		qx, qy := p.X+l*ux, p.Y+l*uy
+		if qx < edgeMargin || qy < edgeMargin || qx > geom.W-edgeMargin || qy > geom.H-edgeMargin {
+			// As far as the venue goes that way; a direction that leaves
+			// at once is no way out.
+			t := l
+			if ux < 0 {
+				t = math.Min(t, (p.X-edgeMargin)/-ux)
+			} else if ux > 0 {
+				t = math.Min(t, (geom.W-edgeMargin-p.X)/ux)
+			}
+			if uy < 0 {
+				t = math.Min(t, (p.Y-edgeMargin)/-uy)
+			} else if uy > 0 {
+				t = math.Min(t, (geom.H-edgeMargin-p.Y)/uy)
+			}
+			if t < l/2 {
+				continue
+			}
+			qx, qy = p.X+t*ux, p.Y+t*uy
+		}
+		_, _, d := kdeGradVar(pts, qx, qy, own)
+		if d < best {
+			px, py, best = ux, uy, d
+		}
+	}
+	dx, dy = norm(w*gdx+(1-w)*px, w*gdy+(1-w)*py)
+	if dx == 0 && dy == 0 {
+		if dx, dy = gdx, gdy; dx == 0 && dy == 0 {
+			dx, dy = px, py
+		}
+	}
+	return dx, dy
+}
+
+// kdeGradVar is KDEGrad with every kernel widened by the position errors:
+// each phone's own (its Acc) plus extra (the variance, m², of the point the
+// density is asked at).
+func kdeGradVar(pts []Point, x, y, extra float64) (gx, gy, rho float64) {
+	base := GuideSigma*GuideSigma + extra
+	for _, q := range pts {
+		s2 := base
+		if q.Acc > 0 {
+			s := q.Acc / AccToSigma
+			s2 += s * s
+		}
+		dx, dy := q.X-x, q.Y-y
+		d2 := dx*dx + dy*dy
+		if d2 > 16*s2 {
+			continue
+		}
+		k := math.Exp(-d2/(2*s2)) / (2 * math.Pi * s2)
+		rho += k
+		gx += dx / s2 * k
+		gy += dy / s2 * k
+	}
+	return gx, gy, rho
 }
 
 // leaveDir is the unit vector from the phone to the nearest point of the

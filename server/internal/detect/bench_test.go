@@ -66,6 +66,22 @@ func benchStep(b *testing.B, n int, orient bool) {
 func BenchmarkStep1000Upright(b *testing.B)  { benchStep(b, 1000, false) }
 func BenchmarkStep1000Levelled(b *testing.B) { benchStep(b, 1000, true) }
 
+// BenchmarkStep1000Rough is the same crowd with every position only known
+// to ± 6.4 m (a phone GPS): every phone is a motion candidate of nearly
+// every other, the worst case for motion pairing (motion.go).
+func BenchmarkStep1000Rough(b *testing.B) {
+	d, now := benchCrowd(1000, true)
+	for id := range d.phones {
+		d.SetAccuracy(id, 6.4)
+	}
+	r := d.Step(now)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		d.Step(now)
+	}
+	b.ReportMetric(float64(len(r.Edges)), "pairs")
+}
+
 // BenchmarkAdd is the per-sample cost (filters, and levelling when g is sent).
 func benchAdd(b *testing.B, withG bool) {
 	d := New(DefaultConfig())

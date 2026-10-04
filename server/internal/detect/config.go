@@ -27,6 +27,20 @@ type Config struct {
 	MaxNeighbours   int     `json:"maxNeighbours"`   // each phone keeps its nearest this many
 	ChainAngleDeg   float64 `json:"chainAngleDeg"`   // a chain may bend this much per hop
 
+	// Phones whose position is only roughly known (a GPS fix with an
+	// accuracy radius; see motion.go). Neighbours are then found by motion:
+	// two such phones are candidates when their reported positions are within
+	// neighbourRadius + accPairScale × (accA + accB), at most maxPairRadius,
+	// and each phone is compared with at most motionPairs candidates per step.
+	AccPairScale  float64 `json:"accPairScale"`  // 0 = ignore accuracy (every phone is taken to stand exactly where it says)
+	MaxPairRadius float64 `json:"maxPairRadius"` // m
+	MotionPairs   int     `json:"motionPairs"`   // candidates compared per phone and step
+	LagClosureMs  int64   `json:"lagClosureMs"`  // a chain a→b→c found by motion needs a and c to match at lag(a,b) + lag(b,c), give or take this
+	// A GPS phone counts as outside the venue only when its fix is more than
+	// outsideAccFactor × its accuracy beyond the edge (0 = any distance, as
+	// before); nearer than that it is taken to stand at the edge.
+	OutsideAccFactor float64 `json:"outsideAccFactor"`
+
 	// Staff-drawn "high risk" areas: thresholds × this, hold time halved.
 	HighRiskFactor float64 `json:"highRiskFactor"`
 
@@ -39,6 +53,11 @@ type Config struct {
 	Participation  float64 `json:"participation"`  // fraction of attendees with the page open (people = phones / participation)
 	EarlyWarnS     float64 `json:"earlyWarnS"`     // early warning: a cluster projected to reach densityDanger within this many seconds (at its current rate) is at least yellow; 0 = off
 	EarlyFloor     float64 `json:"earlyFloor"`     // … once its estimated density is at least this fraction of densityDanger
+	// Density around a phone whose position is only known to ± acc metres is
+	// counted over a disc of radius densityAccDisc × acc when that is wider
+	// than the usual 1.5 m: phones that all claim the same spot to ± 10 m are
+	// not a crush. 0 = every position is taken as exact.
+	DensityAccDisc float64 `json:"densityAccDisc"`
 
 	// GPS fixes less accurate than this (m) are ignored.
 	GPSMaxAcc float64 `json:"gpsMaxAcc"`
@@ -46,12 +65,18 @@ type Config struct {
 	// Per-phone.
 	HandlingRot      float64 `json:"handlingRot"`      // deg/s above which the phone is being handled
 	HandlingSettleMs int64   `json:"handlingSettleMs"` // quiet time before readings count again
-	StaleMs          int64   `json:"staleMs"`          // no data for this long → stale
-	LowPassHz        float64 `json:"lowPassHz"`        // sway is slow: drop everything above
-	HighPassHz       float64 `json:"highPassHz"`       // and remove bias / drift below
-	Axis             string  `json:"axis"`             // "x", "z" or "xz" (dominant horizontal direction)
-	SwayWindowMs     int64   `json:"swayWindowMs"`     // RMS window for the sway score
-	SwayThreshold    float64 `json:"swayThreshold"`    // RMS above this → swaying
+	// A short burst of rotation (a gesture with the phone in the hand) only
+	// masks its own readings: while a handling episode is younger than
+	// handlingShortMs the quiet time is handlingShortSettleMs and the filters
+	// are held, not restarted. 0 = every episode is a long one.
+	HandlingShortMs       int64   `json:"handlingShortMs"`
+	HandlingShortSettleMs int64   `json:"handlingShortSettleMs"`
+	StaleMs               int64   `json:"staleMs"`       // no data for this long → stale
+	LowPassHz             float64 `json:"lowPassHz"`     // sway is slow: drop everything above
+	HighPassHz            float64 `json:"highPassHz"`    // and remove bias / drift below
+	Axis                  string  `json:"axis"`          // "x", "z" or "xz" (dominant horizontal direction)
+	SwayWindowMs          int64   `json:"swayWindowMs"`  // RMS window for the sway score
+	SwayThreshold         float64 `json:"swayThreshold"` // RMS above this → swaying
 
 	// Phones that send their gravity vector (levelled; see level.go).
 	HandlingTiltDeg float64 `json:"handlingTiltDeg"` // gravity turning this far in the device frame within handlingTiltMs = being handled (out of a pocket, turned over); 0 = off
@@ -70,6 +95,11 @@ type Config struct {
 	PeakMargin    float64 `json:"peakMargin"`    // best peak must beat any other peak by this (periodic motion is ambiguous)
 	EdgeMinSway   float64 `json:"edgeMinSway"`   // both phones need at least this RMS
 	LatencyMs     int64   `json:"latencyMs"`     // analyse up to now-LatencyMs so late packets have arrived
+	// MinOverlap: a pair is correlated at a lag when at least this share of
+	// the readings a gap-free pair would have there are present on both
+	// phones (gaps: handling, dropouts). 1 = any gap rules out the far lags,
+	// as before. Gap-free pairs are unaffected by it.
+	MinOverlap float64 `json:"minOverlap"`
 
 	// False-positive guards.
 	VerticalRatio float64 `json:"verticalRatio"` // veto a wave edge when non-rhythmic vertical motion this many times stronger than the horizontal travels down the line with it (Mexican wave); 0 = off
@@ -90,20 +120,23 @@ func DefaultConfig() Config {
 		VenueW: 24, VenueH: 16, ZoneCols: 2, ZoneRows: 1,
 		LegacySpacing: 0.6, LegacyX0: 4.0,
 		NeighbourRadius: 1.1, MaxNeighbours: 6, ChainAngleDeg: 90,
-		HighRiskFactor: 0.5,
-		ClusterEps:     1.2, ClusterMinPts: 3, ClusterTrendMs: 10000,
+		AccPairScale: 1.0, MaxPairRadius: 15, MotionPairs: 10, LagClosureMs: 150,
+		OutsideAccFactor: 1.0,
+		HighRiskFactor:   0.5,
+		ClusterEps:       1.2, ClusterMinPts: 3, ClusterTrendMs: 10000,
 		DensityWatch: 2.0, DensityDanger: 4.0, Participation: 1.0,
-		EarlyWarnS: 30, EarlyFloor: 0.55,
+		EarlyWarnS: 30, EarlyFloor: 0.55, DensityAccDisc: 0.5,
 		GPSMaxAcc: 25,
 
 		HandlingRot:      200,
 		HandlingSettleMs: 1000,
-		StaleMs:          2000,
-		LowPassHz:        1.5,
-		HighPassHz:       0.15,
-		Axis:             "x",
-		SwayWindowMs:     5000,
-		SwayThreshold:    0.25,
+		HandlingShortMs:  1500, HandlingShortSettleMs: 300,
+		StaleMs:       2000,
+		LowPassHz:     1.5,
+		HighPassHz:    0.15,
+		Axis:          "x",
+		SwayWindowMs:  5000,
+		SwayThreshold: 0.25,
 
 		HandlingTiltDeg: 45,
 		HandlingTiltMs:  500,
@@ -120,6 +153,7 @@ func DefaultConfig() Config {
 		PeakMargin:    0.2,
 		EdgeMinSway:   0.15,
 		LatencyMs:     300,
+		MinOverlap:    0.7,
 
 		VerticalRatio: 1.0,
 		MinChain:      3,
@@ -160,6 +194,8 @@ func (c Config) Validate() error {
 		return fmt.Errorf("neighbourRadius must be > 0 and maxNeighbours ≥ 1")
 	case !(c.ChainAngleDeg > 0 && c.ChainAngleDeg <= 180):
 		return fmt.Errorf("chainAngleDeg must be in (0, 180]")
+	case !(c.AccPairScale >= 0) || (c.AccPairScale > 0 && (!(c.MaxPairRadius >= c.NeighbourRadius) || c.MotionPairs < 1)) || c.LagClosureMs < 0 || !(c.OutsideAccFactor >= 0):
+		return fmt.Errorf("accPairScale ≥ 0 (with it on: maxPairRadius ≥ neighbourRadius, motionPairs ≥ 1), lagClosureMs ≥ 0, outsideAccFactor ≥ 0")
 	case !(c.HighRiskFactor > 0 && c.HighRiskFactor <= 1):
 		return fmt.Errorf("highRiskFactor must be in (0, 1]")
 	case !(c.ClusterEps > 0) || c.ClusterMinPts < 2 || c.ClusterTrendMs <= 0:
@@ -170,10 +206,14 @@ func (c Config) Validate() error {
 		return fmt.Errorf("participation must be in (0, 1]")
 	case !(c.EarlyWarnS >= 0 && c.EarlyWarnS <= 600) || !(c.EarlyFloor >= 0 && c.EarlyFloor < 1):
 		return fmt.Errorf("earlyWarnS must be 0..600 s and earlyFloor in [0, 1)")
+	case !(c.DensityAccDisc >= 0 && c.DensityAccDisc <= 10):
+		return fmt.Errorf("densityAccDisc must be 0..10")
 	case !(c.GPSMaxAcc > 0):
 		return fmt.Errorf("gpsMaxAcc must be > 0")
 	case c.StepMs <= 0 || c.CorrWindowMs <= 2*c.MaxLagMs:
 		return fmt.Errorf("corrWindowMs must exceed 2*maxLagMs and stepMs must be > 0")
+	case !(c.MinOverlap > 0 && c.MinOverlap <= 1):
+		return fmt.Errorf("minOverlap must be in (0, 1]")
 	case c.Axis != "x" && c.Axis != "z" && c.Axis != "xz":
 		return fmt.Errorf("axis must be x, z or xz")
 	}
@@ -183,6 +223,50 @@ func (c Config) Validate() error {
 // LegacyPos maps an old grid cell to venue metres.
 func (c Config) LegacyPos(row, col int) (x, y float64) {
 	return c.LegacyX0 + float64(col)*c.LegacySpacing, c.VenueH/2 + float64(row)*c.LegacySpacing
+}
+
+// Outside reports whether a position fix (x, y) with accuracy radius acc
+// (m; 0 = exact) is outside the venue: beyond the edge by more than
+// OutsideAccFactor × acc. A fix nearer than that is taken to be someone
+// inside whose GPS is off, and Clamp puts them at the edge.
+func (c Config) Outside(x, y, acc float64) bool {
+	m := c.OutsideAccFactor * math.Max(acc, 0)
+	if c.OutsideAccFactor <= 0 {
+		m = 0
+	}
+	return x < -m || y < -m || x > c.VenueW+m || y > c.VenueH+m
+}
+
+// Fold brings a roughly known position that fell off the venue back in by
+// mirroring it at the edge it crossed (then clamping, should it still be
+// off). Clamping alone would stack every such phone on the edge line, and
+// the corners would read as crushes; mirroring is the usual boundary
+// correction for a density estimate and keeps the crowd near a wall as
+// dense as it was.
+func (c Config) Fold(x, y float64) (float64, float64) {
+	f := func(v, hi float64) float64 {
+		if v < 0 {
+			v = -v
+		} else if v > hi {
+			v = 2*hi - v
+		}
+		return math.Max(0, math.Min(v, hi))
+	}
+	return f(x, c.VenueW), f(y, c.VenueH)
+}
+
+// Place turns a position fix (x, y) with accuracy radius acc (m; 0 = exact)
+// into where the phone is put and whether it counts as outside the venue:
+// beyond the edge by more than OutsideAccFactor × acc it is outside and
+// clamped onto the edge (as every fix off the venue used to be); nearer, it
+// is someone inside whose GPS is off, and the fix is mirrored back in (Fold).
+func (c Config) Place(x, y, acc float64) (px, py float64, outside bool) {
+	if c.Outside(x, y, acc) {
+		px, py = c.Clamp(x, y)
+		return px, py, true
+	}
+	px, py = c.Fold(x, y)
+	return px, py, false
 }
 
 // Clamp keeps a point inside the venue.

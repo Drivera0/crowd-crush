@@ -79,9 +79,15 @@ type phone struct {
 	id      string
 	x, y    float64
 	outside bool // outside the venue: counts toward nothing
+	// acc is the accuracy radius of the position (m); 0 = the phone stands
+	// exactly there (placed by hand). See motion.go.
+	acc  float64
+	hash uint64 // of the id, for picking motion candidates
 
 	lastT         int64 // corrected time of the newest sample
 	handlingUntil int64
+	handlingFrom  int64 // when the current handling episode began
+	handlingLong  bool  // … and whether it has outlasted HandlingShortMs (filters restart)
 
 	init               bool
 	lastValidT         int64
@@ -103,7 +109,18 @@ type phone struct {
 	// both rhythmic (leg swing in a pocket); it joins no pair.
 	walking   bool
 	walkUntil int64
-	zones     []int
+	// Motion pairs (motion.go): the step in which the phone was last
+	// eligible and its index among the eligible then; its motion neighbours.
+	eligAt  uint64
+	eligIdx int
+	stuck   []stuckWith
+	// rhythm of the vertical trace, worked out once per step when needed.
+	vRhythm   float64
+	vRhythmAt uint64
+	// blind: being handled, or too few valid readings to say whether it
+	// sways. A pair with a blind phone is evidence neither way.
+	blind bool
+	zones []int
 	// RMS of the horizontal and vertical band-passed motion over the whole
 	// correlation window.
 	hrms, vrms float64
@@ -123,6 +140,7 @@ type zone struct {
 type PhoneResult struct {
 	ID      string
 	X, Y    float64
+	Acc     float64 // accuracy radius of the position (m); 0 = exact
 	Outside bool
 	Status  string
 	Sway    float64
@@ -138,6 +156,11 @@ type Edge struct {
 	LagMs int64
 	Corr  float64
 	Wave  bool
+	// Motion: the pair was found by motion, not by distance: at least one of
+	// the two positions is only roughly known (motion.go). Such pairs are
+	// listed only when they look like a wave hop (|corr| ≥ ChainCorr at a
+	// wave-like lag, not vertical).
+	Motion bool
 }
 
 // ZoneResult is the per-zone output of a step.
@@ -201,6 +224,7 @@ type Detector struct {
 	zones    []*zone
 	lastStep int64
 	last     lastStep // inputs of the latest step, for Explain
+	seq      uint64   // step counter
 }
 
 // New creates a detector with the default zones for cfg's venue.
@@ -288,10 +312,22 @@ func (d *Detector) ZoneOf(x, y float64) string {
 func (d *Detector) SetPhone(id string, x, y float64) {
 	p, ok := d.phones[id]
 	if !ok {
-		p = &phone{id: id}
+		p = &phone{id: id, hash: hashID(id)}
 		d.phones[id] = p
 	}
 	p.x, p.y = x, y
+}
+
+// SetAccuracy says how well a phone's position is known: the accuracy
+// radius of its GPS fix in metres (the 68 % radius phones report), 0 for a
+// phone placed by hand. Unknown phones are ignored.
+func (d *Detector) SetAccuracy(id string, acc float64) {
+	if p, ok := d.phones[id]; ok {
+		if !(acc > 0) || math.IsInf(acc, 0) { // also NaN
+			acc = 0
+		}
+		p.acc = acc
+	}
 }
 
 // SetOutside marks a phone as outside the venue (its GPS fix put it there):
@@ -314,20 +350,37 @@ func (d *Detector) Add(id string, s Sample) {
 	p.lastT = s.T
 	cfg := &d.cfg
 
-	if s.Rot > cfg.HandlingRot {
-		p.handlingUntil = s.T + cfg.HandlingSettleMs
-	}
-	if g, ok := unit(s.G); ok && p.lev.set(g, s.T, cfg) {
-		// Gravity swung round in the device frame: the phone was turned
-		// over or pulled out of a pocket.
-		p.handlingUntil = s.T + cfg.HandlingSettleMs
+	// Gravity swinging round in the device frame: the phone was turned over
+	// or pulled out of a pocket.
+	g, gOK := unit(s.G)
+	turned := gOK && p.lev.set(g, s.T, cfg)
+	if s.Rot > cfg.HandlingRot || turned {
+		if s.T >= p.handlingUntil { // a new episode
+			p.handlingFrom, p.handlingLong = s.T, false
+		}
+		// A short burst of rotation (a gesture with the phone in the hand)
+		// masks its own readings and little more; once it has gone on for
+		// HandlingShortMs, or the phone was turned over, it is handling
+		// proper: the full quiet time, and the filters start again.
+		if turned || cfg.HandlingShortMs <= 0 || s.T-p.handlingFrom >= cfg.HandlingShortMs {
+			p.handlingLong = true
+		}
+		settle := cfg.HandlingSettleMs
+		if !p.handlingLong && cfg.HandlingShortSettleMs < settle {
+			settle = cfg.HandlingShortSettleMs
+		}
+		if u := s.T + settle; u > p.handlingUntil {
+			p.handlingUntil = u
+		}
 	}
 	ax, ay, az := s.AX, s.AY, s.AZ
 	if p.lev.on {
 		ax, ay, az = p.lev.split(ax, ay, az)
 	}
 	if s.T < p.handlingUntil {
-		p.init = false // restart the filters once the phone settles
+		if p.handlingLong {
+			p.init = false // restart the filters once the phone settles
+		} // else: the filters hold their state across the gap
 		p.append(point{t: s.T})
 		return
 	}
@@ -503,6 +556,7 @@ func (d *Detector) Step(now int64) Result {
 		if cnt >= swayN/2 {
 			p.sway = math.Sqrt(ss / float64(cnt))
 		}
+		p.blind = cnt < swayN/2 || p.lastT < p.handlingUntil
 		p.hrms, p.vrms = rms(p.h, p.valid), rms(p.v, p.valid)
 		p.walking = d.walking(p, int(cfg.MaxLagMs/cfg.StepMs))
 		if !p.outside {
@@ -517,26 +571,69 @@ func (d *Detector) Step(now int64) Result {
 		waves  int
 		vx, vy float64
 		lagSum int64
+		// Phones in the zone by how well their position is known, and the
+		// roughly placed ones that are part of a wave found by motion.
+		exact, rough, roughWave int
+		mwaves                  int     // wave edges found by motion
+		mvx, mvy                float64 // their travel vectors, from the rough positions
 	}
 	tallies := make([]tally, len(d.zones))
 
 	maxLag := int(cfg.MaxLagMs / cfg.StepMs)
 	minOverlap := n - maxLag
-	pairs := d.neighbourPairs(spatial)
+	if cfg.MinOverlap > 0 && cfg.MinOverlap < 1 {
+		minOverlap = int(math.Ceil(float64(minOverlap) * cfg.MinOverlap))
+	}
+	// Phones that stand exactly where they say are paired by distance. A
+	// phone whose position is only roughly known finds its neighbours by
+	// motion (motion.go).
+	exact, rough := spatial, []*phone(nil)
+	if cfg.AccPairScale > 0 {
+		for i, p := range spatial {
+			if p.acc > 0 {
+				exact = append([]*phone(nil), spatial[:i]...)
+				for _, q := range spatial[i:] {
+					if q.acc > 0 {
+						rough = append(rough, q)
+					} else {
+						exact = append(exact, q)
+					}
+				}
+				break
+			}
+		}
+	}
+	d.seq++
+	pairs := d.neighbourPairs(exact)
+	nExact := len(pairs)
+	if len(rough) > 0 {
+		pairs = append(pairs, d.motionPairs(spatial)...)
+	}
 	edges := make([]Edge, 0, len(pairs))
 	support := make([]bool, 0, len(pairs)) // hop is wave-like enough to extend a chain
 	recs := make([]pairRec, 0, len(pairs))
-	for _, pr := range pairs {
+	// unseen: the pair could not be measured in this step (a phone blind, or
+	// too little overlap to correlate): it says nothing about a wave.
+	unseen := make([]bool, 0, len(pairs))
+	for pi, pr := range pairs {
 		a, b := pr[0], pr[1]
-		e := Edge{From: a.id, To: b.id}
+		e := Edge{From: a.id, To: b.id, Motion: pi >= nExact}
 		sup := false
+		dark := a.blind || b.blind
 		canCorr := a.lastT >= a.handlingUntil && b.lastT >= b.handlingUntil &&
 			a.sway >= cfg.EdgeMinSway && b.sway >= cfg.EdgeMinSway &&
 			!a.walking && !b.walking
 		if canCorr {
 			// |corr|: a phone held upside down, or iOS vs Android sign conventions,
 			// flips the axis but not the timing.
-			lag, corr, second, ok := xcorr(a.h, b.h, a.valid, b.valid, maxLag, minOverlap, true)
+			cs := corrCurve(a.h, b.h, a.valid, b.valid, maxLag, minOverlap, true)
+			lag, corr, second, ok := peaks(cs, maxLag)
+			dark = dark || !ok
+			if ok && e.Motion {
+				// Found by motion: the lag is all there is to say the motion
+				// travels, so it must be resolved (resolvedSecond).
+				second = math.Max(second, resolvedSecond(cs, lag, maxLag))
+			}
 			if ok {
 				e.LagMs = int64(math.Round(lag * float64(cfg.StepMs)))
 				e.Corr = corr
@@ -546,15 +643,22 @@ func (d *Detector) Step(now int64) Result {
 				// lags; only a clear single peak says which way it travels.
 				unambiguous := corr-second >= cfg.PeakMargin
 				e.Wave = corr >= cfg.CorrThreshold && waveLag && unambiguous
-				sup = cfg.ChainCorr > 0 && corr >= cfg.ChainCorr && waveLag
+				sup = cfg.ChainCorr > 0 && corr >= cfg.ChainCorr && waveLag && (!e.Motion || unambiguous)
 				if (e.Wave || sup) && d.vertical(a, b, lag, maxLag, minOverlap) {
 					e.Wave, sup = false, false
 				}
 			}
 		}
+		if e.Motion {
+			if !e.Wave && !sup {
+				continue // candidates that don't move like a wave hop aren't neighbours
+			}
+			d.stick(a, b)
+		}
 		edges = append(edges, e)
+		unseen = append(unseen, dark)
 		support = append(support, sup)
-		recs = append(recs, pairRec{a: a, b: b, handA: a.lastT < a.handlingUntil, handB: b.lastT < b.handlingUntil,
+		recs = append(recs, pairRec{motion: e.Motion, a: a, b: b, handA: a.lastT < a.handlingUntil, handB: b.lastT < b.handlingUntil,
 			swayA: a.sway, swayB: b.sway, walkA: a.walking, walkB: b.walking, preChain: e.Wave})
 	}
 	d.keepChains(edges, support)
@@ -570,6 +674,14 @@ func (d *Detector) Step(now int64) Result {
 		}
 		for _, zi := range unionIdx(a.zones, b.zones) {
 			t := &tallies[zi]
+			if e.Motion {
+				if e.Wave {
+					t.mwaves++
+					t.mvx += tx
+					t.mvy += ty
+				}
+				continue
+			}
 			t.edges = append(t.edges, i)
 			if e.Wave {
 				t.waves++
@@ -577,6 +689,25 @@ func (d *Detector) Step(now int64) Result {
 				t.vy += ty
 				t.lagSum += abs64(e.LagMs)
 				t.speeds = append(t.speeds, speed)
+			}
+		}
+	}
+
+	if len(rough) > 0 {
+		for _, p := range exact {
+			for _, zi := range p.zones {
+				tallies[zi].exact++
+			}
+		}
+		for _, p := range rough {
+			if p.blind {
+				continue // can't be measured: counts neither way
+			}
+			for _, zi := range p.zones {
+				tallies[zi].rough++
+				if p.wave {
+					tallies[zi].roughWave++
+				}
 			}
 		}
 	}
@@ -595,7 +726,7 @@ func (d *Detector) Step(now int64) Result {
 		case p.sway > cfg.SwayThreshold && !p.walking:
 			st = protocol.StatusSwaying
 		}
-		res.Phones = append(res.Phones, PhoneResult{ID: id, X: p.x, Y: p.y, Outside: p.outside, Status: st, Sway: p.sway, LastT: p.lastT})
+		res.Phones = append(res.Phones, PhoneResult{ID: id, X: p.x, Y: p.y, Acc: p.acc, Outside: p.outside, Status: st, Sway: p.sway, LastT: p.lastT})
 	}
 
 	dt := now - d.lastStep
@@ -609,8 +740,16 @@ func (d *Detector) Step(now int64) Result {
 		raw := 0.0
 		if z.def.NoPush {
 			t = tally{}
-		} else if net := math.Hypot(t.vx, t.vy); net > 0 {
-			raw = net / float64(d.waveCapable(edges, t.edges, t.vx/net, t.vy/net, median(t.speeds)))
+		} else {
+			if net := math.Hypot(t.vx, t.vy); net > 0 {
+				raw = net / float64(d.waveCapable(edges, unseen, t.edges, t.vx/net, t.vy/net, median(t.speeds)))
+			}
+			if t.rough > 0 {
+				// Roughly placed phones: the share of them that are part of
+				// a wave found by motion (roughScore), weighed against the
+				// exactly placed phones' edge score by head count.
+				raw = (raw*float64(t.exact) + roughScore(t.roughWave, t.rough)*float64(t.rough)) / float64(t.exact+t.rough)
+			}
 		}
 		z.raw = raw
 		z.score += alpha * (raw - z.score)
@@ -620,6 +759,11 @@ func (d *Detector) Step(now int64) Result {
 		if t.waves > 0 {
 			z.direction = dirName(t.vx, t.vy)
 			z.lagMs = t.lagSum / int64(t.waves)
+		} else if t.mwaves > 0 && math.Hypot(t.mvx, t.mvy) >= roughDirAgree*float64(t.mwaves) {
+			// A wave found by motion: its direction comes from the rough
+			// positions, and is named only when the edges agree on it. The
+			// lag between two such phones is not a per-person lag.
+			z.direction, z.lagMs = dirName(t.mvx, t.mvy), 0
 		}
 		if from, to, ok := z.state.Update(now, z.score, zoneThresholds(cfg, z.def.Sens)); ok {
 			if to == protocol.LevelCalm {
@@ -643,12 +787,17 @@ func (d *Detector) Step(now int64) Result {
 // a line every hop qualifies; in a crowd, two people standing side by side
 // across the direction of travel are hit at almost the same moment, so
 // their near-zero lag is consistent with the wave rather than evidence
-// against it, and they are left out.
-func (d *Detector) waveCapable(edges []Edge, idx []int, ux, uy, speed float64) int {
+// against it, and they are left out. So are pairs that couldn't be measured
+// in this step (unseen: a phone being handled, or too many readings missing
+// to correlate).
+func (d *Detector) waveCapable(edges []Edge, unseen []bool, idx []int, ux, uy, speed float64) int {
 	minProj := speed * float64(d.cfg.MinWaveLagMs)
 	n := 0
 	for _, i := range idx {
 		e := edges[i]
+		if unseen[i] && !e.Wave {
+			continue // couldn't be measured: counts neither way
+		}
 		a, b := d.phones[e.From], d.phones[e.To]
 		if e.Wave || math.Abs((b.x-a.x)*ux+(b.y-a.y)*uy) >= minProj {
 			n++
@@ -778,6 +927,8 @@ func (d *Detector) keepChains(edges []Edge, support []bool) {
 	type hop struct {
 		tail, head string
 		ux, uy     float64
+		lag        float64 // grid steps, > 0
+		motion     bool
 	}
 	hops := make([]hop, len(edges))
 	use := make([]bool, len(edges))
@@ -787,10 +938,10 @@ func (d *Detector) keepChains(edges []Edge, support []bool) {
 			continue
 		}
 		ux, uy, ok := travel(d.phones[e.From], d.phones[e.To], e.LagMs)
-		if !ok {
+		if !ok && !e.Motion {
 			continue
 		}
-		h := hop{e.From, e.To, ux, uy}
+		h := hop{e.From, e.To, ux, uy, float64(abs64(e.LagMs)) / float64(cfg.StepMs), e.Motion}
 		if e.LagMs < 0 {
 			h.tail, h.head = e.To, e.From
 		}
@@ -799,8 +950,20 @@ func (d *Detector) keepChains(edges []Edge, support []bool) {
 		in[h.head] = append(in[h.head], i)
 	}
 	cosMax := math.Cos(cfg.ChainAngleDeg * math.Pi / 180)
-	aligned := func(i, j int) bool {
-		return hops[i].ux*hops[j].ux+hops[i].uy*hops[j].uy >= cosMax-1e-9
+	// aligned: hop j may follow hop i (fwd) or lead into it (!fwd). Between
+	// exactly placed phones: the two hops travel the same way on the map. As
+	// soon as a position is only roughly known the map says nothing, and the
+	// test is in time instead: the phone before the first hop and the phone
+	// after the second must match at the sum of the two lags (closure).
+	aligned := func(i, j int, fwd bool) bool {
+		if !hops[i].motion && !hops[j].motion {
+			return hops[i].ux*hops[j].ux+hops[i].uy*hops[j].uy >= cosMax-1e-9
+		}
+		first, second := hops[i], hops[j]
+		if !fwd {
+			first, second = second, first
+		}
+		return d.closure(d.phones[first.tail], d.phones[second.head], first.lag+second.lag)
 	}
 	limit := cfg.MinChain
 	// run is the longest aligned run of hops starting (fwd) or ending (back)
@@ -821,7 +984,7 @@ func (d *Detector) keepChains(edges []Edge, support []bool) {
 			if !fwd {
 				far = hops[j].tail
 			}
-			if visited[far] || !aligned(i, j) {
+			if visited[far] || !aligned(i, j, fwd) {
 				continue
 			}
 			visited[far] = true
@@ -960,14 +1123,41 @@ func (d *Detector) vertical(a, b *phone, lag float64, maxLag, minOverlap int) bo
 	if cfg.VerticalRatio <= 0 || a.vrms+b.vrms <= cfg.VerticalRatio*(a.hrms+b.hrms) {
 		return false
 	}
-	if rhythm(a.v, a.valid, maxLag, minOverlap) >= cfg.CorrThreshold ||
-		rhythm(b.v, b.valid, maxLag, minOverlap) >= cfg.CorrThreshold {
+	vr := func(p *phone) float64 {
+		if p.vRhythmAt != d.seq {
+			p.vRhythm, p.vRhythmAt = rhythm(p.v, p.valid, maxLag, minOverlap), d.seq
+		}
+		return p.vRhythm
+	}
+	if vr(a) >= cfg.CorrThreshold || vr(b) >= cfg.CorrThreshold {
 		return false
 	}
 	vlag, corr, _, ok := xcorr(a.v, b.v, a.valid, b.valid, maxLag, minOverlap, true)
 	vms := math.Abs(vlag) * float64(cfg.StepMs)
 	return ok && corr >= cfg.CorrThreshold && (vlag < 0) == (lag < 0) &&
 		vms >= float64(cfg.MinWaveLagMs) && vms <= float64(cfg.MaxWaveLagMs)
+}
+
+// resolvedSecond is the highest correlation at any lag at least sepSteps
+// away from the best one (lag, in grid steps), local maximum or not. The
+// usual ambiguity test only looks at separate peaks; a slow sway (a 5 s
+// period, say) has none within the lag range, but its correlation is nearly
+// as high 300 ms either side of the best lag as at it, so "which of the two
+// moved first, and by how much" is not something the data says. Between
+// exactly placed neighbours the map makes up for that (lag per metre,
+// direction); for pairs found by motion the lag is the only evidence that
+// anything travels, so the best lag must beat every lag ≥ sepSteps away by
+// PeakMargin. A push (a jolt of a second or so) passes easily.
+func resolvedSecond(cs []float64, lag float64, maxLag int) float64 {
+	best := int(math.Round(lag)) + maxLag
+	sep := sepSteps(maxLag)
+	out := -1.0
+	for i, c := range cs {
+		if abs(i-best) >= sep && !math.IsNaN(c) && c > out {
+			out = c
+		}
+	}
+	return out
 }
 
 // rhythm measures how periodic x is: the highest autocorrelation at any lag

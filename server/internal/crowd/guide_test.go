@@ -14,7 +14,7 @@ func blob(n int, cx, cy, sd float64, seed int64) []Point {
 	rng := rand.New(rand.NewSource(seed))
 	pts := make([]Point, n)
 	for i := range pts {
-		pts[i] = Point{fmt.Sprint("p", i), cx + sd*rng.NormFloat64(), cy + sd*rng.NormFloat64()}
+		pts[i] = Point{ID: fmt.Sprint("p", i), X: cx + sd*rng.NormFloat64(), Y: cy + sd*rng.NormFloat64()}
 	}
 	return pts
 }
@@ -96,10 +96,10 @@ func TestGuidePush(t *testing.T) {
 	var pts []Point
 	rng := rand.New(rand.NewSource(4))
 	for i := 0; i < 60; i++ {
-		pts = append(pts, Point{fmt.Sprint("l", i), 17 + 3*rng.Float64(), 10 + 20*rng.Float64()})
+		pts = append(pts, Point{ID: fmt.Sprint("l", i), X: 17 + 3*rng.Float64(), Y: 10 + 20*rng.Float64()})
 	}
 	for i := 0; i < 15; i++ {
-		pts = append(pts, Point{fmt.Sprint("r", i), 20 + 3*rng.Float64(), 10 + 20*rng.Float64()})
+		pts = append(pts, Point{ID: fmt.Sprint("r", i), X: 20 + 3*rng.Float64(), Y: 10 + 20*rng.Float64()})
 	}
 	p := GuideIn{ID: "x", X: 20, Y: 20, Reason: "push", PushX: 0, PushY: 2} // push travelling down the map
 	dx, dy, _, _, _ := Direction(pts, 1, open, p)
