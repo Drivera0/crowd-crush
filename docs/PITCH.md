@@ -6,17 +6,17 @@
 
 The run sheet (clicks, setup, fallbacks, reset between judges) is [DEMO.md](DEMO.md). The hard questions are [QA.md](QA.md). Slide content is [DECK.md](DECK.md).
 
-## Opening number: `[VERIFY]` before use
+## Opening number
 
-None of these are verified. Check each against its source before saying it or putting it on a slide. If it can't be checked in time, drop it and open on the demo. One verified number beats three.
+**Checked (4 Oct 2026):** Itaewon, Seoul, 29 October 2022: the official toll is 159. 158 people died in the alley; the count also includes a teenage survivor who died by suicide days later (Korea Herald; Inquirer/AFP). Say "159 people died", not "159 crushed". The alley width and the other two rows are still unchecked: don't say them until you have.
 
 | Claim as drafted | Source to check |
 |---|---|
-| Itaewon, Seoul, 29 Oct 2022: 159 people died in an alley about 3.2 m wide | Korean government / National Assembly investigation report; Reuters or AP. The toll was reported as 158, then 159: use the final official figure. |
-| Astroworld, Houston, 5 Nov 2021: 10 people died in a crowd surge at the stage | Houston Police Department report (2023); Harris County Medical Examiner. |
+| Itaewon, Seoul, 29 Oct 2022: 159 people died (checked); "an alley about 3.2 m wide" (not checked) | Width: Korean government / National Assembly investigation report. |
+| Astroworld, Houston, 5 Nov 2021: 10 people died in a crowd surge at the stage (checked: the Harris County Medical Examiner ruled all 10 deaths compression asphyxia) | ABC News, Variety, PBS reporting of the medical examiner's findings. |
 | Above about 5 people per m², a crowd starts moving as one body and pushes travel through it | G. Keith Still, *Introduction to Crowd Science* (2014) and his density/risk tables; Fruin's level-of-service work. Check whether the threshold for your point is 4, 5 or 6 per m². |
 
-`[VERIFY: opening line]` = the one claim you checked, in one sentence.
+Opening line: "In October 2022, 159 people died in a crowd crush in Itaewon, Seoul, most of them in one narrow alley."
 
 ## Origin
 
@@ -32,7 +32,7 @@ The judges' own phones carry the demo. Everything up to 1:25 is real motion from
 
 | Time | Say | Do |
 |---|---|---|
-| 0:00 | `[VERIFY: opening line]` "Nobody inside a crush can see it building, and nobody outside can either." | Dashboard full screen, Live page. Sign and lights calm on the table. |
+| 0:00 | "In October 2022, 159 people died in a crowd crush in Itaewon, Seoul, most of them in one narrow alley." "Nobody inside a crush can see it building, and nobody outside can either." | Dashboard full screen, Live page. Sign and lights calm on the table. |
 | 0:10 | "Pulse is early warning for crowd crushes, using the phones already in the crowd. Scan this, please. No app." | Point at the QR. |
 | 0:20 | "Your phone has a name and a number now. Stand in that order, phone in your hand." | Their screens say "You're #3 in the row. Stand to the right of #2 (its name), as you face the big screen." Dots appear with `#n` beside the boards on the map. If the order is off: **Line up phones now**. |
 | 0:30 | "First, jump together. A few times." | Dots may flicker yellow. Zone stays calm. |
@@ -55,7 +55,7 @@ The judges' own phones carry the demo. Everything up to 1:25 is real motion from
 
 ## The 30-second version
 
-`[VERIFY: opening line]` "Pulse turns the phones already in a crowd into an early-warning network. Scan this. Jumping together stays calm. A shove passed down the line goes red in about eight seconds: the steward hears what to do, the sign says stop, and your phone points you out of the push. The math decides; Gemini only writes the sentence. Attendees opt in through the ticket app; there's nothing to install in the venue."
+"In October 2022, 159 people died in a crowd crush in Itaewon, Seoul, most of them in one narrow alley." "Pulse turns the phones already in a crowd into an early-warning network. Scan this. Jumping together stays calm. A shove passed down the line goes red in about eight seconds: the steward hears what to do, the sign says stop, and your phone points you out of the push. The math decides; Gemini only writes the sentence. Attendees opt in through the ticket app; there's nothing to install in the venue."
 
 ## Pocket lines
 
