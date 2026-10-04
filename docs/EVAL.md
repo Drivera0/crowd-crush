@@ -1,6 +1,6 @@
 # Pulse evaluation
 
-Generated 2026-10-04T05:16:51Z by `go run ./server/cmd/eval -seeds 20` (`make eval`) in 4m53s on 32 CPU threads. Machine-readable copy: [`eval.json`](eval.json) (served at `GET /api/eval`).
+Generated 2026-10-04T16:36:51Z by `go run ./server/cmd/eval -seeds 20` (`make eval`) in 4m43s on 32 CPU threads. Machine-readable copy: [`eval.json`](eval.json) (served at `GET /api/eval`).
 
 **False alarms: 0 of 600 look-alike runs went red. Missed: 22 of 160 true-positive runs never went red.**
 
@@ -43,9 +43,9 @@ The table below is with **ideal phones** (upright on the chest, exact position, 
 | `gather` | crowd | red | 20 | 20 | 0 | 0 | 31.5 | — | red from crowd density, not waves; 40 phones |
 | `calm` | sim | calm | 20 | 0 | 19 | 1 | — | — | truth never dangerous in 20/20; median peak 2.2/m², 0 N/m |
 | `attract` | sim | yellow-ok | 20 | 0 | 20 | 0 | — | — | truth never dangerous in 20/20; median peak 2.2/m², 0 N/m |
-| `calm→surge` | sim | red | 20 | 20 | 0 | 0 | 35.4 | -2.1 | red from crowd density, not waves; median peak 6.0/m², 4372 N/m |
-| `stage→surge` | sim | red | 20 | 20 | 0 | 0 | 12.5 | 18.4 | red from crowd density, not waves; median peak 6.0/m², 4625 N/m |
-| `stage→surge 0.3` | sim | red | 20 | 20 | 0 | 0 | 12.5 | 18.8 | red from crowd density, not waves; median peak 5.4/m², 2299 N/m |
+| `calm→surge` | sim | red | 20 | 20 | 0 | 0 | 35.4 | -2.1 | red from crowd density, not waves; median peak 6.0/m², 5364 N/m |
+| `stage→surge` | sim | red | 20 | 20 | 0 | 0 | 12.5 | 18.3 | red from crowd density, not waves; median peak 6.0/m², 4650 N/m |
+| `stage→surge 0.3` | sim | red | 20 | 20 | 0 | 0 | 12.5 | 19.0 | red from crowd density, not waves; median peak 5.4/m², 2526 N/m |
 
 ## Messy phones
 
@@ -54,10 +54,10 @@ The same runs with the phones made as messy as real ones (`server/internal/crowd
 | Phones | GPS | Carry | Dropouts | False alarms (red) | Pushes caught | Packing caught | Packing at least yellow | Calm runs at yellow | Red only from the default-spot stack |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | ideal | 0 | 0 | 0 | 0 / 600 | 58 / 80 | 80 / 80 | 80 / 80 | 118 / 460 | 0 |
-| realistic | 1 | 1 | 1 | 0 / 600 | 80 / 80 | 0 / 80 | 59 / 80 | 4 / 460 | 0 |
-| harsh | 2 | 2 | 2 | 0 / 600 | 69 / 80 | 0 / 80 | 7 / 80 | 0 / 460 | 0 |
+| realistic | 1 | 1 | 1 | 0 / 600 | 80 / 80 | 0 / 80 | 57 / 80 | 4 / 460 | 0 |
+| harsh | 2 | 2 | 2 | 0 / 600 | 69 / 80 | 0 / 80 | 9 / 80 | 0 / 460 | 0 |
 | gps only | 1 | 0 | 0 | 0 / 600 | 80 / 80 | 0 / 80 | 60 / 80 | 4 / 460 | 0 |
-| gps ×0.5 only | 0.5 | 0 | 0 | 0 / 600 | 80 / 80 | 35 / 80 | 60 / 80 | 18 / 460 | 0 |
+| gps ×0.5 only | 0.5 | 0 | 0 | 0 / 600 | 80 / 80 | 34 / 80 | 60 / 80 | 18 / 460 | 0 |
 | gps ×0.2 only | 0.2 | 0 | 0 | 1 / 600 | 80 / 80 | 60 / 80 | 80 / 80 | 31 / 460 | 0 |
 | carry only | 0 | 1 | 0 | 0 / 600 | 51 / 80 | 80 / 80 | 80 / 80 | 119 / 460 | 0 |
 | dropouts only | 0 | 0 | 1 | 0 / 600 | 58 / 80 | 80 / 80 | 80 / 80 | 130 / 460 | 0 |
@@ -72,20 +72,20 @@ Crowd simulation against its ground truth:
 
 | Phones | Position error (m) | Phones counted | Density bias (/m²) | Density abs. error (/m²) | Red before danger | Median lead, red (s) | Median lead, first yellow (s) | Guidance within 45° | Guidance > 90° off | Arrow shown | … within 45° | … > 90° off |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| ideal | 0.00 | 100 % | +0.33 | 0.34 | 40 / 60 | 17.8 | 28.6 | 79 % | 14 % | 100 % | 79 % | 14 % |
-| realistic | 4.48 | 87 % | -2.37 | 2.37 | 0 / 60 | — | 12.7 | 38 % | 38 % | 24 % | 45 % | 33 % |
-| harsh | 6.77 | 63 % | -3.58 | 3.58 | 0 / 60 | — | -7.2 | 32 % | 45 % | 2 % | 34 % | 40 % |
-| gps only | 4.52 | 93 % | -2.25 | 2.25 | 0 / 60 | — | 16.9 | 37 % | 39 % | 20 % | 48 % | 29 % |
-| gps ×0.5 only | 2.46 | 98 % | -1.01 | 1.01 | 9 / 60 | -7.8 | 22.5 | 49 % | 27 % | 65 % | 54 % | 24 % |
-| gps ×0.2 only | 1.02 | 100 % | +0.13 | 0.30 | 38 / 60 | 17.2 | 26.6 | 66 % | 16 % | 98 % | 66 % | 16 % |
-| carry only | 0.00 | 100 % | +0.33 | 0.34 | 40 / 60 | 17.8 | 28.6 | 79 % | 14 % | 100 % | 79 % | 14 % |
-| dropouts only | 0.01 | 94 % | +0.09 | 0.24 | 40 / 60 | 17.7 | 28.5 | 77 % | 16 % | 100 % | 77 % | 16 % |
-| carry: all chest (tilted) | 0.00 | 100 % | +0.33 | 0.34 | 40 / 60 | 17.8 | 28.6 | 79 % | 14 % | 100 % | 79 % | 14 % |
-| carry: all in the hand | 0.00 | 100 % | +0.33 | 0.34 | 40 / 60 | 17.8 | 28.6 | 79 % | 14 % | 100 % | 79 % | 14 % |
-| carry: all in a pocket | 0.00 | 100 % | +0.33 | 0.34 | 40 / 60 | 17.8 | 28.6 | 79 % | 14 % | 100 % | 79 % | 14 % |
-| carry: all in a bag | 0.00 | 100 % | +0.33 | 0.34 | 40 / 60 | 17.8 | 28.6 | 79 % | 14 % | 100 % | 79 % | 14 % |
-| carry only, no g sent | 0.00 | 100 % | +0.33 | 0.34 | 40 / 60 | 17.8 | 28.6 | 79 % | 14 % | 100 % | 79 % | 14 % |
-| carry: all in a pocket, no g sent | 0.00 | 100 % | +0.33 | 0.34 | 40 / 60 | 17.8 | 28.6 | 79 % | 14 % | 100 % | 79 % | 14 % |
+| ideal | 0.00 | 100 % | +0.39 | 0.39 | 40 / 60 | 17.8 | 28.6 | 78 % | 15 % | 100 % | 78 % | 15 % |
+| realistic | 4.48 | 87 % | -2.42 | 2.42 | 0 / 60 | — | 15.1 | 38 % | 38 % | 24 % | 45 % | 33 % |
+| harsh | 6.78 | 63 % | -3.56 | 3.56 | 0 / 60 | — | -7.3 | 32 % | 45 % | 2 % | 31 % | 43 % |
+| gps only | 4.52 | 93 % | -2.27 | 2.27 | 0 / 60 | — | 17.5 | 38 % | 39 % | 20 % | 50 % | 29 % |
+| gps ×0.5 only | 2.46 | 99 % | -1.01 | 1.01 | 8 / 60 | -7.0 | 22.3 | 50 % | 27 % | 64 % | 54 % | 25 % |
+| gps ×0.2 only | 1.02 | 100 % | +0.16 | 0.32 | 38 / 60 | 16.6 | 26.4 | 66 % | 16 % | 98 % | 66 % | 15 % |
+| carry only | 0.00 | 100 % | +0.39 | 0.39 | 40 / 60 | 17.8 | 28.6 | 78 % | 15 % | 100 % | 78 % | 15 % |
+| dropouts only | 0.01 | 94 % | +0.14 | 0.25 | 40 / 60 | 17.5 | 28.5 | 75 % | 17 % | 100 % | 75 % | 17 % |
+| carry: all chest (tilted) | 0.00 | 100 % | +0.39 | 0.39 | 40 / 60 | 17.8 | 28.6 | 78 % | 15 % | 100 % | 78 % | 15 % |
+| carry: all in the hand | 0.00 | 100 % | +0.39 | 0.39 | 40 / 60 | 17.8 | 28.6 | 78 % | 15 % | 100 % | 78 % | 15 % |
+| carry: all in a pocket | 0.00 | 100 % | +0.39 | 0.39 | 40 / 60 | 17.8 | 28.6 | 78 % | 15 % | 100 % | 78 % | 15 % |
+| carry: all in a bag | 0.00 | 100 % | +0.39 | 0.39 | 40 / 60 | 17.8 | 28.6 | 78 % | 15 % | 100 % | 78 % | 15 % |
+| carry only, no g sent | 0.00 | 100 % | +0.39 | 0.39 | 40 / 60 | 17.8 | 28.6 | 78 % | 15 % | 100 % | 78 % | 15 % |
+| carry: all in a pocket, no g sent | 0.00 | 100 % | +0.39 | 0.39 | 40 / 60 | 17.8 | 28.6 | 78 % | 15 % | 100 % | 78 % | 15 % |
 
 Runs that went red, per scenario (**bold** = wrong: a look-alike that went red, or a true positive missed in at least one run; `s` = runs whose only red was the default-spot stack, counted as red on look-alikes and as missed on true positives; `y` = calm runs that reached yellow):
 
@@ -126,8 +126,8 @@ Runs that went red, per scenario (**bold** = wrong: a look-alike that went red, 
 | `gather` | crowd | red | 20 / 20 | **0 / 20** | **0 / 20** | **0 / 20** | **0 / 20** | **0 / 20** | 20 / 20 | 20 / 20 |
 | `calm` | sim | calm | 0 / 20 (19 y) | 0 / 20 (4 y) | 0 / 20 | 0 / 20 (4 y) | 0 / 20 (18 y) | 0 / 20 (20 y) | 0 / 20 (19 y) | 0 / 20 (19 y) |
 | `attract` | sim | yellow-ok | 0 / 20 | 0 / 20 | 0 / 20 | 0 / 20 | 0 / 20 | **1 / 20** | 0 / 20 | 0 / 20 |
-| `calm→surge` | sim | red | 20 / 20 | **0 / 20** | **0 / 20** | **0 / 20** | **16 / 20** | 20 / 20 | 20 / 20 | 20 / 20 |
-| `stage→surge` | sim | red | 20 / 20 | **0 / 20** | **0 / 20** | **0 / 20** | **11 / 20** | 20 / 20 | 20 / 20 | 20 / 20 |
+| `calm→surge` | sim | red | 20 / 20 | **0 / 20** | **0 / 20** | **0 / 20** | **18 / 20** | 20 / 20 | 20 / 20 | 20 / 20 |
+| `stage→surge` | sim | red | 20 / 20 | **0 / 20** | **0 / 20** | **0 / 20** | **8 / 20** | 20 / 20 | 20 / 20 | 20 / 20 |
 | `stage→surge 0.3` | sim | red | 20 / 20 | **0 / 20** | **0 / 20** | **0 / 20** | **8 / 20** | 20 / 20 | 20 / 20 | 20 / 20 |
 
 <!-- findings:start -->
@@ -179,6 +179,8 @@ The ideal rows are the same run for run (same reds, yellows, red times and lead 
 What a venue would have to add to see packing: positions good to about 1 m (tap-your-spot or a seat or section, UWB, Wi-Fi RTT or Bluetooth ranging in a native app), or counts that don't need positions: staff-drawn areas with capacity rules where the area is much larger than the error, turnstile counts, or the zone boards' Bluetooth device counts as a density proxy per board.
 
 What this does not say: the line demo places phones by hand (tap your spot), so the GPS rows do not apply to it; carry and dropouts do. And the 24 × 16 m venue is about as large as the GPS error itself. On a festival field a crowd tens of metres across would still show up as a dense region through GPS, only not at the 1.5 m scale the thresholds are written for. That has not been measured here.
+
+**Flow rule (2026-10-04, `crowd/flow.go`, docs/REFERENCE.md → Detection → Flow):** a dense cluster that people are still getting out of (≥ 1 phone leaving its densest 1.5 m spot in 6 s) raises no early warning and its yellow is shown calm; red is untouched. Every number in the tables above is identical with and without it (ideal and realistic re-run on seeds 1–20: same reds, yellows, lead times, first-yellow leads). In the furnished crowdsim venues (5 seeds each, ideal phones): an auditorium show end (300 people) went from 54–83 s of yellow to 5–11 s, left only at the moment the first aisle fills (people in, nobody out yet: indistinguishable from packing); stage→surge and gate rush+surge keep their first warning, early warning and red to the 0.25 s; the classroom fire alarm with one door (2.2–2.5 /m², a moving door queue, truth never dangerous) now raises a watch in 1 of 5 runs instead of 4 of 5. Speed, front/back compression and Helbing's ρ·Var(v) from positions did not separate an aisle filling from a crowd walking up to a stage; whether anyone leaves the spot did. With GPS-placed phones the flow is unknown and nothing changes.
 <!-- findings:end -->
 
 ## Method

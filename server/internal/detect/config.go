@@ -58,6 +58,21 @@ type Config struct {
 	// than the usual 1.5 m: phones that all claim the same spot to ± 10 m are
 	// not a crush. 0 = every position is taken as exact.
 	DensityAccDisc float64 `json:"densityAccDisc"`
+	// Flow (crowd/flow.go): a dense crowd that people are still getting out
+	// of (an aisle or a corridor emptying a hall) is a queue, not a crush
+	// building. Around a cluster's densest spot (the 1.5 m disc): at least
+	// flowMinOut phones that were inside 6 s ago and are now 0.5 m clear of
+	// it = flowing, and for flowMemoryMs after unless people pile in with
+	// nobody leaving (a stop in a moving queue is still a queue). A flowing
+	// cluster is not on watch (yellow) below flowWatch and its density trend
+	// raises no early warning. Red is unchanged (densityDanger, flowing or
+	// not). Only phones placed to within flowMaxAcc metres count; with fewer
+	// than three of them near the spot the flow is unknown and the old rule
+	// applies. flowMinOut 0 = off; flowWatch 0 = densityDanger.
+	FlowMinOut   float64 `json:"flowMinOut"`
+	FlowMemoryMs int64   `json:"flowMemoryMs"`
+	FlowWatch    float64 `json:"flowWatch"`
+	FlowMaxAcc   float64 `json:"flowMaxAcc"`
 
 	// GPS fixes less accurate than this (m) are ignored.
 	GPSMaxAcc float64 `json:"gpsMaxAcc"`
@@ -171,6 +186,7 @@ func DefaultConfig() Config {
 		ClusterEps:       1.2, ClusterMinPts: 3, ClusterTrendMs: 10000,
 		DensityWatch: 2.0, DensityDanger: 4.0, Participation: 1.0,
 		EarlyWarnS: 30, EarlyFloor: 0.55, DensityAccDisc: 0.5,
+		FlowMinOut: 1, FlowMemoryMs: 10000, FlowWatch: 0, FlowMaxAcc: 1.5,
 		GPSMaxAcc: 25,
 
 		HandlingRot:      200,
@@ -255,6 +271,9 @@ func (c Config) Validate() error {
 		return fmt.Errorf("earlyWarnS must be 0..600 s and earlyFloor in [0, 1)")
 	case !(c.DensityAccDisc >= 0 && c.DensityAccDisc <= 10):
 		return fmt.Errorf("densityAccDisc must be 0..10")
+	case !(c.FlowMinOut >= 0) || c.FlowMemoryMs < 0 || !(c.FlowMaxAcc >= 0) ||
+		!(c.FlowWatch == 0 || (c.FlowWatch > c.DensityWatch && c.FlowWatch <= c.DensityDanger)):
+		return fmt.Errorf("flowMinOut, flowMemoryMs and flowMaxAcc must be ≥ 0, flowWatch 0 or in (densityWatch, densityDanger]")
 	case !(c.GPSMaxAcc > 0):
 		return fmt.Errorf("gpsMaxAcc must be > 0")
 	case c.StepMs <= 0 || c.CorrWindowMs <= 2*c.MaxLagMs:

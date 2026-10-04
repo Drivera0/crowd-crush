@@ -1,5 +1,5 @@
 {
-  "generated": "2026-10-04T05:16:51Z",
+  "generated": "2026-10-04T16:36:51Z",
   "seeds": 20,
   "rows": [
     {
@@ -351,7 +351,7 @@
       "calm": 0,
       "medianRedS": 35.4,
       "medianLeadS": -2.1,
-      "note": "red from crowd density, not waves; median peak 6.0/m², 4372 N/m"
+      "note": "red from crowd density, not waves; median peak 6.0/m², 5364 N/m"
     },
     {
       "scenario": "stage→surge",
@@ -362,8 +362,8 @@
       "yellow": 0,
       "calm": 0,
       "medianRedS": 12.5,
-      "medianLeadS": 18.4,
-      "note": "red from crowd density, not waves; median peak 6.0/m², 4625 N/m"
+      "medianLeadS": 18.3,
+      "note": "red from crowd density, not waves; median peak 6.0/m², 4650 N/m"
     },
     {
       "scenario": "stage→surge 0.3",
@@ -374,8 +374,8 @@
       "yellow": 0,
       "calm": 0,
       "medianRedS": 12.5,
-      "medianLeadS": 18.8,
-      "note": "red from crowd density, not waves; median peak 5.4/m², 2299 N/m"
+      "medianLeadS": 19,
+      "note": "red from crowd density, not waves; median peak 5.4/m², 2526 N/m"
     }
   ],
   "summary": {
@@ -405,20 +405,20 @@
       "calmRuns": 460,
       "stackReds": 0,
       "sim": {
-        "densityBias": 0.33,
-        "densityMAE": 0.34,
+        "densityBias": 0.39,
+        "densityMAE": 0.39,
         "medianLeadS": 17.8,
         "warnedFirst": 40,
         "dangerRuns": 60,
         "medianYellowLeadS": 28.6,
         "posErrM": 0,
         "countedShare": 1,
-        "guideSamples": 134082,
-        "guideWithin45": 0.79,
-        "guideOpposite": 0.14,
+        "guideSamples": 132077,
+        "guideWithin45": 0.78,
+        "guideOpposite": 0.15,
         "guideShown": 1,
-        "guideShownWithin45": 0.79,
-        "guideShownOpposite": 0.14
+        "guideShownWithin45": 0.78,
+        "guideShownOpposite": 0.15
       },
       "rows": [
         {
@@ -770,7 +770,7 @@
           "calm": 0,
           "medianRedS": 35.4,
           "medianLeadS": -2.1,
-          "note": "red from crowd density, not waves; median peak 6.0/m², 4372 N/m"
+          "note": "red from crowd density, not waves; median peak 6.0/m², 5364 N/m"
         },
         {
           "scenario": "stage→surge",
@@ -781,8 +781,8 @@
           "yellow": 0,
           "calm": 0,
           "medianRedS": 12.5,
-          "medianLeadS": 18.4,
-          "note": "red from crowd density, not waves; median peak 6.0/m², 4625 N/m"
+          "medianLeadS": 18.3,
+          "note": "red from crowd density, not waves; median peak 6.0/m², 4650 N/m"
         },
         {
           "scenario": "stage→surge 0.3",
@@ -793,8 +793,8 @@
           "yellow": 0,
           "calm": 0,
           "medianRedS": 12.5,
-          "medianLeadS": 18.8,
-          "note": "red from crowd density, not waves; median peak 5.4/m², 2299 N/m"
+          "medianLeadS": 19,
+          "note": "red from crowd density, not waves; median peak 5.4/m², 2526 N/m"
         }
       ]
     },
@@ -813,19 +813,19 @@
       "pushRuns": 80,
       "packingCaught": 0,
       "packingRuns": 80,
-      "packingWarned": 59,
+      "packingWarned": 57,
       "calmYellow": 4,
       "calmRuns": 460,
       "stackReds": 0,
       "sim": {
-        "densityBias": -2.37,
-        "densityMAE": 2.37,
+        "densityBias": -2.42,
+        "densityMAE": 2.42,
         "warnedFirst": 0,
         "dangerRuns": 60,
-        "medianYellowLeadS": 12.7,
+        "medianYellowLeadS": 15.1,
         "posErrM": 4.48,
         "countedShare": 0.87,
-        "guideSamples": 115038,
+        "guideSamples": 113712,
         "guideWithin45": 0.38,
         "guideOpposite": 0.38,
         "guideShown": 0.24,
@@ -1161,9 +1161,9 @@
           "expect": "red",
           "runs": 20,
           "red": 0,
-          "yellow": 20,
-          "calm": 0,
-          "note": "missed 20/20; median peak 6.0/m², 4372 N/m"
+          "yellow": 18,
+          "calm": 2,
+          "note": "missed 20/20; median peak 6.0/m², 5364 N/m"
         },
         {
           "scenario": "stage→surge",
@@ -1173,7 +1173,7 @@
           "red": 0,
           "yellow": 20,
           "calm": 0,
-          "note": "missed 20/20; median peak 6.0/m², 4625 N/m"
+          "note": "missed 20/20; median peak 6.0/m², 4650 N/m"
         },
         {
           "scenario": "stage→surge 0.3",
@@ -1183,7 +1183,7 @@
           "red": 0,
           "yellow": 19,
           "calm": 1,
-          "note": "missed 20/20; median peak 5.4/m², 2299 N/m"
+          "note": "missed 20/20; median peak 5.4/m², 2526 N/m"
         }
       ]
     },
@@ -1202,24 +1202,24 @@
       "pushRuns": 80,
       "packingCaught": 0,
       "packingRuns": 80,
-      "packingWarned": 7,
+      "packingWarned": 9,
       "calmYellow": 0,
       "calmRuns": 460,
       "stackReds": 0,
       "sim": {
-        "densityBias": -3.58,
-        "densityMAE": 3.58,
+        "densityBias": -3.56,
+        "densityMAE": 3.56,
         "warnedFirst": 0,
         "dangerRuns": 60,
-        "medianYellowLeadS": -7.2,
-        "posErrM": 6.77,
+        "medianYellowLeadS": -7.3,
+        "posErrM": 6.78,
         "countedShare": 0.63,
-        "guideSamples": 79168,
+        "guideSamples": 78281,
         "guideWithin45": 0.32,
         "guideOpposite": 0.45,
         "guideShown": 0.02,
-        "guideShownWithin45": 0.34,
-        "guideShownOpposite": 0.4
+        "guideShownWithin45": 0.31,
+        "guideShownOpposite": 0.43
       },
       "rows": [
         {
@@ -1552,9 +1552,9 @@
           "expect": "red",
           "runs": 20,
           "red": 0,
-          "yellow": 7,
-          "calm": 13,
-          "note": "missed 20/20; median peak 6.0/m², 4372 N/m"
+          "yellow": 8,
+          "calm": 12,
+          "note": "missed 20/20; median peak 6.0/m², 5364 N/m"
         },
         {
           "scenario": "stage→surge",
@@ -1562,9 +1562,9 @@
           "expect": "red",
           "runs": 20,
           "red": 0,
-          "yellow": 0,
-          "calm": 20,
-          "note": "missed 20/20; median peak 6.0/m², 4625 N/m"
+          "yellow": 1,
+          "calm": 19,
+          "note": "missed 20/20; median peak 6.0/m², 4650 N/m"
         },
         {
           "scenario": "stage→surge 0.3",
@@ -1574,7 +1574,7 @@
           "red": 0,
           "yellow": 0,
           "calm": 20,
-          "note": "missed 20/20; median peak 5.4/m², 2299 N/m"
+          "note": "missed 20/20; median peak 5.4/m², 2526 N/m"
         }
       ]
     },
@@ -1598,18 +1598,18 @@
       "calmRuns": 460,
       "stackReds": 0,
       "sim": {
-        "densityBias": -2.25,
-        "densityMAE": 2.25,
+        "densityBias": -2.27,
+        "densityMAE": 2.27,
         "warnedFirst": 0,
         "dangerRuns": 60,
-        "medianYellowLeadS": 16.9,
+        "medianYellowLeadS": 17.5,
         "posErrM": 4.52,
         "countedShare": 0.93,
-        "guideSamples": 123725,
-        "guideWithin45": 0.37,
+        "guideSamples": 121870,
+        "guideWithin45": 0.38,
         "guideOpposite": 0.39,
         "guideShown": 0.2,
-        "guideShownWithin45": 0.48,
+        "guideShownWithin45": 0.5,
         "guideShownOpposite": 0.29
       },
       "rows": [
@@ -1943,7 +1943,7 @@
           "red": 0,
           "yellow": 20,
           "calm": 0,
-          "note": "missed 20/20; median peak 6.0/m², 4372 N/m"
+          "note": "missed 20/20; median peak 6.0/m², 5364 N/m"
         },
         {
           "scenario": "stage→surge",
@@ -1953,7 +1953,7 @@
           "red": 0,
           "yellow": 20,
           "calm": 0,
-          "note": "missed 20/20; median peak 6.0/m², 4625 N/m"
+          "note": "missed 20/20; median peak 6.0/m², 4650 N/m"
         },
         {
           "scenario": "stage→surge 0.3",
@@ -1963,7 +1963,7 @@
           "red": 0,
           "yellow": 20,
           "calm": 0,
-          "note": "missed 20/20; median peak 5.4/m², 2299 N/m"
+          "note": "missed 20/20; median peak 5.4/m², 2526 N/m"
         }
       ]
     },
@@ -1975,12 +1975,12 @@
       "summary": {
         "falseAlarms": 0,
         "lookAlikeRuns": 600,
-        "missed": 45,
+        "missed": 46,
         "positiveRuns": 160
       },
       "pushesCaught": 80,
       "pushRuns": 80,
-      "packingCaught": 35,
+      "packingCaught": 34,
       "packingRuns": 80,
       "packingWarned": 60,
       "calmYellow": 18,
@@ -1989,18 +1989,18 @@
       "sim": {
         "densityBias": -1.01,
         "densityMAE": 1.01,
-        "medianLeadS": -7.8,
-        "warnedFirst": 9,
+        "medianLeadS": -7,
+        "warnedFirst": 8,
         "dangerRuns": 60,
-        "medianYellowLeadS": 22.5,
+        "medianYellowLeadS": 22.3,
         "posErrM": 2.46,
-        "countedShare": 0.98,
-        "guideSamples": 131919,
-        "guideWithin45": 0.49,
+        "countedShare": 0.99,
+        "guideSamples": 129930,
+        "guideWithin45": 0.5,
         "guideOpposite": 0.27,
-        "guideShown": 0.65,
+        "guideShown": 0.64,
         "guideShownWithin45": 0.54,
-        "guideShownOpposite": 0.24
+        "guideShownOpposite": 0.25
       },
       "rows": [
         {
@@ -2330,24 +2330,24 @@
           "layout": "sim",
           "expect": "red",
           "runs": 20,
-          "red": 16,
-          "yellow": 4,
+          "red": 18,
+          "yellow": 2,
           "calm": 0,
           "medianRedS": 46,
           "medianLeadS": -12.8,
-          "note": "missed 4/20; red from crowd density, not waves; median peak 6.0/m², 4372 N/m"
+          "note": "missed 2/20; red from crowd density, not waves; median peak 6.0/m², 5364 N/m"
         },
         {
           "scenario": "stage→surge",
           "layout": "sim",
           "expect": "red",
           "runs": 20,
-          "red": 11,
-          "yellow": 9,
+          "red": 8,
+          "yellow": 12,
           "calm": 0,
-          "medianRedS": 37.3,
-          "medianLeadS": -6.3,
-          "note": "missed 9/20; red from crowd density, not waves; median peak 6.0/m², 4625 N/m"
+          "medianRedS": 27.5,
+          "medianLeadS": 3.2,
+          "note": "missed 12/20; red from crowd density, not waves; median peak 6.0/m², 4650 N/m"
         },
         {
           "scenario": "stage→surge 0.3",
@@ -2357,9 +2357,9 @@
           "red": 8,
           "yellow": 12,
           "calm": 0,
-          "medianRedS": 28.3,
-          "medianLeadS": 4.5,
-          "note": "missed 12/20; red from crowd density, not waves; median peak 5.4/m², 2299 N/m"
+          "medianRedS": 27.5,
+          "medianLeadS": 3.6,
+          "note": "missed 12/20; red from crowd density, not waves; median peak 5.4/m², 2526 N/m"
         }
       ]
     },
@@ -2383,20 +2383,20 @@
       "calmRuns": 460,
       "stackReds": 0,
       "sim": {
-        "densityBias": 0.13,
-        "densityMAE": 0.3,
-        "medianLeadS": 17.2,
+        "densityBias": 0.16,
+        "densityMAE": 0.32,
+        "medianLeadS": 16.6,
         "warnedFirst": 38,
         "dangerRuns": 60,
-        "medianYellowLeadS": 26.6,
+        "medianYellowLeadS": 26.4,
         "posErrM": 1.02,
         "countedShare": 1,
-        "guideSamples": 134019,
+        "guideSamples": 132017,
         "guideWithin45": 0.66,
         "guideOpposite": 0.16,
         "guideShown": 0.98,
         "guideShownWithin45": 0.66,
-        "guideShownOpposite": 0.16
+        "guideShownOpposite": 0.15
       },
       "rows": [
         {
@@ -2746,9 +2746,9 @@
           "red": 20,
           "yellow": 0,
           "calm": 0,
-          "medianRedS": 36.9,
-          "medianLeadS": -3.5,
-          "note": "red from crowd density, not waves; median peak 6.0/m², 4372 N/m"
+          "medianRedS": 36.8,
+          "medianLeadS": -3.3,
+          "note": "red from crowd density, not waves; median peak 6.0/m², 5364 N/m"
         },
         {
           "scenario": "stage→surge",
@@ -2759,8 +2759,8 @@
           "yellow": 0,
           "calm": 0,
           "medianRedS": 13.5,
-          "medianLeadS": 17.4,
-          "note": "red from crowd density, not waves; median peak 6.0/m², 4625 N/m"
+          "medianLeadS": 17.5,
+          "note": "red from crowd density, not waves; median peak 6.0/m², 4650 N/m"
         },
         {
           "scenario": "stage→surge 0.3",
@@ -2771,8 +2771,8 @@
           "yellow": 0,
           "calm": 0,
           "medianRedS": 13.5,
-          "medianLeadS": 18,
-          "note": "red from crowd density, not waves; median peak 5.4/m², 2299 N/m"
+          "medianLeadS": 17.9,
+          "note": "red from crowd density, not waves; median peak 5.4/m², 2526 N/m"
         }
       ]
     },
@@ -2796,20 +2796,20 @@
       "calmRuns": 460,
       "stackReds": 0,
       "sim": {
-        "densityBias": 0.33,
-        "densityMAE": 0.34,
+        "densityBias": 0.39,
+        "densityMAE": 0.39,
         "medianLeadS": 17.8,
         "warnedFirst": 40,
         "dangerRuns": 60,
         "medianYellowLeadS": 28.6,
         "posErrM": 0,
         "countedShare": 1,
-        "guideSamples": 134082,
-        "guideWithin45": 0.79,
-        "guideOpposite": 0.14,
+        "guideSamples": 132077,
+        "guideWithin45": 0.78,
+        "guideOpposite": 0.15,
         "guideShown": 1,
-        "guideShownWithin45": 0.79,
-        "guideShownOpposite": 0.14
+        "guideShownWithin45": 0.78,
+        "guideShownOpposite": 0.15
       },
       "rows": [
         {
@@ -3161,7 +3161,7 @@
           "calm": 0,
           "medianRedS": 35.4,
           "medianLeadS": -2.1,
-          "note": "red from crowd density, not waves; median peak 6.0/m², 4372 N/m"
+          "note": "red from crowd density, not waves; median peak 6.0/m², 5364 N/m"
         },
         {
           "scenario": "stage→surge",
@@ -3172,8 +3172,8 @@
           "yellow": 0,
           "calm": 0,
           "medianRedS": 12.5,
-          "medianLeadS": 18.4,
-          "note": "red from crowd density, not waves; median peak 6.0/m², 4625 N/m"
+          "medianLeadS": 18.3,
+          "note": "red from crowd density, not waves; median peak 6.0/m², 4650 N/m"
         },
         {
           "scenario": "stage→surge 0.3",
@@ -3184,8 +3184,8 @@
           "yellow": 0,
           "calm": 0,
           "medianRedS": 12.5,
-          "medianLeadS": 18.8,
-          "note": "red from crowd density, not waves; median peak 5.4/m², 2299 N/m"
+          "medianLeadS": 19,
+          "note": "red from crowd density, not waves; median peak 5.4/m², 2526 N/m"
         }
       ]
     },
@@ -3209,20 +3209,20 @@
       "calmRuns": 460,
       "stackReds": 0,
       "sim": {
-        "densityBias": 0.09,
-        "densityMAE": 0.24,
-        "medianLeadS": 17.7,
+        "densityBias": 0.14,
+        "densityMAE": 0.25,
+        "medianLeadS": 17.5,
         "warnedFirst": 40,
         "dangerRuns": 60,
         "medianYellowLeadS": 28.5,
         "posErrM": 0.01,
         "countedShare": 0.94,
-        "guideSamples": 125094,
-        "guideWithin45": 0.77,
-        "guideOpposite": 0.16,
+        "guideSamples": 123032,
+        "guideWithin45": 0.75,
+        "guideOpposite": 0.17,
         "guideShown": 1,
-        "guideShownWithin45": 0.77,
-        "guideShownOpposite": 0.16
+        "guideShownWithin45": 0.75,
+        "guideShownOpposite": 0.17
       },
       "rows": [
         {
@@ -3574,7 +3574,7 @@
           "calm": 0,
           "medianRedS": 35.5,
           "medianLeadS": -2.2,
-          "note": "red from crowd density, not waves; median peak 6.0/m², 4372 N/m"
+          "note": "red from crowd density, not waves; median peak 6.0/m², 5364 N/m"
         },
         {
           "scenario": "stage→surge",
@@ -3585,8 +3585,8 @@
           "yellow": 0,
           "calm": 0,
           "medianRedS": 12.8,
-          "medianLeadS": 18.3,
-          "note": "red from crowd density, not waves; median peak 6.0/m², 4625 N/m"
+          "medianLeadS": 17.9,
+          "note": "red from crowd density, not waves; median peak 6.0/m², 4650 N/m"
         },
         {
           "scenario": "stage→surge 0.3",
@@ -3598,7 +3598,7 @@
           "calm": 0,
           "medianRedS": 12.8,
           "medianLeadS": 18.9,
-          "note": "red from crowd density, not waves; median peak 5.4/m², 2299 N/m"
+          "note": "red from crowd density, not waves; median peak 5.4/m², 2526 N/m"
         }
       ]
     },
@@ -3623,20 +3623,20 @@
       "stackReds": 0,
       "diagnostic": true,
       "sim": {
-        "densityBias": 0.33,
-        "densityMAE": 0.34,
+        "densityBias": 0.39,
+        "densityMAE": 0.39,
         "medianLeadS": 17.8,
         "warnedFirst": 40,
         "dangerRuns": 60,
         "medianYellowLeadS": 28.6,
         "posErrM": 0,
         "countedShare": 1,
-        "guideSamples": 134082,
-        "guideWithin45": 0.79,
-        "guideOpposite": 0.14,
+        "guideSamples": 132077,
+        "guideWithin45": 0.78,
+        "guideOpposite": 0.15,
         "guideShown": 1,
-        "guideShownWithin45": 0.79,
-        "guideShownOpposite": 0.14
+        "guideShownWithin45": 0.78,
+        "guideShownOpposite": 0.15
       },
       "rows": [
         {
@@ -3988,7 +3988,7 @@
           "calm": 0,
           "medianRedS": 35.4,
           "medianLeadS": -2.1,
-          "note": "red from crowd density, not waves; median peak 6.0/m², 4372 N/m"
+          "note": "red from crowd density, not waves; median peak 6.0/m², 5364 N/m"
         },
         {
           "scenario": "stage→surge",
@@ -3999,8 +3999,8 @@
           "yellow": 0,
           "calm": 0,
           "medianRedS": 12.5,
-          "medianLeadS": 18.4,
-          "note": "red from crowd density, not waves; median peak 6.0/m², 4625 N/m"
+          "medianLeadS": 18.3,
+          "note": "red from crowd density, not waves; median peak 6.0/m², 4650 N/m"
         },
         {
           "scenario": "stage→surge 0.3",
@@ -4011,8 +4011,8 @@
           "yellow": 0,
           "calm": 0,
           "medianRedS": 12.5,
-          "medianLeadS": 18.8,
-          "note": "red from crowd density, not waves; median peak 5.4/m², 2299 N/m"
+          "medianLeadS": 19,
+          "note": "red from crowd density, not waves; median peak 5.4/m², 2526 N/m"
         }
       ]
     },
@@ -4037,20 +4037,20 @@
       "stackReds": 0,
       "diagnostic": true,
       "sim": {
-        "densityBias": 0.33,
-        "densityMAE": 0.34,
+        "densityBias": 0.39,
+        "densityMAE": 0.39,
         "medianLeadS": 17.8,
         "warnedFirst": 40,
         "dangerRuns": 60,
         "medianYellowLeadS": 28.6,
         "posErrM": 0,
         "countedShare": 1,
-        "guideSamples": 134082,
-        "guideWithin45": 0.79,
-        "guideOpposite": 0.14,
+        "guideSamples": 132077,
+        "guideWithin45": 0.78,
+        "guideOpposite": 0.15,
         "guideShown": 1,
-        "guideShownWithin45": 0.79,
-        "guideShownOpposite": 0.14
+        "guideShownWithin45": 0.78,
+        "guideShownOpposite": 0.15
       },
       "rows": [
         {
@@ -4402,7 +4402,7 @@
           "calm": 0,
           "medianRedS": 35.4,
           "medianLeadS": -2.1,
-          "note": "red from crowd density, not waves; median peak 6.0/m², 4372 N/m"
+          "note": "red from crowd density, not waves; median peak 6.0/m², 5364 N/m"
         },
         {
           "scenario": "stage→surge",
@@ -4413,8 +4413,8 @@
           "yellow": 0,
           "calm": 0,
           "medianRedS": 12.5,
-          "medianLeadS": 18.4,
-          "note": "red from crowd density, not waves; median peak 6.0/m², 4625 N/m"
+          "medianLeadS": 18.3,
+          "note": "red from crowd density, not waves; median peak 6.0/m², 4650 N/m"
         },
         {
           "scenario": "stage→surge 0.3",
@@ -4425,8 +4425,8 @@
           "yellow": 0,
           "calm": 0,
           "medianRedS": 12.5,
-          "medianLeadS": 18.8,
-          "note": "red from crowd density, not waves; median peak 5.4/m², 2299 N/m"
+          "medianLeadS": 19,
+          "note": "red from crowd density, not waves; median peak 5.4/m², 2526 N/m"
         }
       ]
     },
@@ -4451,20 +4451,20 @@
       "stackReds": 0,
       "diagnostic": true,
       "sim": {
-        "densityBias": 0.33,
-        "densityMAE": 0.34,
+        "densityBias": 0.39,
+        "densityMAE": 0.39,
         "medianLeadS": 17.8,
         "warnedFirst": 40,
         "dangerRuns": 60,
         "medianYellowLeadS": 28.6,
         "posErrM": 0,
         "countedShare": 1,
-        "guideSamples": 134082,
-        "guideWithin45": 0.79,
-        "guideOpposite": 0.14,
+        "guideSamples": 132077,
+        "guideWithin45": 0.78,
+        "guideOpposite": 0.15,
         "guideShown": 1,
-        "guideShownWithin45": 0.79,
-        "guideShownOpposite": 0.14
+        "guideShownWithin45": 0.78,
+        "guideShownOpposite": 0.15
       },
       "rows": [
         {
@@ -4816,7 +4816,7 @@
           "calm": 0,
           "medianRedS": 35.4,
           "medianLeadS": -2.1,
-          "note": "red from crowd density, not waves; median peak 6.0/m², 4372 N/m"
+          "note": "red from crowd density, not waves; median peak 6.0/m², 5364 N/m"
         },
         {
           "scenario": "stage→surge",
@@ -4827,8 +4827,8 @@
           "yellow": 0,
           "calm": 0,
           "medianRedS": 12.5,
-          "medianLeadS": 18.4,
-          "note": "red from crowd density, not waves; median peak 6.0/m², 4625 N/m"
+          "medianLeadS": 18.3,
+          "note": "red from crowd density, not waves; median peak 6.0/m², 4650 N/m"
         },
         {
           "scenario": "stage→surge 0.3",
@@ -4839,8 +4839,8 @@
           "yellow": 0,
           "calm": 0,
           "medianRedS": 12.5,
-          "medianLeadS": 18.8,
-          "note": "red from crowd density, not waves; median peak 5.4/m², 2299 N/m"
+          "medianLeadS": 19,
+          "note": "red from crowd density, not waves; median peak 5.4/m², 2526 N/m"
         }
       ]
     },
@@ -4865,20 +4865,20 @@
       "stackReds": 0,
       "diagnostic": true,
       "sim": {
-        "densityBias": 0.33,
-        "densityMAE": 0.34,
+        "densityBias": 0.39,
+        "densityMAE": 0.39,
         "medianLeadS": 17.8,
         "warnedFirst": 40,
         "dangerRuns": 60,
         "medianYellowLeadS": 28.6,
         "posErrM": 0,
         "countedShare": 1,
-        "guideSamples": 134082,
-        "guideWithin45": 0.79,
-        "guideOpposite": 0.14,
+        "guideSamples": 132077,
+        "guideWithin45": 0.78,
+        "guideOpposite": 0.15,
         "guideShown": 1,
-        "guideShownWithin45": 0.79,
-        "guideShownOpposite": 0.14
+        "guideShownWithin45": 0.78,
+        "guideShownOpposite": 0.15
       },
       "rows": [
         {
@@ -5230,7 +5230,7 @@
           "calm": 0,
           "medianRedS": 35.4,
           "medianLeadS": -2.1,
-          "note": "red from crowd density, not waves; median peak 6.0/m², 4372 N/m"
+          "note": "red from crowd density, not waves; median peak 6.0/m², 5364 N/m"
         },
         {
           "scenario": "stage→surge",
@@ -5241,8 +5241,8 @@
           "yellow": 0,
           "calm": 0,
           "medianRedS": 12.5,
-          "medianLeadS": 18.4,
-          "note": "red from crowd density, not waves; median peak 6.0/m², 4625 N/m"
+          "medianLeadS": 18.3,
+          "note": "red from crowd density, not waves; median peak 6.0/m², 4650 N/m"
         },
         {
           "scenario": "stage→surge 0.3",
@@ -5253,8 +5253,8 @@
           "yellow": 0,
           "calm": 0,
           "medianRedS": 12.5,
-          "medianLeadS": 18.8,
-          "note": "red from crowd density, not waves; median peak 5.4/m², 2299 N/m"
+          "medianLeadS": 19,
+          "note": "red from crowd density, not waves; median peak 5.4/m², 2526 N/m"
         }
       ]
     },
@@ -5279,20 +5279,20 @@
       "stackReds": 0,
       "diagnostic": true,
       "sim": {
-        "densityBias": 0.33,
-        "densityMAE": 0.34,
+        "densityBias": 0.39,
+        "densityMAE": 0.39,
         "medianLeadS": 17.8,
         "warnedFirst": 40,
         "dangerRuns": 60,
         "medianYellowLeadS": 28.6,
         "posErrM": 0,
         "countedShare": 1,
-        "guideSamples": 134082,
-        "guideWithin45": 0.79,
-        "guideOpposite": 0.14,
+        "guideSamples": 132077,
+        "guideWithin45": 0.78,
+        "guideOpposite": 0.15,
         "guideShown": 1,
-        "guideShownWithin45": 0.79,
-        "guideShownOpposite": 0.14
+        "guideShownWithin45": 0.78,
+        "guideShownOpposite": 0.15
       },
       "rows": [
         {
@@ -5645,7 +5645,7 @@
           "calm": 0,
           "medianRedS": 35.4,
           "medianLeadS": -2.1,
-          "note": "red from crowd density, not waves; median peak 6.0/m², 4372 N/m"
+          "note": "red from crowd density, not waves; median peak 6.0/m², 5364 N/m"
         },
         {
           "scenario": "stage→surge",
@@ -5656,8 +5656,8 @@
           "yellow": 0,
           "calm": 0,
           "medianRedS": 12.5,
-          "medianLeadS": 18.4,
-          "note": "red from crowd density, not waves; median peak 6.0/m², 4625 N/m"
+          "medianLeadS": 18.3,
+          "note": "red from crowd density, not waves; median peak 6.0/m², 4650 N/m"
         },
         {
           "scenario": "stage→surge 0.3",
@@ -5668,8 +5668,8 @@
           "yellow": 0,
           "calm": 0,
           "medianRedS": 12.5,
-          "medianLeadS": 18.8,
-          "note": "red from crowd density, not waves; median peak 5.4/m², 2299 N/m"
+          "medianLeadS": 19,
+          "note": "red from crowd density, not waves; median peak 5.4/m², 2526 N/m"
         }
       ]
     },
@@ -5694,20 +5694,20 @@
       "stackReds": 0,
       "diagnostic": true,
       "sim": {
-        "densityBias": 0.33,
-        "densityMAE": 0.34,
+        "densityBias": 0.39,
+        "densityMAE": 0.39,
         "medianLeadS": 17.8,
         "warnedFirst": 40,
         "dangerRuns": 60,
         "medianYellowLeadS": 28.6,
         "posErrM": 0,
         "countedShare": 1,
-        "guideSamples": 134082,
-        "guideWithin45": 0.79,
-        "guideOpposite": 0.14,
+        "guideSamples": 132077,
+        "guideWithin45": 0.78,
+        "guideOpposite": 0.15,
         "guideShown": 1,
-        "guideShownWithin45": 0.79,
-        "guideShownOpposite": 0.14
+        "guideShownWithin45": 0.78,
+        "guideShownOpposite": 0.15
       },
       "rows": [
         {
@@ -6060,7 +6060,7 @@
           "calm": 0,
           "medianRedS": 35.4,
           "medianLeadS": -2.1,
-          "note": "red from crowd density, not waves; median peak 6.0/m², 4372 N/m"
+          "note": "red from crowd density, not waves; median peak 6.0/m², 5364 N/m"
         },
         {
           "scenario": "stage→surge",
@@ -6071,8 +6071,8 @@
           "yellow": 0,
           "calm": 0,
           "medianRedS": 12.5,
-          "medianLeadS": 18.4,
-          "note": "red from crowd density, not waves; median peak 6.0/m², 4625 N/m"
+          "medianLeadS": 18.3,
+          "note": "red from crowd density, not waves; median peak 6.0/m², 4650 N/m"
         },
         {
           "scenario": "stage→surge 0.3",
@@ -6083,8 +6083,8 @@
           "yellow": 0,
           "calm": 0,
           "medianRedS": 12.5,
-          "medianLeadS": 18.8,
-          "note": "red from crowd density, not waves; median peak 5.4/m², 2299 N/m"
+          "medianLeadS": 19,
+          "note": "red from crowd density, not waves; median peak 5.4/m², 2526 N/m"
         }
       ]
     }

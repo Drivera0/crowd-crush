@@ -233,6 +233,12 @@ export interface Cluster {
   rate?: number;
   /** Projected seconds until it reaches the danger density at the current rate (early warning). */
   eta?: number;
+  /** What the crowd at the densest spot is doing (absent when positions are too rough to tell): `flowing` = dense but people are getting out (no watch below the danger density, no early warning); `packing` = people arriving, nobody getting out; `still` = packed and barely moving. */
+  motion?: 'flowing' | 'packing' | 'still';
+  /** People per metre per second leaving the densest spot. */
+  flow?: number;
+  /** Net speed of the crowd at the densest spot (m/s). */
+  speed?: number;
 }
 
 export interface Stats {
