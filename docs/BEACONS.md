@@ -4,7 +4,7 @@ An opt-in extra. Nothing in Pulse depends on it, and a phone that doesn't use it
 
 ## What it is
 
-The fixed boards advertise over Bluetooth: the two ESP32 zone lights as `PULSE-A` and `PULSE-B`, and the sign as `PULSE-S` when it runs its beacon build (`SIGN_BEACON=1`). Staff place the boards on the dashboard map (Hardware page). A phone that can measure how strongly it hears each board gets a distance per board, and from the distances a position in venue metres.
+The fixed boards advertise over Bluetooth: the two ESP32 zone lights as `PULSE-A` and `PULSE-B`, and the sign as `PULSE-S` when its beacon mode is on (`scripts/boards.sh beacon on`, see [The sign as a third anchor](#the-sign-as-a-third-anchor)). Staff place the boards on the dashboard map (Hardware page). A phone that can measure how strongly it hears each board gets a distance per board, and from the distances a position in venue metres.
 
 Distance uses the same model as the firmware: `d = 10^((tx1m − RSSI) / (10 · n))`, with `tx1m = −64 dBm` (signal at 1 m) and `n = 2.2`. Every 6.6 dB weaker is twice as far.
 
@@ -97,6 +97,26 @@ On a connection or app-advert row the same button sets the board-side reference 
 
 By hand: `PUT /api/beacons/model` with `{"beacon":"PULSE-S","txPower1m":-58}` (one board; `0` removes it), `{"conn":true,"txPower1m":-60}` (connect mode) or `{"txPower1m":-64,"pathLossN":2.2}` (the model). Saved in `data/beacons.json`.
 
+## The sign as a third anchor
+
+The sign (UNO R4 WiFi) can advertise `PULSE-S`, with the same manufacturer marker as the zone lights (`FF FF 'P' 'L' 'S' 'S'`, non-connectable, every 100 ms). The zone lights then list it in their `peers`, and a phone in scan mode hears it, so A, B and the sign give a 2-D fix.
+
+It is a switch in the sign's flash, not a separate build; the firmware is the same either way, and the switch survives reflashing and power cycles.
+
+| | Do this (Pulse stopped: it holds the USB port) |
+|---|---|
+| On | `scripts/boards.sh beacon on` (Windows: `pwsh scripts/boards.ps1 beacon on`), or send `B 1` over USB at 115200 baud |
+| Off | `scripts/boards.sh beacon off` / `pwsh scripts/boards.ps1 beacon off` / `B 0` |
+| Check | `scripts/boards.sh status` (Wi-Fi column says "off: Bluetooth beacon PULSE-S"), or `S` over USB: `"mode":"beacon","ble":true,"name":"PULSE-S"` |
+
+What it costs:
+
+- **No Wi-Fi while it's a beacon.** The R4's Wi-Fi and Bluetooth share one radio module (the ESP32-S3), and here they run one at a time. The sign must then be driven over USB: `SIGN_URL=serial:auto`, with Pulse running natively on the machine the sign is plugged into (the table demo on the Mac). A Pulse server in WSL reaches the sign over Wi-Fi only, so leave beacon mode **off** there.
+- **The USB port drops for about 3 s at each switch** (and each boot in beacon mode): the radio module is also the R4's USB bridge, and it is restarted so Bluetooth starts on a clean module. Pulse's `serial:auto` finds it again by itself.
+- Everything else works as before: `L` level commands, the LED matrix, `S`.
+
+Safety net: the radio firmware must be 0.2.0 or newer (`S` reports it as `"radio"`; this board has 0.6.0, the latest). If Bluetooth fails to start, or hangs (a 5 s watchdog catches that), the sign reboots into Wi-Fi + USB, reports `"beacon":true,"mode":"wifi","bleErr":"<why>"`, and stays there until the next `beacon on`. It can't get stuck in a dead beacon mode.
+
 ## Privacy
 
 The phone only asks Chrome for devices whose name starts with `PULSE-`, checks the name again before reporting, and the server drops any name that isn't one of this venue's boards. No other Bluetooth device is seen, reported or stored. In connect mode the phone writes its random session id to a board it chose; the board keeps it only while connected and reports the id with a signal strength, nothing else.
@@ -104,14 +124,14 @@ The phone only asks Chrome for devices whose name starts with `PULSE-`, checks t
 ## Limits
 
 - Android Chrome only. No iPhone.
-- Two ESP32s give a line, not a position. The sign's beacon makes a third anchor for scan mode only.
+- Two ESP32s give a line, not a position. The sign's beacon makes a third anchor for scan mode only, and costs the sign its Wi-Fi while it's on.
 - Scan mode needs a flag no attendee will turn on; connect mode needs a pop-up per board and holds 3 phones per board.
 - A web page only scans while it is open and on screen.
 - RSSI ranging is rough, and worse through a crowd.
 
 ## More anchors
 
-- **Sign**: has a beacon build (`SIGN_BEACON=1` in `arduino/sign/sign.ino`): it advertises `PULSE-S`, has no Wi-Fi in that build and is driven over USB serial. The server treats `PULSE-S` as the sign's beacon whenever the sign is on the map, online or not. Calibrate it separately.
+- **Sign**: has a beacon mode (below): it advertises `PULSE-S`, has no Wi-Fi while it does, and is driven over USB serial. The server treats `PULSE-S` as the sign's beacon whenever the sign is on the map, online or not. Calibrate it separately.
 - **Laptop**: a browser can't advertise. It would take a small native helper, or simply a third ESP32 on the laptop's USB port flashed as a zone light.
 - **A third ESP32** is the cheapest way to a 2-D fix in both modes.
 
@@ -163,4 +183,6 @@ Code: `server/internal/protocol/beacons.go`, `server/internal/app/beacons.go` (g
 
 Verified here: the Go tests (validation, distance model, 1/2/3/4-board geometry with noise, unknown names, calibration, link polling and merging, id sanitising, app-advert matching), the web type-check and build, the diagnostic page rendering and feature-detecting in desktop Chrome, and the zone-light firmware compiling (1.70 MB, 53 % of the Huge APP partition; 71 KB of RAM for globals, 21 %; no partition change).
 
-**Not tested: any real Bluetooth.** No scan, no connection, no app advert and no flashed board has been exercised. The firmware's connect mode and app-phone hearing are compile-checked only. In particular, unverified on hardware: that the ESP32 keeps advertising and scanning with phones connected, that three connections hold next to Wi-Fi, and that reporting every advert to the scan callback (instead of once per scan) leaves the web server responsive in a room full of Bluetooth devices.
+On hardware (Oct 4): the sign's beacon mode. Radio firmware 0.6.0; `B 1` → the sign advertises `PULSE-S` and both zone lights list it in `/pulse` `peers` (A −26 to −29 dBm, B −49 to −66 dBm on the table); `L red/yellow/calm` and `S` keep working over USB; a reflash in beacon mode comes back as a beacon; `B 0` → back on Wi-Fi with `/pulse` and `/level` answering over HTTP. Not exercised: the watchdog fallback (Bluetooth never failed), and a phone scanning `PULSE-S`.
+
+**Not tested otherwise: real Bluetooth to phones.** No scan, no connection, no app advert and no flashed board has been exercised. The firmware's connect mode and app-phone hearing are compile-checked only. In particular, unverified on hardware: that the ESP32 keeps advertising and scanning with phones connected, that three connections hold next to Wi-Fi, and that reporting every advert to the scan callback (instead of once per scan) leaves the web server responsive in a room full of Bluetooth devices.

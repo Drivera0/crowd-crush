@@ -52,6 +52,8 @@ func main() {
 		err = zone(args)
 	case "wifi":
 		err = wifi(args)
+	case "beacon":
+		err = beacon(args)
 	case "env":
 		err = env(args)
 	default:
@@ -64,7 +66,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, `usage: boards status|scan|fwid|level|zone|wifi|env [flags]   (see scripts/boards.sh)`)
+	fmt.Fprintln(os.Stderr, `usage: boards status|scan|fwid|level|zone|wifi|beacon|env [flags]   (see scripts/boards.sh)`)
 	os.Exit(2)
 }
 
@@ -104,6 +106,16 @@ func fwNote(kind, fw string) string {
 func wifiNote(p *sign.Pulse) string {
 	if p == nil || p.WiFi == nil {
 		return "?"
+	}
+	if p.Mode == "beacon" {
+		return "off: Bluetooth beacon " + dash(p.Name) + " (scripts/boards.sh beacon off)"
+	}
+	if p.Beacon && p.BLEErr != "" {
+		note := "beacon failed (" + p.BLEErr + "), "
+		if *p.WiFi {
+			return note + fmt.Sprintf("%s %s", p.SSID, p.IP)
+		}
+		return note + "no Wi-Fi"
 	}
 	if *p.WiFi {
 		return fmt.Sprintf("%s %s", p.SSID, p.IP)
@@ -432,6 +444,78 @@ func zone(args []string) error {
 	}
 	fmt.Printf("%s is now %s (zone %s)\n", *port, p.Name, p.Zone)
 	return nil
+}
+
+// ---- beacon ----
+
+// beacon switches the sign's Bluetooth beacon mode (B 1 / B 0). The sign
+// reboots and restarts its radio module, so the USB port drops for a few
+// seconds; this reopens it and reports the mode it came back in.
+func beacon(args []string) error {
+	fs := flag.NewFlagSet("beacon", flag.ExitOnError)
+	port := fs.String("port", "", "serial port of the sign")
+	on := fs.Bool("on", false, "turn beacon mode on (default: off)")
+	wait := fs.Duration("wait", 30*time.Second, "how long to wait for the sign to come back")
+	fs.Parse(args)
+	u, p, err := open(*port)
+	if err != nil {
+		return err
+	}
+	if p.Kind != "sign" {
+		u.Close()
+		return fmt.Errorf("%s is a %s, not the sign", *port, p.Kind)
+	}
+	if p.Radio == "" && p.Mode == "" {
+		u.Close()
+		return fmt.Errorf("%s: the sign's firmware predates beacon mode: flash it (scripts/boards.sh flash)", *port)
+	}
+	u.Drain()
+	cmd := "B 0"
+	if *on {
+		cmd = "B 1"
+	}
+	if err := u.Send(cmd); err != nil {
+		u.Close()
+		return err
+	}
+	reply, _ := u.WaitLine(context.Background(), "beacon:", 3*time.Second)
+	u.Close()
+	if reply != "" {
+		fmt.Printf("%s: %s\n", *port, strings.TrimPrefix(reply, "beacon: "))
+	}
+	want := "wifi"
+	if *on {
+		want = "beacon"
+	}
+	time.Sleep(2 * time.Second)
+	deadline := time.Now().Add(*wait)
+	var last *sign.Pulse
+	for time.Now().Before(deadline) {
+		if c, err := sign.OpenUSB(*port); err == nil {
+			q, err := c.Status(context.Background(), 3*time.Second)
+			c.Close()
+			if err == nil {
+				last = q
+				// Beacon mode comes up only after the radio module restarts: wait for ble or a fallback.
+				if q.Mode == want && (want == "wifi" || (q.BLE != nil && q.BLE.Beacon)) {
+					adv := ""
+					if q.BLE != nil && q.BLE.Beacon {
+						adv = ", advertising " + q.Name
+					}
+					fmt.Printf("%s is in %s mode (radio firmware %s)%s\n", *port, q.Mode, q.Radio, adv)
+					return nil
+				}
+				if *on && q.Mode == "wifi" && q.BLEErr != "" {
+					return fmt.Errorf("%s: Bluetooth didn't start (%s); the sign fell back to Wi-Fi + USB", *port, q.BLEErr)
+				}
+			}
+		}
+		time.Sleep(time.Second)
+	}
+	if last != nil {
+		return fmt.Errorf("%s answers but is in %q mode, not %s", *port, last.Mode, want)
+	}
+	return fmt.Errorf("%s didn't come back within %s: unplug and replug it; still nothing, double-tap its RESET button", *port, *wait)
 }
 
 // ---- wifi ----
