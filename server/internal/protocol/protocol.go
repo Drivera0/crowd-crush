@@ -170,6 +170,13 @@ type PhoneState struct {
 	// Row: where this phone stands in the demo spot's row (join.go), so the
 	// person can stand in that order at the table.
 	Row *DemoRow `json:"row,omitempty"`
+	// Spot: while the demo spot is on and this phone is off the row (it
+	// tapped a new spot, staff dragged it off, or it is beside a board), the
+	// place in the row it goes back to with POST /api/demo/back (app/demomove.go).
+	Spot int `json:"spot,omitempty"`
+	// Near: the board this phone has walked up to ("Zone light A"), while
+	// the Bluetooth snap places it beside that board (app/beaconsnap.go).
+	Near string `json:"near,omitempty"`
 }
 
 // Move is personal guidance: a unit vector in venue coordinates (x right,
@@ -221,6 +228,9 @@ type Node struct {
 	// Slot: its place in the demo spot's row (1 = first), while the demo
 	// spot is on and the phone stands where the server lined it up.
 	Slot int `json:"slot,omitempty"`
+	// Near: the board this phone was walked up to ("Zone light A"), while
+	// the Bluetooth snap places it beside that board (app/beaconsnap.go).
+	Near string `json:"near,omitempty"`
 	// The position estimator (locate.go). With it on, X, Y are its
 	// estimate and Acc its uncertainty (the 68 % radius in metres; 0 = as
 	// good as placed by hand). Raw: where the phone would be shown without
@@ -697,6 +707,9 @@ type NodeDetail struct {
 	// Beacons: the Pulse boards this phone hears over Bluetooth and the fix
 	// from them (beacons.go); absent unless the phone reports beacons.
 	Beacons *BeaconFix `json:"beacons,omitempty"`
+	// Swapped: PUT /api/node/{id}/pos dropped this phone on another phone's
+	// place in the demo row, and the two swapped; the other one's name.
+	Swapped string `json:"swapped,omitempty"`
 }
 
 // ---- Crowd simulation (mode "sim") ----

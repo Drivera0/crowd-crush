@@ -26,6 +26,7 @@
 // where it really is.
 
 import type { Cluster, Hardware, Level, Node, NodeStatus, SimFrame, SimFurniture, SimState, VenueLayout, Wave } from '../../shared/protocol';
+import { drawNearLabels } from './nearlabels';
 
 type RGB = [number, number, number];
 
@@ -1240,6 +1241,7 @@ export class Mesh {
 
     this.drawNodes(g, now, pulse);
     this.drawNames(g);
+    drawNearLabels(g, this.list, NODE_R, this.view.k, light); // walked up to a board (nearlabels.ts)
     this.drawBadges(g);
     this.table?.draw(g, now, true);
 

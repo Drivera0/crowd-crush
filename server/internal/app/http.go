@@ -24,10 +24,11 @@ import (
 func (a *App) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /ws/phone", a.Hub.ServePhone)
 	mux.HandleFunc("GET /ws/dash", a.Hub.ServeDash)
-	a.meshRoutes(mux)   // GET /api/mesh, POST /api/mesh/jam (mesh.go)
-	a.beaconRoutes(mux) // Bluetooth beacon positioning (beacons.go)
-	a.locateRoutes(mux) // GET/PUT /api/locate: the position estimator (locate.go)
-	a.joinRoutes(mux)   // /api/join…: the QR link, its test, phones' join reports (join.go)
+	a.meshRoutes(mux)     // GET /api/mesh, POST /api/mesh/jam (mesh.go)
+	a.beaconRoutes(mux)   // Bluetooth beacon positioning (beacons.go)
+	a.locateRoutes(mux)   // GET/PUT /api/locate: the position estimator (locate.go)
+	a.joinRoutes(mux)     // /api/join…: the QR link, its test, phones' join reports (join.go)
+	a.demoMoveRoutes(mux) // GET /api/demo/row, POST /api/demo/back: moving about at the table demo (demomove.go)
 
 	mux.HandleFunc("GET /api/config", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()

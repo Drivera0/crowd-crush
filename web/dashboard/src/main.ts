@@ -51,6 +51,7 @@ function refreshSetup() {
 // ---------------------------------------------------------------------------
 
 const mesh = new Mesh($('mesh') as HTMLCanvasElement);
+(window as unknown as { pulseMap: Mesh }).pulseMap = mesh; // for headless checks (web/phone/e2e/move.e2e.mjs)
 const table = new TableLayer(mesh, $('mesh').parentElement!);
 mesh.table = table;
 
