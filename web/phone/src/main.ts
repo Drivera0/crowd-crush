@@ -7,6 +7,7 @@ import type { Clock, Jam, MeshPeers, PosSrc, Relay, Signal } from '../../shared/
 import { Mesh, type SelfPos } from './mesh';
 import { initPocket, pocketExit, pocketReady, pocketShake, pocketUpdate } from './pocket';
 import { initBeacons } from './beacons';
+import { initNative } from './native';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -871,5 +872,7 @@ initPocket(isIOS);
 
 // Opt-in Bluetooth beacon positioning (Android Chrome only; nothing shows elsewhere): beacons.ts.
 initBeacons(id, (m) => ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify(m)));
+// Inside the Pulse Android app only (window.PulseNative): Bluetooth scan + advert after Join, screen-off running: native.ts.
+initNative(id, (m) => ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify(m)), hello);
 
 show('join');

@@ -1,0 +1,16 @@
+# build outputs and machine-local files: never in the repo
+.gradle/
+build/
+app/build/
+local.properties
+.idea/
+*.iml
+.kotlin/
+captures/
+# signing keys
+*.jks
+*.keystore
+keystore.properties
+# built packages
+*.apk
+*.aab
