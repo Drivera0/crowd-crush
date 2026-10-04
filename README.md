@@ -87,7 +87,7 @@ Per zone: score = |Σ unit travel vectors of the wave edges| ÷ the zone's edges
 
 **Crowd clusters** (`server/internal/crowd`): every detector tick, DBSCAN (eps 1.2 m, ≥ 3 phones) over the phones that aren't stale or outside. Each cluster has a centroid, a radius (farthest member + 0.5 m) and a density = phones ÷ max(π r², 1 m²). Clusters keep their ID across ticks (nearest centroid within 2 m). The **trend** compares now with 10 s ago (each end averaged over 2 s): *forming* if there are ≥ max(2, 10 %) more phones, or else the density rose ≥ 15 %; *dispersing* is the mirror image; *steady* otherwise. A cluster younger than 5 s is *forming*.
 
-**Density alerts.** A cluster's level comes from its estimated density = phones/m² ÷ `participation`: yellow above `densityWatch` (2 people/m²) for 2 s, red above `densityDanger` (4 people/m²) for 2 s, each clearing 10 % below its threshold. Yellow → red raises an alert through the same chain as a wave (timeline, a Gemini briefing worded as crowding, voice, sign) for the zone the cluster's centre is in, with the same one-briefing-per-zone-per-30-s limit. **The participation caveat:** density counts *phones*. The default `participation` of 1.0 assumes everyone in the cluster has the page open. If only a third do, set 0.33, so that 4 phones in a few m² read as 12 people. Set it too high and real crushes read as half as dense; too low and comfortable groups raise alarms. It's the weakest number in the system, so tune it per event.
+**Density alerts.** A cluster's level comes from its estimated density = phones/m² ÷ `participation`, where phones/m² is the larger of the cluster-disc density and the *peak local density* (phones within 1.5 m of a member ÷ 7.07 m², at the 90th percentile of the members). Without the local peak, a 20 m crowd pressed against a barrier is one big cluster whose disc average hides the packed front (the crowd simulator showed 1.2/m² for a front at 6/m²). Levels: yellow above `densityWatch` (2 people/m²) for 2 s, red above `densityDanger` (4 people/m²) for 2 s, each clearing 10 % below its threshold. Yellow → red raises an alert through the same chain as a wave (timeline, a Gemini briefing worded as crowding, voice, sign) for the zone the cluster's centre is in, with the same one-briefing-per-zone-per-30-s limit. **The participation caveat:** density counts *phones*. The default `participation` of 1.0 assumes everyone in the cluster has the page open. If only a third do, set 0.33, so that 4 phones in a few m² read as 12 people. Set it too high and real crushes read as half as dense; too low and comfortable groups raise alarms. It's the weakest number in the system, so tune it per event.
 
 Every threshold lives in one struct: `./bin/pulse -dump-config > detect.json`, edit, `./bin/pulse -config detect.json` (`detect.example.json` holds the defaults).
 
@@ -113,6 +113,24 @@ The line demo (`-layout line`, 8 phones 0.6 m apart) and the crowd layout (`-lay
 
 Also tested: every other phone held upside down, the false-positive scenarios over 8 random lines and 3 random crowds, high-risk areas (a single shove that stays yellow in a normal area goes red in a high-risk one), GPS conversion and privacy, and old row/col recordings replaying. `PULSE_SWEEP=1 go test ./server/internal/detect -run Sweep -v` prints outcomes over 20 crowds per scenario (`PULSE_LAYOUT=crowd PULSE_N=24` for the crowd layout, `PULSE_ONLY=wave,gather` to pick scenarios), and `PULSE_CFG='{"minChain":0}'` overrides config fields for comparisons.
 
+### Crowd simulator: simulated people instead of scripted signals
+
+`server/internal/crowdsim` runs simulated people in the server process: a Social Force Model (Helbing & Molnár 1995; Helbing, Farkas & Vicsek 2000), with bodies as discs (social repulsion, body compression, sliding friction, walls), a stage barrier and four exits. A crowd crush *emerges* from it. The dashboard steers it (`calm`, `stage`, `surge`, `attract`, `shove`, `exit`, `disperse`, `spawn`; API in CLAUDE.md). 60 % of the simulated people carry a phone. Each phone's readings are its body's acceleration from the forces, rotated into the chest frame, plus gait, breathing, sensor noise and occasional handling. They go through the same pipeline as real phones. The rest are invisible to Pulse but still push.
+
+**Calibrated against Weidmann's fundamental diagram** (1993), the standard benchmark that Vadere and JuPedSim are checked against. In a periodic corridor, mean walking speed is within ±0.10 m/s of Weidmann from 1 to 5 people/m², except 2.5/m² (−0.14). Free walking at 0.5/m² is 0.15 m/s slow (desired speeds average 1.3 m/s). Only unidirectional corridor flow was checked; table and method are in the package doc. The calibration needed a time gap for walkers (0.6 s; the Helbing 2000 forces alone don't slow a walking crowd until ~4/m²).
+
+**Ground truth and lead time.** The simulation knows what Pulse has to guess: per-person pressure (Helbing's injury level is 1600 N/m) and local density. `GET /api/sim` reports when the truth first became dangerous, when Pulse first went red, and the difference (`leadSeconds`, positive = Pulse warned first). Results over 5 seeds (250 people, `PULSE_SIMSWEEP=1 go test ./server/internal/app -run SimLeadSweep -v`):
+
+| Script | Truth dangerous | Pulse red (all density alerts) | Lead |
+|---|---|---|---|
+| calm 30 s → `surge` 0.7 + a shove every 3 s | 32–33 s | 34–35 s | −2.1 to −2.7 s (Pulse 2 s *late*) |
+| `stage` at 5 s → `surge` 0.7 + shoves at 30 s | 30 s | 3 seeds: 12–13 s (during `stage`); 2 seeds: 31–32 s | +17 to +19 s, or −0.8 to −1.9 s |
+| `stage` → `surge` 0.3 | 30–32 s | same pattern | +17 to +19 s, or −0.4 to −0.8 s |
+
+Read it honestly. A sudden surge into a loose crowd is caught ~2 s after the crowd turns dangerous: the density has to persist for 2 s, and the cluster has to fill. The large positive leads happen when `stage` crowding already passes Pulse's 4/m² danger threshold (true density ~5/m², pressure still below 1600 N/m), so Pulse is red before the surge starts. That's an early warning by Pulse's own threshold, not a prediction of the surge. In `calm` there is no red alert (and on seeds 1–3 over 120 s, no density alert at all). In `attract` (a group forming around a point) there is yellow density only.
+
+**What the simulator says about wave detection.** In this model the travelling-wave detector almost never fires. Bodies in a packed crowd are stiff (k = 1.2·10⁵ kg/s²), so a push crosses neighbours in tens of milliseconds, under the detector's 120 ms per-hop floor, and reads as moving together. In a loose crowd a push dies out within ~2 m. Either real crowds transmit pushes more slowly than stiff discs do (people are compliant and step), or the wave detector needs a lower lag floor for packed crowds. Recordings of real pushes would settle it.
+
 ## Layout
 
 ```
@@ -120,7 +138,8 @@ server/cmd/pulse      the server (flags: -venue-w -venue-h -venue-lat -venue-lon
 server/cmd/sim        fake phones: -scenario wave [-layout crowd|line] [-n 24] [-move=false] [-rows -cols for the line]
                       [-out file.jsonl for offline recordings, with hello x/y and pos records]
 server/cmd/dashtail   dashboard snapshots in a terminal
-server/internal/      hub, clocksync, detect, crowd (clusters), geo (GPS → metres), store, brief, voice, sign, protocol, app, sim
+server/internal/      hub, clocksync, detect, crowd (clusters), geo (GPS → metres), store, brief, voice, sign, protocol, app, sim,
+                      crowdsim (Social Force Model crowd, in-process: POST /api/sim/start)
 data/                 saved venue anchor and staff-drawn areas (git-ignored)
 web/phone             phone page (Vite + TS)       web/dashboard   dashboard (Vite + TS, SVG)
 web/shared            protocol.ts — mirror of server/internal/protocol

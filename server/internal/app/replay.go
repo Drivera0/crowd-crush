@@ -111,6 +111,7 @@ func (a *App) StartReplay(ctx context.Context, name string, speed float64) error
 	// Feed the metadata (hellos, syncs) that precedes the first reading.
 	rs.recStart = first - 1
 	a.mu.Lock()
+	a.sim = nil // a replay replaces a running simulation
 	a.replay = rs
 	a.mu.Unlock()
 	log.Printf("replaying %s: %d readings, %s", name, n, time.Duration(last-first)*time.Millisecond)
@@ -198,13 +199,19 @@ func (a *App) StartRecording(label string) (string, error) {
 	cfg := a.liveConfig()
 	w.Write(store.Record{K: store.KindMeta, T: now, Label: label, W: cfg.VenueW, H: cfg.VenueH})
 	// Phones already connected need a hello so the replay knows where they
-	// are (venue metres only, never GPS coordinates).
-	for id, m := range a.live.meta {
-		if m.connected {
-			w.Write(store.Record{K: store.KindHello, T: now, ID: id, X: store.F(r2(m.x)), Y: store.F(r2(m.y)),
-				Acc: m.acc, Out: m.outside, UA: m.ua})
-			if m.synced {
-				w.Write(store.Record{K: store.KindSync, T: now, ID: id, RTT: m.rtt, Offset: m.offset})
+	// are (venue metres only, never GPS coordinates). Simulated phones too.
+	pipes := []*pipeline{a.live}
+	if a.sim != nil {
+		pipes = append(pipes, a.sim.p)
+	}
+	for _, p := range pipes {
+		for id, m := range p.meta {
+			if m.connected {
+				w.Write(store.Record{K: store.KindHello, T: now, ID: id, X: store.F(r2(m.x)), Y: store.F(r2(m.y)),
+					Acc: m.acc, Out: m.outside, UA: m.ua})
+				if m.synced {
+					w.Write(store.Record{K: store.KindSync, T: now, ID: id, RTT: m.rtt, Offset: m.offset})
+				}
 			}
 		}
 	}

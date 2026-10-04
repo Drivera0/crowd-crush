@@ -179,6 +179,7 @@ type Hardware struct {
 	Zone     string   `json:"zone,omitempty"` // light letter; "" = follows the worst zone
 	Online   bool     `json:"online"`
 	LastSeen int64    `json:"lastSeen,omitempty"` // server ms
+	SeenAgo  int64    `json:"seenAgo,omitempty"`  // seconds since last answer, on the server's clock
 	Error    string   `json:"error,omitempty"`
 	RSSI     int      `json:"rssi,omitempty"`   // Wi-Fi signal, dBm
 	Uptime   int64    `json:"uptime,omitempty"` // seconds since the board booted
@@ -242,7 +243,7 @@ type Stats struct {
 type Snapshot struct {
 	Type   string `json:"type"`
 	T      int64  `json:"t"`
-	Mode   string `json:"mode"`             // live | replay
+	Mode   string `json:"mode"`             // live | replay | sim
 	Replay string `json:"replay,omitempty"` // name of the recording being replayed
 	// Progress of the replay, 0..1.
 	Progress  float64     `json:"progress,omitempty"`
@@ -254,6 +255,7 @@ type Snapshot struct {
 	Links     [][2]string `json:"links"` // every neighbour pair the detector compares
 	Clusters  []Cluster   `json:"clusters"`
 	Stats     Stats       `json:"stats"`
+	Sim       *SimFrame   `json:"sim,omitempty"` // mode "sim" only
 }
 
 type Alert struct {
@@ -311,4 +313,52 @@ type NodeDetail struct {
 	JoinedAt  int64    `json:"joinedAt"` // server clock, ms; 0 if unknown (replay)
 	Messages  int64    `json:"messages"` // motion summaries received
 	Samples   []Sample `json:"samples"`  // last ~30 s, oldest first
+}
+
+// ---- Crowd simulation (mode "sim") ----
+
+// SimFrame is the snapshot's sim field while mode is "sim": every simulated
+// person as [x, y, pressure N/m, hasPhone 0|1] (x, y to the centimetre,
+// pressure in whole N/m), the sim time (s since start) and the last
+// behaviour action.
+type SimFrame struct {
+	Bodies [][4]float64 `json:"bodies"`
+	T      float64      `json:"t"`
+	Action string       `json:"action"`
+}
+
+// SimExit is an exit gap in the simulated venue's wall.
+type SimExit struct {
+	ID   string  `json:"id"`
+	Name string  `json:"name"`
+	X0   float64 `json:"x0"`
+	Y0   float64 `json:"y0"`
+	X1   float64 `json:"x1"`
+	Y1   float64 `json:"y1"`
+	Open bool    `json:"open"`
+}
+
+// SimTruth is the simulation's ground truth and Pulse's lead time. Times
+// are seconds since the sim started; null = has not happened.
+type SimTruth struct {
+	MaxDensity  float64  `json:"maxDensity"`  // people/m², densest 3 × 3 m square
+	MaxPressure float64  `json:"maxPressure"` // N/m, highest per-person pressure
+	Crushing    int      `json:"crushing"`    // people ≥ 1600 N/m or > 6 people/m² within 1 m
+	DangerAt    *float64 `json:"dangerAt"`    // truth first dangerous (start of a ≥ 1 s stretch)
+	AlertAt     *float64 `json:"alertAt"`     // Pulse's first red alert (wave or density)
+	LeadSeconds *float64 `json:"leadSeconds"` // dangerAt − alertAt: positive = Pulse warned first
+}
+
+// SimStatus is GET /api/sim. When not running only Running, Exits and
+// Walls (the venue's layout) are set.
+type SimStatus struct {
+	Running       bool         `json:"running"`
+	T             float64      `json:"t,omitempty"`
+	People        int          `json:"people,omitempty"`
+	Phones        int          `json:"phones,omitempty"`
+	Participation float64      `json:"participation,omitempty"`
+	Action        string       `json:"action,omitempty"`
+	Exits         []SimExit    `json:"exits"`
+	Walls         [][4]float64 `json:"walls"`
+	Truth         *SimTruth    `json:"truth,omitempty"`
 }

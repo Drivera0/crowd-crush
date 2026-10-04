@@ -38,6 +38,7 @@ server/
   internal/clocksync/        # NTP-style offset per phone
   internal/detect/           # filters, per-phone features, spatial neighbours, wave detection, zones, alert state
   internal/crowd/            # DBSCAN crowd clusters, tracking, trend, density levels
+  internal/crowdsim/         # Social Force Model crowd (Helbing 1995/2000): bodies, director, phones from bodies, ground truth
   internal/geo/              # GPS → venue metres (equirectangular around the venue anchor)
   internal/store/            # Tiger Data (pgx) + JSONL fallback recorder
   internal/brief/            # Gemini client
@@ -79,7 +80,7 @@ Server → phone
 
 Server → dashboard (broadcast ~10 Hz)
 ```jsonc
-{ "type": "snapshot", "t": ..., "mode": "live|replay", "replay": "...", "progress": 0.4, "recording": "...",
+{ "type": "snapshot", "t": ..., "mode": "live|replay|sim", "replay": "...", "progress": 0.4, "recording": "...",
   "venue": { "w": 24, "h": 16 },
   "nodes": [ { "id": "...", "x": 3.2, "y": 7.5, "status": "<node status>", "sway": 0.4, "rtt": 38, "offset": -12, "age": 80,
                "ua": "...", "zone": "A", "acc": 6.5, "src": "gps|manual", "outside": false } ],
@@ -88,14 +89,22 @@ Server → dashboard (broadcast ~10 Hz)
   "links": [ ["idA", "idB"], ... ],                                              // every neighbour pair the detector compares
   "clusters": [ { "id": "c3", "x": 5.1, "y": 6.0, "r": 1.8, "count": 7, "density": 0.69, "people": 7,
                   "trend": "forming|steady|dispersing", "level": "calm|yellow|red" } ],
-  "stats": { "phones": 8, "msgPerSec": 79, "medianRtt": 41 } }
+  "stats": { "phones": 8, "msgPerSec": 79, "medianRtt": 41 },
+  "sim": { "bodies": [[x, y, pressure, hasPhone], ...], "t": 42.3, "action": "surge" } }  // mode "sim" only, see below
 { "type": "alert", "kind": "wave|density", "zone": "B", "level": "red", "brief": "...", "audioUrl": "/audio/123.mp3" }
 ```
-`node.zone` = first zone containing the phone ("" if none or outside). `density` = phones per m² of the cluster disc (count / max(π r², 1)); `people` = count / `participation`, and the cluster level uses the estimated density (phones/m² ÷ participation).
+`node.zone` = first zone containing the phone ("" if none or outside). `density` = phones per m² of the cluster disc (count / max(π r², 1)); `people` = count / `participation`, and the cluster level uses the estimated density = max(disc density, peak local density) ÷ participation, where the peak local density is phones within 1.5 m of a member ÷ 7.07 m², at the 90th percentile of the members (so a big crowd with a packed front reads as packed).
 
 Zones: with no staff-drawn areas, the venue is split into `zoneCols` × `zoneRows` rectangles (default 2 × 1: A left half, B right half). With areas, zones = the areas (`custom: true`) plus `"rest"` ("Rest of venue", phones in no area). A phone may be in several areas. `sens: "high"` halves that zone's thresholds (`highRiskFactor`) and hold time.
 
 HTTP: `GET /api/config` → `{venueW, venueH, geo, yellow, red, neighbourRadius}`; `GET/PUT /api/areas` (array of `{id, name, sens, poly}`; ≥ 3 points, unique ids, names ≤ 40 chars, ≤ 50 areas, points clamped; saved to `data/areas.json`); `GET/PUT /api/venue` (`{w, h, lat, lon, bearing, geo}`; lat/lon = the map's top-left corner, bearing = degrees clockwise from north of the map's up; saved to `data/venue.json`; initial values from `VENUE_W/H/LAT/LON/BEARING`); `GET /api/node/{id}` (x, y, acc, src, outside, samples …).
+
+**Crowd simulation** (`internal/crowdsim`, a third data source next to live and replay). While it runs, `mode` is `"sim"`, the dashboard shows the sim pipeline (its phones are ordinary `nodes`, ua `"sim"`), live phones keep streaming into the live pipeline underneath, and `snapshot.sim` carries every simulated person as `[x, y, pressure N/m, hasPhone 0|1]` (x, y to 2 decimals, pressure an integer), plus `t` (s since start) and the last behaviour `action`. Starting a replay stops the sim and vice versa.
+- `POST /api/sim/start` `{"people":250,"participation":0.6,"scenario":"concert"}` (all optional, these are the defaults; people 1–1000, participation (0, 1]) → `{"mode":"sim"}`; 400 `{"error"}` on bad input, 409 if already running.
+- `POST /api/sim/stop` → `{"mode":"live"}`; 409 if not running.
+- `POST /api/sim/action` `{"type": "calm|stage|surge|attract|shove|exit|disperse|spawn", ...}` → 200 `{"ok":true}` or 400 `{"error"}` (also when not running). Fields: `surge` `strength` 0..1 (default 0.7); `attract` `x, y`; `shove` `x, y, dx, dy` (direction, any length; optional `strength` 0..1, default 0.7); `exit` `id, open`; `spawn` `x, y, n` (1–200). x, y must be inside the venue.
+- `GET /api/sim` → `{"running", "t", "people", "phones", "participation", "action", "exits": [{"id","name","x0","y0","x1","y1","open"}], "walls": [[x0,y0,x1,y1], ...], "truth": {"maxDensity", "maxPressure", "crushing", "dangerAt", "alertAt", "leadSeconds"}}`. Not running: only `running:false`, `exits`, `walls` (the venue layout). Truth times are s since start, `null` until they happen; `leadSeconds` = `dangerAt − alertAt` (positive = Pulse warned first) once both have happened. `maxDensity` = highest people within 1 m ÷ π m²; `crushing` = people ≥ 1600 N/m or > 6 /m²; `dangerAt` = start of the first ≥ 1 s stretch with ≥ 3 people ≥ 1600 N/m or ≥ 5 people > 6 /m²; `alertAt` = Pulse's first red alert (wave or density) in the sim pipeline.
+- Exit ids: `exit-bl`, `exit-br` (bottom corners), `exit-l`, `exit-r` (side walls). `walls` are the static walls including the stage pit (barrier 1.5 m from the top across the middle 60 %); exits are drawn from `exits` (closed = a wall).
 
 ## Clock sync
 
