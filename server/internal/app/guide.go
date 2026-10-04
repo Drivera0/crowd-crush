@@ -87,7 +87,8 @@ func (a *App) guideLocked(p *pipeline, now int64, sim bool) {
 			}
 		}
 		wave := pr.Status == protocol.StatusWave
-		if !red && !wave && !inCluster[pr.ID] {
+		// Packed in (packed.go) is danger too, whatever its cluster says.
+		if !red && !wave && !inCluster[pr.ID] && p.packed[pr.ID].Level != protocol.LevelRed {
 			continue
 		}
 		g := crowd.GuideIn{ID: pr.ID, X: m.x, Y: m.y, Acc: m.acc, Reason: protocol.ReasonDensity, Leave: out}

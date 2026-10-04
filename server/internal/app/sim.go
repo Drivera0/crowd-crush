@@ -145,10 +145,18 @@ func (a *App) startSimAt(req SimStart, now int64) error {
 	cfg.Participation = req.Participation
 	s := &simRun{w: w, p: newPipeline(cfg), startMs: now, alertAt: -1, messy: !rl.Ideal()}
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	if a.sim != nil {
+		a.mu.Unlock()
 		return errSimRunning
 	}
+	// A new run starts with a clean log: nothing from the last simulation
+	// (or a replay it replaces) lingers.
+	dropped := a.dropSourceLocked("sim")
+	if d := a.dropSourceLocked("replay"); d != nil {
+		dropped = d
+	}
+	defer a.broadcastDropped(dropped)
+	defer a.mu.Unlock()
 	a.applyZones(s.p)
 	a.locAttach(s.p, true, now)
 	a.replay = nil
@@ -163,11 +171,14 @@ func (a *App) startSimAt(req SimStart, now int64) error {
 // StopSim returns to live data.
 func (a *App) StopSim() error {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	if a.sim == nil {
+		a.mu.Unlock()
 		return errSimStopped
 	}
 	a.sim = nil
+	dropped := a.dropSourceLocked("sim") // its alerts were never real
+	a.mu.Unlock()
+	a.broadcastDropped(dropped)
 	log.Printf("sim stopped, back to live")
 	return nil
 }

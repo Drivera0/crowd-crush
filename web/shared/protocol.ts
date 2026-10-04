@@ -149,6 +149,15 @@ export interface Node {
   real?: boolean;
   /** Connected but not located yet (no x/y, no accepted GPS fix): x, y mean nothing and it counts toward nothing. Keep it off the map. */
   unplaced?: boolean;
+  /**
+   * How packed in this person is, next to the motion status (a still phone in a crush has status "ok").
+   * dens: estimated people/m² around the phone; press: its level with the cluster thresholds, absent = calm;
+   * crush: dens on a 0..1 scale for drawing (0.35 at the watch density, 0.7 at danger, 1 at 1.5 × danger).
+   * All absent for a phone that counts toward no density (stale, outside, unplaced, lost).
+   */
+  dens?: number;
+  press?: 'yellow' | 'red';
+  crush?: number;
   status: NodeStatus;
   sway: number;
   rtt: number;
@@ -257,7 +266,8 @@ export interface EvalReport {
 
 /** Simulated people (only in mode "sim"): [x, y, pressure N/m, hasPhone 0|1]. */
 export interface SimFrame {
-  bodies: [number, number, number, number][];
+  /** Everyone as [x, y, pressure N/m, hasPhone 0|1, density people/m²]; density (people within 1 m ÷ the open part of that disc) is absent on older servers. */
+  bodies: [number, number, number, number, number?][];
   t: number;
   action: string;
   /** How far the positions Pulse uses are from where the simulated people stand, once a second (shared/locate.ts). */
@@ -323,6 +333,68 @@ export interface Alert {
   note?: string;
   /** Still unacknowledged after the escalation delay: re-announced. */
   escalated?: boolean;
+  /**
+   * Where the data that raised it came from when that is not the live crowd: the crowd simulation or a saved
+   * run. Absent for live alerts and drills. These alerts leave the log when the simulation or run stops.
+   */
+  source?: 'sim' | 'replay';
+}
+
+// ---- alert drills (POST /api/test-alert, GET /api/drill) ----
+
+/** Body of POST /api/test-alert; {} is the old one-button test alert. */
+export interface DrillRequest {
+  zone?: string;
+  level?: 'yellow' | 'red';
+  kind?: 'wave' | 'density' | 'rule';
+  outputs?: { briefing?: boolean; voice?: boolean; sign?: boolean; lights?: string[] };
+}
+
+/** What one output did in a drill. key: briefing | voice | sign | light:<letter>. */
+export interface DrillOutput {
+  key: string;
+  label: string;
+  state: 'ok' | 'failed' | 'skipped' | 'pending';
+  note?: string;
+}
+
+/** One drill and what came of it (also the response of POST /api/test-alert). */
+export interface DrillRecord {
+  id: string;
+  t: number;
+  zone: string;
+  where: string;
+  level: 'yellow' | 'red';
+  kind: string;
+  outputs: DrillOutput[];
+  brief?: string;
+  audioUrl?: string;
+}
+
+/** An output's readiness before a drill is sent. */
+export interface DrillReady {
+  key: string;
+  label: string;
+  state: 'ready' | 'fallback' | 'offline' | 'none';
+  note?: string;
+  areas?: string[];
+}
+
+/** A place a drill can be sent to; sign / voice false = switched off there by the area's alert rules. */
+export interface DrillZone {
+  id: string;
+  name: string;
+  custom: boolean;
+  light?: string;
+  sign: boolean;
+  voice: boolean;
+}
+
+/** GET /api/drill */
+export interface DrillStatus {
+  zones: DrillZone[];
+  outputs: DrillReady[];
+  history: DrillRecord[];
 }
 
 export interface Alerts {
@@ -344,6 +416,9 @@ export interface Config {
   neighbourRadius: number;
   /** The demo spot is on (GET /api/demo): the server places a phone that joins without a position. */
   demo?: boolean;
+  /** The venue size the server starts with when nothing is saved (used when an event's data is cleared). */
+  defaultW?: number;
+  defaultH?: number;
 }
 
 /** Fixed features of the venue, in venue metres. */
@@ -471,7 +546,7 @@ export type SimAction =
   | { type: 'calm' | 'stage' | 'disperse' | 'dance' | 'intermission' }
   | { type: 'surge'; strength: number }
   | { type: 'attract'; x: number; y: number }
-  | { type: 'shove'; x: number; y: number; dx: number; dy: number }
+  | { type: 'shove'; x: number; y: number; dx: number; dy: number; strength?: number }
   | { type: 'exit'; id: string; open: boolean }
   | { type: 'spawn'; x: number; y: number; n: number };
 

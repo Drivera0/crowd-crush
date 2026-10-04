@@ -51,7 +51,7 @@ The dashboard header shows which services are live.
 3. Someone checks their phone → that node goes **blue** (handling: readings ignored).
 4. Everyone jumps together → nodes may go **yellow** (swaying) but no wave edges, zone stays calm.
 5. Push the end of the line repeatedly → pulses race along the edges, nodes go **red**, zone goes red, the briefing plays, the sign flashes.
-6. Safety net: **Replay** → `sim-wave.jsonl` (or a recorded real run) plays through the same pipeline. **Test alert** fires the whole alert chain on demand.
+6. Safety net: **Simulation → Saved runs** → `sim-wave` (or a recorded real run) plays through the same pipeline. **Alert drill → Send drill** fires the alert chain on demand and reports what each output did.
 
 Record real runs early with **Record run** and a label that says what happened (`wave-push-end`, `dance-jumping`, `calm-standing`): they land in `recordings/`, show up in the replay picker, and `go test ./server/internal/app` checks each one reaches the level its label promises.
 

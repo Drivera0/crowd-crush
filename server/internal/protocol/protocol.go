@@ -226,6 +226,19 @@ type Node struct {
 	Raw  *Point   `json:"raw,omitempty"`
 	Loc  []string `json:"loc,omitempty"`
 	Lost bool     `json:"lost,omitempty"`
+	// How packed in this person is (crowd/packed.go), next to the motion
+	// status: a still phone in the middle of a crush has status "ok". Dens:
+	// estimated people per m² around the phone (phones within 1.5 m ÷ the
+	// part of that disc people can stand on ÷ participation, smoothed; one
+	// decimal). Press: its level, with the cluster thresholds (densityWatch,
+	// densityDanger), hold and hysteresis. Crush: Dens on a 0..1 scale for
+	// drawing (0 up to half the watch density, 0.35 at watch, 0.7 at danger,
+	// 1 at 1.5 × danger). All absent for a phone that counts toward no
+	// density (stale, outside, unplaced, lost, disconnected); Press and
+	// Crush are also absent when calm / 0.
+	Dens  float64 `json:"dens,omitempty"`
+	Press string  `json:"press,omitempty"`
+	Crush float64 `json:"crush,omitempty"`
 }
 
 // Point is [x, y] in venue metres.
@@ -521,6 +534,12 @@ type Alert struct {
 	ResolvedBy string `json:"resolvedBy,omitempty"`
 	Note       string `json:"note,omitempty"`
 	Escalated  bool   `json:"escalated,omitempty"` // red and unacknowledged past the escalation delay
+	// Source: where the data that raised it came from when that is not the
+	// live crowd: "sim" (the crowd simulation) or "replay" (a saved run).
+	// Absent for live alerts and drills. Alerts of a simulation or replay
+	// leave the log when it stops, restarts or is replaced (the dashboards
+	// get the new log as an alerts message).
+	Source string `json:"source,omitempty"`
 }
 
 // JoinInfo is GET /api/join: the URL phones should open (the QR code) and
@@ -549,6 +568,10 @@ type Config struct {
 	// Demo: the demo spot is on (GET /api/demo): a phone that joins is
 	// placed by the server, so the phone page skips GPS and the map.
 	Demo bool `json:"demo,omitempty"`
+	// DefaultW, DefaultH: the venue size the server starts with when
+	// nothing is saved (flags / VENUE_W, VENUE_H, else the detector's).
+	DefaultW float64 `json:"defaultW"`
+	DefaultH float64 `json:"defaultH"`
 }
 
 // Sample is one 100 ms motion summary as the server received it.
@@ -585,11 +608,12 @@ type NodeDetail struct {
 // ---- Crowd simulation (mode "sim") ----
 
 // SimFrame is the snapshot's sim field while mode is "sim": every simulated
-// person as [x, y, pressure N/m, hasPhone 0|1] (x, y to the centimetre,
-// pressure in whole N/m), the sim time (s since start) and the last
-// behaviour action.
+// person as [x, y, pressure N/m, hasPhone 0|1, density /m²] (x, y to the
+// centimetre, pressure in whole N/m, density = people within 1 m ÷ the open
+// part of that disc, to one decimal), the sim time (s since start) and the
+// last behaviour action.
 type SimFrame struct {
-	Bodies [][4]float64 `json:"bodies"`
+	Bodies [][5]float64 `json:"bodies"`
 	T      float64      `json:"t"`
 	Action string       `json:"action"`
 	// Loc: how far the positions Pulse uses for the simulated phones are
