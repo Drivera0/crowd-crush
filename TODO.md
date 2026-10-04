@@ -8,7 +8,10 @@ Ordered by value per hour. Judging: technical complexity · design · pitch · o
 ## Next
 1. [ ] **"Move this way" on the attendee's phone** (~2–3 h). When a cluster gets too dense or a push travels through it, the server works out the least crowded direction for each affected phone, and its screen turns red with an arrow. Judging moment: the judge scans the QR, their phone becomes a dot, we push the line, their phone tells them where to go.
 2. [ ] **"Why did it fire?" panel + proof numbers** (~2 h). Click a red link: both phones' motion traces overlaid, the cross-correlation curve and its peak lag. Evaluation card: every simulated scenario × 20 random crowds → false alarms and time to detect, including what still fails.
-3. [ ] **Sign over USB instead of Wi-Fi** (~1 h). The sign is plugged into the laptop at the demo, so the server writes `red B` / `calm` down the USB serial cable (`SIGN_URL=serial:auto` finds the board). No Wi-Fi, no IP addresses, nothing for the school network to break. Wi-Fi stays as an option for a sign across the room.
+3. [ ] **Sign works anywhere: USB or wireless, no setup at the venue** (~1.5 h).
+   - **USB:** plugged into the laptop, the server writes `red B` / `calm` down the serial cable (`SIGN_URL=serial:auto`).
+   - **Wireless on a power bank:** the sketch remembers two Wi-Fi networks (home + phone hotspot) and joins whichever is there. It answers `GET /pulse` so the server can find it on the local network by itself (`SIGN_URL=auto`). Discovery works when the server runs natively (the Mac); inside WSL, keep the explicit IP.
+   - Power bank: test 10–15 min first; some switch off when the draw is this low.
 4. [ ] **Google Home Mini speaks the alert** (~1 h). Cast the ElevenLabs briefing to the Home Mini on the same Wi-Fi (no jailbreak). Sign + speaker on the table → Surge Choice, Best Hardware, MLH ElevenLabs.
 
 ## Cheap wins (< 1 h each)
@@ -30,7 +33,8 @@ The demo runs on the **MacBook**, on a different network from home. Nothing belo
 - [ ] Go 1.25+, Node 20+, cloudflared installed (`brew install go node cloudflared`).
 - [ ] Repo cloned, on the right branch, `make build` succeeds.
 - [ ] `.env` copied to the Mac by hand (AirDrop / USB). Never through git or chat. `./bin/pulse -check` is all green.
-- [ ] Arduino plugged into the Mac and found (USB serial mode), test alert flashes it.
+- [ ] Sign: hotspot name/password in `arduino/sign/arduino_secrets.h` (second network), reflashed once.
+- [ ] Sign test both ways: plugged into the Mac (USB), then on the power bank over the hotspot; test alert flashes it each time.
 
 **Network**
 - [ ] Plan for the demo network: the phone hotspot (iPhone: Maximize Compatibility on) for the Mac and any Wi-Fi devices; attendees' phones can use any network or mobile data.
