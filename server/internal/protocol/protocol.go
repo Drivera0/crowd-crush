@@ -165,6 +165,34 @@ type Area struct {
 	Name string  `json:"name"`
 	Sens string  `json:"sens"` // normal | high
 	Poly []Point `json:"poly"`
+	// Light is the zone light that shows this area's level: the letter it has
+	// in SIGN_URL ("A" for A=http://…). Empty = no light.
+	Light string `json:"light,omitempty"`
+}
+
+// Hardware is GET /api/hardware: one entry per sign or zone light in SIGN_URL,
+// checked every few seconds.
+type Hardware struct {
+	Name     string   `json:"name"` // "Sign", "Zone light A"
+	Kind     string   `json:"kind"` // sign | zone-light (as the board reports it)
+	URL      string   `json:"url"`
+	Zone     string   `json:"zone,omitempty"` // light letter; "" = follows the worst zone
+	Online   bool     `json:"online"`
+	LastSeen int64    `json:"lastSeen,omitempty"` // server ms
+	Error    string   `json:"error,omitempty"`
+	RSSI     int      `json:"rssi,omitempty"`   // Wi-Fi signal, dBm
+	Uptime   int64    `json:"uptime,omitempty"` // seconds since the board booted
+	Level    string   `json:"level,omitempty"`  // what the board is showing
+	BLE      *BLEScan `json:"ble,omitempty"`    // Bluetooth crowd counter, if the board has one
+	Areas    []string `json:"areas,omitempty"`  // names of the areas this light shows
+}
+
+// BLEScan is a zone light's latest Bluetooth count (counts only, no addresses).
+type BLEScan struct {
+	Devices int   `json:"devices"`
+	Near    int   `json:"near"` // strong signal: roughly within a few metres
+	Scans   int64 `json:"scans"`
+	Age     int64 `json:"age"` // seconds since the last scan finished
 }
 
 // Cluster is a group of phones standing close together.

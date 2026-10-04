@@ -9,7 +9,9 @@ package sign
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -78,6 +80,86 @@ func (c *Client) Describe() string {
 		parts = append(parts, fmt.Sprintf("%s (%s)", t.base, who))
 	}
 	return strings.Join(parts, ", ")
+}
+
+// Zones lists the zone keys of the per-zone lights (A, B, …), in SIGN_URL order.
+func (c *Client) Zones() []string {
+	if !c.Enabled() {
+		return nil
+	}
+	var out []string
+	for _, t := range c.targets {
+		if t.zone != "" {
+			out = append(out, t.zone)
+		}
+	}
+	return out
+}
+
+// Status is what a board said when probed.
+type Status struct {
+	URL    string
+	Zone   string // "" = follows the worst zone
+	Online bool
+	Err    string
+	// From GET /pulse, when the firmware has it (older sign firmware only
+	// answers /level, which still counts as online).
+	Pulse *Pulse
+}
+
+// Pulse is a board's GET /pulse report.
+type Pulse struct {
+	Kind   string `json:"kind"`
+	Level  string `json:"level"`
+	RSSI   int    `json:"rssi"`
+	Uptime int64  `json:"uptime"`
+	BLE    *struct {
+		Devices int   `json:"devices"`
+		Near    int   `json:"near"`
+		Scans   int64 `json:"scans"`
+		Age     int64 `json:"age"`
+	} `json:"ble"`
+}
+
+// Probe asks every board for GET /pulse, concurrently, within ctx.
+func (c *Client) Probe(ctx context.Context) []Status {
+	if !c.Enabled() {
+		return nil
+	}
+	out := make([]Status, len(c.targets))
+	var wg sync.WaitGroup
+	for i, t := range c.targets {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			out[i] = t.probe(ctx)
+		}()
+	}
+	wg.Wait()
+	return out
+}
+
+func (t *target) probe(ctx context.Context) Status {
+	st := Status{URL: t.base, Zone: t.zone}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.base+"/pulse", nil)
+	if err != nil {
+		st.Err = err.Error()
+		return st
+	}
+	resp, err := t.http.Do(req)
+	if err != nil {
+		st.Err = "not reachable"
+		return st
+	}
+	defer resp.Body.Close()
+	st.Online = true // any HTTP answer means the board is up
+	if resp.StatusCode == http.StatusOK {
+		var p Pulse
+		if json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&p) == nil && p.Kind != "" {
+			st.Pulse = &p
+		}
+	}
+	return st
 }
 
 // Update shows the current levels: per-zone signs get their zone, the others

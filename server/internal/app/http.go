@@ -59,6 +59,9 @@ func (a *App) Routes(mux *http.ServeMux) {
 		}
 		writeJSON(w, out)
 	})
+	mux.HandleFunc("GET /api/hardware", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, a.Hardware())
+	})
 	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]bool{
 			"gemini":     a.opt.Brief.Enabled(),

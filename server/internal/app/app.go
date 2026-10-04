@@ -194,7 +194,8 @@ type App struct {
 	msgRate   float64
 	sentState map[string]protocol.PhoneState
 	sentAt    map[string]int64
-	signHold  int64 // test alert keeps the sign red until this time
+	signHold  int64               // test alert keeps the sign red until this time
+	hw        []protocol.Hardware // latest board status, see hardware.go
 }
 
 // New creates the app and its hub, loading saved areas and venue from
@@ -427,6 +428,7 @@ func (a *App) Run(ctx context.Context) {
 			}
 		}()
 	}
+	go a.watchHardware(ctx)
 	det := time.NewTicker(DetectEvery)
 	snap := time.NewTicker(SnapshotEvery)
 	st := time.NewTicker(PhoneStateEvery)
@@ -517,6 +519,7 @@ func (a *App) detectTick(now int64) {
 		pend = append(pend, pa)
 	}
 	zoneLevels, signLevel, signZone := alertLevels(active)
+	a.lightLevels(zoneLevels, a.opt.Sign.Zones())
 	hold := now < a.signHold
 	a.mu.Unlock()
 
@@ -639,10 +642,14 @@ func (a *App) TestAlert() string {
 		info.Direction, info.LagMs = "+x", 250
 	}
 	a.signHold = now + 8000
+	light := a.lightFor(zone)
 	a.mu.Unlock()
 
 	a.pushAlert(protocol.Alert{Type: protocol.TypeAlert, T: now, Kind: protocol.KindWave, Zone: zone, Level: protocol.LevelRed, Score: lastScore(info), Test: true})
 	a.opt.Sign.Force(protocol.LevelRed, zone)
+	if light != "" {
+		a.opt.Sign.Force(protocol.LevelRed, light)
+	}
 	go a.briefAndSpeak(info, true, false)
 	return zone
 }
