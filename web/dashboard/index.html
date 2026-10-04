@@ -422,10 +422,21 @@
                 <div class="card-head"><h3>System health</h3></div>
                 <div class="sys">
                   <div><b id="cRate">0</b><span>messages / s</span></div>
+                  <div><b id="cDetect">–</b><span>ms per detector step</span></div>
+                  <div><b id="cSnap">–</b><span>KB per dashboard update</span></div>
                   <div><b id="cWaves">0</b><span>wave links</span></div>
                   <div><b id="mLinks">0</b><span>mesh links</span></div>
                   <div><b id="mHops">0</b><span>mesh hops / s</span></div>
                 </div>
+              </div>
+              <div class="card" id="evalCard">
+                <div class="card-head"><h3>Detector evaluation</h3><span id="evalMeta" class="meta"></span></div>
+                <div id="evalSummary" class="eval-summary"><p class="muted small">Run <span class="mono">make eval</span> to generate the evaluation report.</p></div>
+                <table id="evalTable" class="eval-table" hidden>
+                  <thead><tr><th>Scenario</th><th>Layout</th><th>Should</th><th>Red</th><th>Yellow</th><th>Calm</th><th>Median to red</th></tr></thead>
+                  <tbody></tbody>
+                </table>
+                <p class="muted small">Simulated motion and thresholds tuned on the same simulator: evidence the method works, not real-world validation.</p>
               </div>
               <div class="card">
                 <div class="card-head"><h3>Privacy</h3></div>
@@ -531,6 +542,25 @@
               <svg viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z" /></svg>
               Collected: a random session ID, the attendee's spot on the venue map, and 10 motion summaries a second. GPS is turned into venue metres and never stored. No name, contacts, audio or photos.
             </p>
+          </aside>
+
+          <aside id="explain" class="drawer" hidden aria-label="Why the detector flagged this link">
+            <div class="d-head">
+              <div>
+                <div class="d-title">Why did it fire?</div>
+                <div class="d-sub" id="exPair">–</div>
+              </div>
+              <span id="exVerdict" class="st"></span>
+              <button id="exClose" class="icon-btn sm-icon" aria-label="Close">✕</button>
+            </div>
+            <p id="exSummary" class="d-explain"></p>
+            <h4>Side-to-side motion of both phones</h4>
+            <div class="d-chart"><div class="dc-head"><span><i class="lg ok"></i> <span id="exA">A</span> &nbsp; <i class="lg handling"></i> <span id="exB">B</span></span><b id="exWin">6 s</b></div><canvas id="exTrace" style="height:90px"></canvas></div>
+            <h4>Cross-correlation: how alike they are at each delay</h4>
+            <div class="d-chart"><div class="dc-head"><span>delay (ms)</span><b id="exPeak">–</b></div><canvas id="exCorr" style="height:110px"></canvas></div>
+            <h4>The detector's checks</h4>
+            <ul id="exChecks" class="ex-checks"></ul>
+            <p class="d-privacy">A push travels person to person: the second phone repeats the first one's motion a fraction of a second later. Moving together (dancing) has no delay; walking repeats every step, so it has several equally good delays.</p>
           </aside>
 
           <div id="qr" hidden>

@@ -74,6 +74,8 @@ export class Areas {
    */
   pick: { label: string; arrow: boolean; done: (p: { x: number; y: number; dx: number; dy: number }) => void } | null = null;
   private pickDrag: { x0: number; y0: number; x1: number; y1: number } | null = null;
+  /** Fires when a neighbour link is clicked (no phone under the pointer). */
+  onLink: (from: string, to: string) => void = () => {};
   /** Fires when a board marker is dropped at a new spot (venue metres). */
   onBoardMoved: (key: string, x: number, y: number) => void = () => {};
 
@@ -425,6 +427,11 @@ export class Areas {
       this.canvas.style.cursor = '';
       // A click (not a drag) picks a phone, or clears the selection.
       if (press && !press.moved) {
+        const link = press.node ? null : this.mesh.linkUnder(press.x, press.y);
+        if (link) {
+          this.onLink(link[0], link[1]);
+          return;
+        }
         this.onNode(press.node);
         if (!press.node) this.select(null);
       }

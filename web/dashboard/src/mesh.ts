@@ -186,6 +186,24 @@ export class Mesh {
     this.boards = list;
   }
 
+  /** The neighbour link under a screen point (within a few px), wave links first. */
+  linkUnder(sx: number, sy: number): [string, string] | null {
+    const { x, y } = this.toWorld(sx, sy);
+    const tol = 7 / this.view.k;
+    const near = (a: Body, b: Body) => {
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const L = dx * dx + dy * dy || 1;
+      const t = Math.max(0, Math.min(1, ((x - a.x) * dx + (y - a.y) * dy) / L));
+      return Math.hypot(a.x + t * dx - x, a.y + t * dy - y);
+    };
+    for (const w of this.waves) {
+      const a = this.bodies.get(w.from), b = this.bodies.get(w.to);
+      if (a && b && near(a, b) < tol) return [w.from, w.to];
+    }
+    for (const l of this.links) if (near(l.a, l.b) < tol) return [l.a.id, l.b.id];
+    return null;
+  }
+
   /** Board key ("sign" or a light letter) under a screen point, if markers are shown. */
   boardAt(sx: number, sy: number): string | null {
     if (!this.showBoards) return null;
@@ -990,7 +1008,7 @@ export class Mesh {
       g.stroke();
       g.setLineDash([]);
       const arrow = c.trend === 'forming' ? ' ↑' : c.trend === 'dispersing' ? ' ↓' : '';
-      const label = `${c.people ?? c.count} people · ${c.density.toFixed(1)}/m²${arrow}`;
+      const label = `${c.people ?? c.count} people · ${c.density.toFixed(1)}/m²${arrow}${c.eta != null ? ` · danger in ~${Math.round(c.eta)} s` : ''}`;
       g.font = '600 11px Inter, system-ui, sans-serif';
       const tw = g.measureText(label).width;
       g.fillStyle = light ? 'rgba(255,255,255,0.9)' : 'rgba(10,14,21,0.8)';

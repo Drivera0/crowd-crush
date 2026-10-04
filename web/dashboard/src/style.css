@@ -586,6 +586,23 @@ b.bump { animation: bump 400ms ease-out; }
 .svc { font-size: 12px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line-strong); color: var(--muted); }
 .svc.on { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent); background: var(--ok-soft); }
 
+/* why did it fire */
+.ex-checks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.ex-checks li { display: grid; grid-template-columns: 18px 1fr; gap: 6px; }
+.ex-checks .ok { color: var(--ok); font-weight: 700; }
+.ex-checks .no { color: var(--wave); font-weight: 700; }
+.ex-checks small { display: block; color: var(--muted); }
+
+/* evaluation */
+.eval-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 10px; }
+.eval-summary div { display: flex; flex-direction: column; }
+.eval-summary b { font-size: 22px; font-weight: 600; letter-spacing: -0.02em; }
+.eval-summary span { font-size: 12px; color: var(--muted); }
+.eval-table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-bottom: 8px; }
+.eval-table th { text-align: left; font-weight: 500; color: var(--muted); padding: 4px 6px; border-bottom: 1px solid var(--line); }
+.eval-table td { padding: 4px 6px; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+.eval-table tr.bad td { color: var(--wave); }
+
 /* ================================================================ toasts */
 #toasts { position: fixed; right: 20px; bottom: 20px; display: flex; flex-direction: column; gap: 8px; z-index: 50; align-items: flex-end; }
 .toast {

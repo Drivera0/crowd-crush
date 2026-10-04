@@ -54,6 +54,16 @@
           <h2 id="headline">Hold your phone flat against your chest</h2>
           <p id="sub" class="lead">Screen facing out, top of the phone up.</p>
         </div>
+        <!-- Shown over everything when the server says this person should move. -->
+        <div id="guide" class="guide" hidden>
+          <p class="guide-kicker">Crowd danger near you</p>
+          <h2 class="guide-title">Move this way</h2>
+          <div class="arrow-wrap"><svg id="arrow" class="arrow" viewBox="0 0 100 100" aria-hidden="true"><path d="M50 6 L84 50 H62 V94 H38 V50 H16 Z" /></svg></div>
+          <p id="guideTo" class="guide-to"></p>
+          <canvas id="miniMap" class="mini-map" width="240" height="160" aria-label="Where you are and which way to go"></canvas>
+          <p id="guideNote" class="guide-note"></p>
+          <p class="guide-tip">Move diagonally, not against the push. Keep your arms up in front of your chest.</p>
+        </div>
         <div class="bottom">
           <p id="stats" class="fine"></p>
           <p id="warn" class="err" hidden></p>
