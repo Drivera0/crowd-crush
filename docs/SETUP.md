@@ -59,7 +59,9 @@ Until DNS is ready: `cloudflared tunnel --url http://localhost:8080` gives a ran
 
 **Wi-Fi:** venue Wi-Fi usually blocks device-to-device traffic and is often 5 GHz only. Put the laptop and the boards on your **phone's hotspot** (2.4 GHz / "maximize compatibility" on iPhone). Put the SSID and password in each board's `arduino_secrets.h` (copy from `arduino_secrets.h.example`).
 
-**Arduino Uno R4 WiFi** (`arduino/sign/sign.ino`): Arduino IDE → Boards Manager → install **Arduino UNO R4 Boards** → board "Arduino UNO R4 WiFi" → pick the port → Upload. Open Serial Monitor at 115200 and copy `SIGN_URL=http://…`. It shows the worst zone: heartbeat / `!` / flashing arrow + STOP.
+**Arduino Uno R4 WiFi, one command on Windows:** fill in `arduino/sign/arduino_secrets.h`, plug the board in, then run `pwsh scripts/flash-sign.ps1`. It finds the board, compiles and uploads with the Arduino IDE's bundled `arduino-cli`, reads the sign's IP from the serial port and writes `SIGN_URL` into `.env`. Already flashed? `pwsh scripts/flash-sign.ps1 -NoUpload` just reads the IP again.
+
+**Arduino Uno R4 WiFi, by hand** (`arduino/sign/sign.ino`): Arduino IDE → Boards Manager → install **Arduino UNO R4 Boards** → board "Arduino UNO R4 WiFi" → pick the port → Upload. Open Serial Monitor at 115200 and copy `SIGN_URL=http://…`. It shows the worst zone: heartbeat / `!` / flashing arrow + STOP.
 
 **ESP32 DevKit V1 ×2** (`arduino/zone-light/zone-light.ino`), one per zone: Boards Manager → install **esp32 by Espressif** → board "ESP32 Dev Module" → Upload (hold **BOOT** if it sticks at "Connecting…"; on Windows you may need the CP210x USB driver). The onboard blue LED works without wiring; optional LEDs go on GPIO 25/26/27 and a buzzer on 14.
 
