@@ -100,6 +100,7 @@ func crushScript(r *simRunner, rng *rand.Rand) func(s int) {
 // TestSimCrushRaisesRed: surge plus repeated shoves reach a red alert, and
 // the lead time is computed from the two recorded times.
 func TestSimCrushRaisesRed(t *testing.T) {
+	t.Parallel()
 	r := startSim(t, 250, 1)
 	r.until(70, crushScript(r, rand.New(rand.NewSource(1))))
 	reds := r.reds()
@@ -112,7 +113,7 @@ func TestSimCrushRaisesRed(t *testing.T) {
 		t.Fatalf("truth incomplete: %+v", tr)
 	}
 	first := float64(reds[0].T-simT0) / 1000
-	if math.Abs(*tr.AlertAt-first) > 0.05 {
+	if math.Abs(*tr.AlertAt-first) > 0.051 { // alertAt is rounded to 0.1 s
 		t.Errorf("alertAt %.2f, first red alert at %.2f", *tr.AlertAt, first)
 	}
 	if want := math.Round((*tr.DangerAt-*tr.AlertAt)*10) / 10; math.Abs(*tr.LeadSeconds-want) > 1e-9 {
@@ -127,6 +128,7 @@ func TestSimCrushRaisesRed(t *testing.T) {
 
 // TestSimCalmStaysCalm: a minute of concert idling raises no red alert.
 func TestSimCalmStaysCalm(t *testing.T) {
+	t.Parallel()
 	r := startSim(t, 250, 2)
 	r.until(60, nil)
 	if reds := r.reds(); len(reds) > 0 {
@@ -147,6 +149,7 @@ func TestSimCalmStaysCalm(t *testing.T) {
 
 // TestSimAttractNoWave: a group forming (not pushing) raises no red wave alert.
 func TestSimAttractNoWave(t *testing.T) {
+	t.Parallel()
 	r := startSim(t, 250, 3)
 	r.until(60, func(s int) {
 		if s == 5 {
@@ -224,7 +227,8 @@ func TestSimAPI(t *testing.T) {
 	good := []string{
 		`{"type":"stage"}`, `{"type":"surge","strength":0.7}`, `{"type":"attract","x":12,"y":10}`,
 		`{"type":"shove","x":12,"y":4,"dx":0,"dy":-1}`, `{"type":"exit","id":"exit-bl","open":false}`,
-		`{"type":"spawn","x":12,"y":12,"n":10}`, `{"type":"disperse"}`, `{"type":"calm"}`,
+		`{"type":"spawn","x":12,"y":12,"n":10}`, `{"type":"disperse"}`, `{"type":"dance"}`, `{"type":"intermission"}`,
+		`{"type":"calm"}`,
 	}
 	for _, body := range good {
 		if code := do(t, "POST", srv.URL+"/api/sim/action", body, nil); code != 200 {
@@ -366,6 +370,7 @@ func TestSimLeadSweep(t *testing.T) {
 // TestSimRunLoop runs the real loop (real clock) with HTTP-style calls
 // racing it; run with -race.
 func TestSimRunLoop(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("real time")
 	}
@@ -396,5 +401,177 @@ func TestSimRunLoop(t *testing.T) {
 	}
 	if err := a.StopSim(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// simReport runs a script and summarises what Pulse said: red alerts by
+// kind, the worst zone level, how many phones were ever "swaying" or in a
+// wave at once, and the truth's highest density over the run.
+type simReport struct {
+	reds                map[string]int
+	yellowDensity       int
+	maxSwaying, maxWave int
+	maxTruthDensity     float64
+	maxPressure         float64
+	dangerAt            *float64
+}
+
+func runReport(r *simRunner, end float64, script func(int)) simReport {
+	rep := simReport{reds: map[string]int{}}
+	r.until(end, func(s int) {
+		if script != nil {
+			script(s)
+		}
+		r.a.mu.Lock()
+		sw, wv := 0, 0
+		for _, ph := range r.a.sim.p.last.Phones {
+			switch ph.Status {
+			case protocol.StatusSwaying:
+				sw++
+			case protocol.StatusWave:
+				wv++
+			}
+		}
+		rep.maxSwaying, rep.maxWave = max(rep.maxSwaying, sw), max(rep.maxWave, wv)
+		r.a.mu.Unlock()
+		tr := r.a.SimStatus().Truth
+		rep.maxTruthDensity = math.Max(rep.maxTruthDensity, tr.MaxDensity)
+		rep.maxPressure = math.Max(rep.maxPressure, tr.MaxPressure)
+	})
+	for _, al := range r.reds() {
+		rep.reds[al.Kind]++
+	}
+	r.a.mu.Lock()
+	for _, al := range r.a.alerts {
+		if al.Kind == protocol.KindDensity && al.Level == protocol.LevelYellow && !al.Test {
+			rep.yellowDensity++
+		}
+	}
+	r.a.mu.Unlock()
+	rep.dangerAt = r.a.SimStatus().Truth.DangerAt
+	return rep
+}
+
+// TestSimDance: the whole crowd dancing to one beat, each with their own
+// delay, goes through the full pipeline without a red wave alert. Density
+// alerts are allowed only if the crowd is genuinely packed.
+func TestSimDance(t *testing.T) {
+	t.Parallel()
+	r := startSim(t, 250, 6)
+	rep := runReport(r, 60, func(s int) {
+		if s == 5 {
+			r.act(crowdsim.Action{Type: "dance"})
+		}
+	})
+	t.Logf("dance, 250 people, 55 s: red alerts %v, yellow density incidents %d; up to %d phones swaying and %d in a wave at once; truth max density %.1f /m², pressure %.0f N/m",
+		rep.reds, rep.yellowDensity, rep.maxSwaying, rep.maxWave, rep.maxTruthDensity, rep.maxPressure)
+	if rep.reds[protocol.KindWave] > 0 {
+		t.Errorf("dancing raised %d red wave alerts", rep.reds[protocol.KindWave])
+	}
+	if rep.reds[protocol.KindDensity] > 0 && rep.maxTruthDensity < 4 {
+		t.Errorf("red density alert while the crowd was at most %.1f /m²", rep.maxTruthDensity)
+	}
+	if rep.dangerAt != nil {
+		t.Errorf("dancing became dangerous at %.1f s", *rep.dangerAt)
+	}
+}
+
+// TestSimIntermission: the rush to the bar and toilets (and back) raises
+// no wave alert; crowding at the POIs may show as density.
+func TestSimIntermission(t *testing.T) {
+	t.Parallel()
+	r := startSim(t, 250, 7)
+	rep := runReport(r, 90, func(s int) {
+		if s == 5 {
+			r.act(crowdsim.Action{Type: "intermission"})
+		}
+	})
+	t.Logf("intermission, 250 people, 85 s: red alerts %v, yellow density incidents %d; up to %d phones swaying, %d in a wave; truth max density %.1f /m², pressure %.0f N/m",
+		rep.reds, rep.yellowDensity, rep.maxSwaying, rep.maxWave, rep.maxTruthDensity, rep.maxPressure)
+	if rep.reds[protocol.KindWave] > 0 {
+		t.Errorf("an intermission raised %d red wave alerts", rep.reds[protocol.KindWave])
+	}
+	if rep.dangerAt != nil {
+		t.Errorf("an intermission became dangerous at %.1f s", *rep.dangerAt)
+	}
+}
+
+// TestSimPositionCost measures what the sim phones' 10 Hz positions cost
+// the pipeline (env-gated): detect step and sim feed time per call at 250
+// and 500 people, for positions every 100 ms vs every 500 ms.
+// PULSE_POSCOST=1 go test ./server/internal/app -run SimPositionCost -v
+func TestSimPositionCost(t *testing.T) {
+	if os.Getenv("PULSE_POSCOST") == "" {
+		t.Skip("set PULSE_POSCOST=1")
+	}
+	defer func(v int) { crowdsim.PosEveryTicks = v }(crowdsim.PosEveryTicks)
+	for _, people := range []int{250, 500} {
+		for _, every := range []int{5, 25} {
+			crowdsim.PosEveryTicks = every
+			r := startSim(t, people, 1)
+			r.until(10, nil)                             // warm up: buffers full
+			r.act(crowdsim.Action{Type: "intermission"}) // plenty of walking
+			var det, feed []time.Duration
+			pos := 0
+			for end := r.sec() + 20; r.sec() < end-1e-9; {
+				r.now += 50
+				r.a.mu.Lock()
+				s := r.a.sim
+				r.a.mu.Unlock()
+				s.mu.Lock()
+				s.w.AdvanceTo(r.now)
+				ev := s.w.Events()
+				s.mu.Unlock()
+				for _, e := range ev {
+					if e.Kind == crowdsim.EvPos {
+						pos++
+					}
+				}
+				t0 := time.Now()
+				r.a.mu.Lock()
+				r.a.feedSim(s, ev, r.now)
+				r.a.mu.Unlock()
+				feed = append(feed, time.Since(t0))
+				if (r.now-simT0)%int64(DetectEvery/1e6) == 0 {
+					t0 := time.Now()
+					r.a.detectTick(r.now)
+					det = append(det, time.Since(t0))
+				}
+			}
+			q := func(d []time.Duration, p float64) time.Duration {
+				sort.Slice(d, func(i, j int) bool { return d[i] < d[j] })
+				return d[int(p*float64(len(d)-1))]
+			}
+			mean := func(d []time.Duration) time.Duration {
+				var s time.Duration
+				for _, v := range d {
+					s += v
+				}
+				return s / time.Duration(len(d))
+			}
+			t.Logf("%d people (%d phones), positions every %d ms: %.0f pos/s; detect step mean %v p95 %v; feed per 50 ms mean %v p95 %v",
+				people, r.a.SimStatus().Phones, every*20, float64(pos)/20, mean(det), q(det, 0.95), mean(feed), q(feed, 0.95))
+		}
+	}
+}
+
+// TestSimBehaviourSweep prints what Pulse says about the harmless
+// behaviours over seeds (env-gated):
+// PULSE_SIMSWEEP=1 go test ./server/internal/app -run SimBehaviourSweep -v
+func TestSimBehaviourSweep(t *testing.T) {
+	if os.Getenv("PULSE_SIMSWEEP") == "" {
+		t.Skip("set PULSE_SIMSWEEP=1")
+	}
+	for _, act := range []string{"calm", "dance", "intermission"} {
+		for seed := int64(1); seed <= 3; seed++ {
+			r := startSim(t, 250, seed)
+			rep := runReport(r, 120, func(s int) {
+				if s == 5 && act != "calm" {
+					r.act(crowdsim.Action{Type: act})
+				}
+			})
+			t.Logf("%-12s seed %d: red %v, yellow density incidents %d, max %d swaying / %d wave phones, truth max density %.1f /m²",
+				act, seed, rep.reds, rep.yellowDensity, rep.maxSwaying, rep.maxWave, rep.maxTruthDensity)
+		}
 	}
 }

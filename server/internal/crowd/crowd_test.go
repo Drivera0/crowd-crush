@@ -255,3 +255,88 @@ func TestSlope(t *testing.T) {
 		t.Errorf("slope over 2.75 s: %.4f, want 0", s)
 	}
 }
+
+// packedInThin is a thin crowd (1.5 people/m² at 60 % participation) over
+// a 20 × 14 m floor with a packed 4 × 4 m patch (6 people/m²) in the middle,
+// on grids. The patch is about 10 % of the phones.
+func packedInThin() []Point {
+	const part = 0.6
+	var pts []Point
+	in := func(x, y float64) bool { return x >= 8 && x < 12 && y >= 5 && y < 9 }
+	thin := 1 / math.Sqrt(1.5*part)
+	for x := thin / 2; x < 20; x += thin {
+		for y := thin / 2; y < 14; y += thin {
+			if !in(x, y) {
+				pts = append(pts, Point{fmt.Sprintf("t%.2f,%.2f", x, y), x, y})
+			}
+		}
+	}
+	packed := 1 / math.Sqrt(6*part)
+	for x := 8 + packed/2; x < 12; x += packed {
+		for y := 5 + packed/2; y < 9; y += packed {
+			pts = append(pts, Point{fmt.Sprintf("p%.2f,%.2f", x, y), x, y})
+		}
+	}
+	return pts
+}
+
+// quantilePeak is the old estimate: the 90th percentile of the local
+// densities, for comparison.
+func quantilePeak(pts []Point) float64 {
+	var ks []int
+	for _, p := range pts {
+		k := 0
+		for _, q := range pts {
+			if math.Hypot(p.X-q.X, p.Y-q.Y) <= LocalR {
+				k++
+			}
+		}
+		ks = append(ks, k)
+	}
+	sortInts(ks)
+	return float64(ks[min(len(ks)-1, int(PeakQuantile*float64(len(ks))))]) / (math.Pi * LocalR * LocalR)
+}
+
+func sortInts(a []int) {
+	for i := 1; i < len(a); i++ {
+		for j := i; j > 0 && a[j] < a[j-1]; j-- {
+			a[j], a[j-1] = a[j-1], a[j]
+		}
+	}
+}
+
+// TestPackedPatchReadsPacked: a packed patch inside a big thin crowd reads
+// as the patch's real density (people/m² at its densest spot), where the
+// old 90th-percentile estimate read the thin crowd.
+func TestPackedPatchReadsPacked(t *testing.T) {
+	pts := packedInThin()
+	idx := make([]int, len(pts))
+	for i := range idx {
+		idx[i] = i
+	}
+	c := describe(pts, idx, 0.6)
+	old := quantilePeak(pts) / 0.6
+	t.Logf("%d phones: est %.2f people/m² at (%.1f, %.1f) (old estimate %.2f, disc %.2f); truth 6 in the patch, 1.5 around it",
+		len(pts), c.Est, c.PeakX, c.PeakY, old, c.Density/0.6)
+	if c.Est < 5 || c.Est > 7 {
+		t.Errorf("est %.2f people/m², want about 6", c.Est)
+	}
+	if c.PeakX < 8 || c.PeakX > 12 || c.PeakY < 5 || c.PeakY > 9 {
+		t.Errorf("densest spot (%.1f, %.1f) not in the patch", c.PeakX, c.PeakY)
+	}
+	// A single phone standing in a lucky spot doesn't make a thin crowd packed.
+	lucky := append([]Point{}, pts[:40]...)
+	lucky = append(lucky, Point{"x", lucky[0].X + 0.1, lucky[0].Y}, Point{"y", lucky[0].X, lucky[0].Y + 0.1})
+	if p, _, _ := LocalPeak(lucky); p/0.6 > 2.5 {
+		t.Errorf("thin crowd with one tight trio reads %.2f people/m²", p/0.6)
+	}
+	// Neighbours outside the centres count: the edge of an area sees the crowd past it.
+	inner := []Point{{"a", 0, 0}}
+	all := append([]Point{}, inner...)
+	for i := 0; i < 9; i++ {
+		all = append(all, Point{fmt.Sprint(i), 0.5 + 0.1*float64(i), 0})
+	}
+	if p, _, _ := LocalPeakAmong(all, inner); math.Abs(p-10/(math.Pi*LocalR*LocalR)) > 1e-9 {
+		t.Errorf("peak %.3f, want the 10 phones around the centre", p)
+	}
+}

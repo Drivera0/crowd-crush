@@ -15,13 +15,19 @@ import (
 // Per-area alert rules (protocol.AlertRules), on top of the detector.
 //
 //   - density: the estimated people/m² inside the area, the same estimate
-//     clusters use (max(phones ÷ area, peak local density) ÷ participation),
-//     above the limit for DensityHoldS (default 5 s) is red; above 75 % of
-//     it for as long is yellow. Each clears 10 % (Margin) below its
-//     threshold, like the zone and cluster levels.
-//   - maxPhones: more non-stale phones inside than the limit for over
-//     CapacityHoldMs is red; it clears as soon as the count is back at or
-//     under the limit.
+//     clusters use: the peak local density (crowd.LocalPeakAmong) around
+//     the counting phones inside the area, with every counting phone inside
+//     or just past the outline as a neighbour, ÷ participation. Never the
+//     area-wide average (a packed crowd in a corner of a big area would
+//     vanish into it), except that an area smaller than the 7.07 m² local
+//     disc also takes its own phones ÷ area if that is higher. Above the
+//     limit for DensityHoldS (default 5 s) is red; above 75 % of it for as
+//     long is yellow. Each clears 10 % (Margin) below its threshold, like
+//     the zone and cluster levels.
+//   - maxPhones is a capacity in PEOPLE (the JSON name is kept for
+//     compatibility): estimated people inside (counting phones ÷
+//     participation) above the limit for over CapacityHoldMs is red; it
+//     clears as soon as the estimate is back at or under the limit.
 //   - push false: the zone never escalates from wave edges (detect.ZoneDef.NoPush).
 //
 // The area's rule level is the worst of the two; it merges into the zone
@@ -47,7 +53,7 @@ func validRules(id string, r *protocol.AlertRules) (*protocol.AlertRules, error)
 	case out.DensityHoldS < 0 || out.DensityHoldS > MaxRuleHoldS:
 		return nil, fmt.Errorf("area %q: densityHoldS must be between 0 and %d s", id, MaxRuleHoldS)
 	case out.MaxPhones < 0 || out.MaxPhones > MaxRulePhones:
-		return nil, fmt.Errorf("area %q: maxPhones must be between 0 (off) and %d", id, MaxRulePhones)
+		return nil, fmt.Errorf("area %q: maxPhones (a capacity in people) must be between 0 (off) and %d", id, MaxRulePhones)
 	}
 	out.Message = strings.Join(strings.Fields(out.Message), " ")
 	if utf8.RuneCountInString(out.Message) > MaxRuleMessage {
@@ -132,6 +138,7 @@ type ruleState struct {
 	rule      string  // what drove the level last: density | capacity
 	est       float64 // estimated people/m² inside, last step
 	phones    int
+	people    float64 // estimated people inside (phones ÷ participation)
 	areaM2    float64
 	peakX     float64
 	peakY     float64
@@ -166,18 +173,28 @@ func (a *App) stepRules(p *pipeline, now int64) []ruleChange {
 			p.rules[ar.ID] = st
 		}
 		r := ar.Rules
+		// The phones that count (p.pts: not stale, outside or disconnected)
+		// inside the area are the centres; every counting phone, inside or
+		// just past the outline, is a neighbour.
 		var pts []crowd.Point
-		for _, ph := range p.last.Phones {
-			m := p.meta[ph.ID]
-			if ph.Status == protocol.StatusStale || (m != nil && !m.connected) || !inZone(p, ph, ar.ID) {
-				continue
+		for _, pt := range p.pts {
+			for _, z := range p.det.ZonesOf(pt.X, pt.Y) {
+				if z == ar.ID {
+					pts = append(pts, pt)
+					break
+				}
 			}
-			pts = append(pts, crowd.Point{ID: ph.ID, X: ph.X, Y: ph.Y})
 		}
 		st.phones = len(pts)
+		st.people = float64(len(pts)) / part
 		st.areaM2 = math.Max(1, polyArea(ar.Poly, cfg))
-		peak, px, py := crowd.LocalPeak(pts)
-		st.est = math.Max(float64(len(pts))/st.areaM2, peak) / part
+		peak, px, py := crowd.LocalPeakAmong(p.pts, pts)
+		if st.areaM2 < localDiscM2 {
+			// An area smaller than the local disc: its own count is the
+			// sharper reading.
+			peak = math.Max(peak, float64(len(pts))/st.areaM2)
+		}
+		st.est = peak / part
 		st.peakX, st.peakY = px, py
 
 		denLevel := protocol.LevelCalm
@@ -193,7 +210,7 @@ func (a *App) stepRules(p *pipeline, now int64) []ruleChange {
 		} else {
 			st.dens = detect.NewLevelState()
 		}
-		if r != nil && r.MaxPhones > 0 && st.phones > r.MaxPhones {
+		if r != nil && r.MaxPhones > 0 && st.people > float64(r.MaxPhones)+1e-9 {
 			if st.overSince == 0 {
 				st.overSince = now
 			}
@@ -252,25 +269,23 @@ func (p *pipeline) zoneLevel(z detect.ZoneResult) string {
 
 // ruleInfo describes a rule alert for the briefing.
 func ruleInfo(p *pipeline, ch ruleChange) brief.Info {
-	in := brief.Info{Kind: protocol.KindRule, Rule: ch.rule, Limit: ch.limit, Zone: ch.zone, Where: zoneName(p, ch.zone),
+	in := brief.Info{Kind: protocol.KindRule, Rule: ch.rule, Limit: ch.limit, Zone: ch.zone, Where: zoneLabel(p, ch.zone),
 		Level: ch.to, Phones: ch.st.phones, Density: round2(ch.st.est), AreaM2: math.Round(ch.st.areaM2*10) / 10,
-		X: math.Round(ch.st.peakX), Y: math.Round(ch.st.peakY)}
-	part := p.cfg().Participation
-	if part <= 0 {
-		part = 1
-	}
-	in.People = int(math.Round(float64(ch.st.phones) / part))
+		X: math.Round(ch.st.peakX), Y: math.Round(ch.st.peakY), People: int(math.Round(ch.st.people))}
 	return in
 }
 
-// ruleScore is what a rule alert reports as its score: phones for
-// capacity, estimated people/m² for density.
+// ruleScore is what a rule alert reports as its score: estimated people
+// for capacity, estimated people/m² for density.
 func ruleScore(ch ruleChange) float64 {
 	if ch.rule == "capacity" {
-		return float64(ch.st.phones)
+		return math.Round(ch.st.people)
 	}
 	return round2(ch.st.est)
 }
+
+// localDiscM2 is the area of the local-density disc (π × LocalR²).
+var localDiscM2 = math.Pi * crowd.LocalR * crowd.LocalR
 
 // polyArea is a polygon's area (m²) after clamping to the venue.
 func polyArea(poly []protocol.Point, cfg detect.Config) float64 {

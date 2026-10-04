@@ -54,8 +54,12 @@ type Info struct {
 	Rate   float64 `json:"densityRisePerMinute,omitempty"`
 	Danger float64 `json:"dangerDensity,omitempty"`
 
+	// Exit is the name of the open exit nearest the problem (from the venue
+	// layout), "" if the venue has none.
+	Exit string `json:"nearestExit,omitempty"`
+
 	// Rule alerts: which rule ("density" or "capacity") and its limit
-	// (people/m² or phones).
+	// (people/m², or people for capacity).
 	Rule  string  `json:"rule,omitempty"`
 	Limit float64 `json:"ruleLimit,omitempty"`
 
@@ -131,13 +135,20 @@ func Template(in Info) Briefing {
 
 func template(in Info) Briefing {
 	at := Place(in)
+	// out is the way out, when the venue layout has exits.
+	out := func(without, with string) string {
+		if in.Exit == "" {
+			return without
+		}
+		return fmt.Sprintf(with, in.Exit)
+	}
 	switch in.Kind {
 	case "density":
 		if in.Early && in.Level != "red" {
 			return Briefing{
 				fmt.Sprintf("%s: about %d people packing in fast; at this rate it reaches a dangerous %s per m² in about %.0f s.",
 					at, in.People, trimNum(math.Max(1, in.Danger)), math.Max(1, in.ETA)),
-				"Open space ahead of them now."}
+				out("Open space ahead of them now.", "Open space ahead of them now, toward %s.")}
 		}
 		if in.Level != "red" {
 			return Briefing{fmt.Sprintf("%s: people bunching up near %.0f, %.0f.", at, in.X, in.Y), "Watch closely."}
@@ -145,19 +156,19 @@ func template(in Info) Briefing {
 		return Briefing{
 			fmt.Sprintf("%s: about %d people packed into %.0f square metres near %.0f, %.0f, %s.",
 				at, in.People, math.Max(1, math.Round(in.AreaM2)), in.X, in.Y, TrendText(in.Trend)),
-			fmt.Sprintf("Stop entry to %s and open space around them now.", at)}
+			fmt.Sprintf("Stop entry to %s and %s.", at, out("open space around them now", "move people out toward %s now"))}
 	case "rule":
 		if in.Rule == "capacity" {
 			return Briefing{
-				fmt.Sprintf("%s: %d phones inside, over this area's limit of %.0f.", at, in.Phones, in.Limit),
-				fmt.Sprintf("Stop entry to %s until it clears.", at)}
+				fmt.Sprintf("%s: about %d people inside, over this area's limit of %.0f people.", at, in.People, in.Limit),
+				fmt.Sprintf("Stop entry to %s %s.", at, out("until it clears", "and send people on toward %s"))}
 		}
 		if in.Level != "red" {
 			return Briefing{fmt.Sprintf("%s: crowd density nearing this area's limit.", at), "Watch closely."}
 		}
 		return Briefing{
 			fmt.Sprintf("%s: about %.0f people per square metre, above this area's limit of %s.", at, math.Max(1, in.Density), trimNum(in.Limit)),
-			fmt.Sprintf("Stop entry to %s and open space now.", at)}
+			fmt.Sprintf("Stop entry to %s and %s.", at, out("open space now", "move people out toward %s now"))}
 	}
 	if in.Level != "red" {
 		return Briefing{fmt.Sprintf("%s: crowd sway building.", at), "Watch closely."}
@@ -168,7 +179,7 @@ func template(in Info) Briefing {
 	}
 	return Briefing{
 		fmt.Sprintf("%s: crowd waves travelling %s%s.", at, DirectionText(in.Direction), speed),
-		fmt.Sprintf("Stop entry to %s and open relief exits now.", at)}
+		fmt.Sprintf("Stop entry to %s and open relief exits now%s.", at, out("", ", starting with %s"))}
 }
 
 // trimNum prints 4 as "4" and 2.5 as "2.5".
@@ -213,6 +224,7 @@ Reply as JSON with two fields, to be read aloud over a radio:
 - "action": one short sentence with one concrete instruction for stewards.
 Name the place exactly as the "where" field says; never read out zoneId.
 If the data has a "staffAction", that is the action staff chose for this area: use it verbatim as "action".
+Otherwise, if the data has a "nearestExit", name that exit in the action as the way out.
 No markdown, no numbers with decimals, under 40 words in total.`
 
 // briefSchema is the structured-output schema for a briefing.
@@ -243,7 +255,7 @@ func (c *Client) Brief(ctx context.Context, in Info) (Briefing, error) {
 		meaning = "Alert type: crowding. People are packed too tightly in one spot (positions are metres on the venue map, origin top-left); this is a density alert, not a push wave. Trend: " + TrendText(in.Trend)
 	case "rule":
 		if in.Rule == "capacity" {
-			meaning = "Alert type: an area rule set by staff. More phones are inside the area than its limit (ruleLimit); this is about capacity, not a push wave."
+			meaning = "Alert type: an area rule set by staff. More people are estimated inside the area (estimatedPeople) than its capacity (ruleLimit, people); this is about capacity, not a push wave."
 		} else {
 			meaning = "Alert type: an area rule set by staff. The estimated crowd density inside the area (peoplePerSquareMetre) has stayed above its limit (ruleLimit, people per square metre); this is crowding, not a push wave."
 		}
@@ -305,8 +317,11 @@ func (c *Client) Ask(ctx context.Context, question, history string) (string, err
 	if !c.Enabled() {
 		return "", ErrNoKey
 	}
-	sys := `You answer questions from event stewards about the last minutes of a crowd-safety monitor.
-Use only the log provided. Be brief: at most three sentences. If the log doesn't say, say so.`
+	sys := `You answer questions from event stewards about a crowd-safety monitor.
+Use only the log provided. The "Current situation" and "Active incidents" lines are the state right now: never call it calm while they say otherwise.
+Drills (test alerts) are not incidents; mention them only if asked.
+Name places exactly as the log names them; never use internal ids or codes.
+Be brief: at most three sentences. If the log doesn't say, say so.`
 	out, err := c.generate(ctx, request{sys: sys, user: "Log:\n" + history + "\n\nQuestion: " + question, maxTokens: 250, timeout: Timeout})
 	return oneLine(out), err
 }

@@ -164,13 +164,36 @@ func TestTemplates(t *testing.T) {
 			t.Errorf("density template %q lacks %q", d, want)
 		}
 	}
-	c := Template(Info{Kind: "rule", Rule: "capacity", Zone: "g", Where: "Gate", Level: "red", Phones: 31, Limit: 30})
-	if !strings.Contains(c.Headline, "31 phones") || !strings.Contains(c.Headline, "limit of 30") || !strings.Contains(c.Action, "Gate") {
+	// Capacity is in people (phones ÷ participation).
+	c := Template(Info{Kind: "rule", Rule: "capacity", Zone: "g", Where: "Gate", Level: "red", Phones: 19, People: 31, Limit: 30})
+	if !strings.Contains(c.Headline, "31 people") || !strings.Contains(c.Headline, "limit of 30 people") || !strings.Contains(c.Action, "Gate") {
 		t.Errorf("capacity template %+v", c)
 	}
 	r := Template(Info{Kind: "rule", Rule: "density", Zone: "g", Where: "Gate", Level: "red", Density: 4.4, Limit: 3.5})
 	if !strings.Contains(r.Headline, "limit of 3.5") {
 		t.Errorf("density rule template %+v", r)
+	}
+}
+
+// Briefings name the nearest open exit when the venue has one; a staff
+// message still wins for the action.
+func TestTemplateNamesExit(t *testing.T) {
+	for _, in := range []Info{
+		{Kind: "density", Zone: "a1", Where: "Stage front", Level: "red", People: 40, AreaM2: 7},
+		{Kind: "density", Zone: "a1", Where: "Stage front", Level: "yellow", Early: true, People: 30, ETA: 12, Danger: 4},
+		{Kind: "rule", Rule: "density", Zone: "a1", Where: "Stage front", Level: "red", Density: 6, Limit: 5},
+		{Kind: "rule", Rule: "capacity", Zone: "a1", Where: "Stage front", Level: "red", People: 300, Limit: 200},
+		{Zone: "A", Where: "Zone A", Level: "red", Direction: "+x"},
+	} {
+		in.Exit = "Left side exit"
+		b := Template(in)
+		if !strings.Contains(b.Action, "Left side exit") || !strings.Contains(b.Text(), in.Where) || strings.Contains(b.Text(), "a1") {
+			t.Errorf("%s/%s: %+v", in.Kind, in.Rule, b)
+		}
+		in.Message = "Open gate 3"
+		if b := Template(in); b.Action != "Open gate 3" {
+			t.Errorf("staff message: %+v", b)
+		}
 	}
 }
 

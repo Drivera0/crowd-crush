@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"log"
 	"math"
+	"os"
 	"sort"
 	"sync"
 	"time"
@@ -57,6 +58,9 @@ type Options struct {
 	// EscalateAfter: a red alert still unacknowledged this long after it
 	// went red is re-announced. 0 = DefaultEscalateAfter; < 0 = never.
 	EscalateAfter time.Duration
+	// PublicURL is the URL phones should open (GET /api/join); empty =
+	// env PUBLIC_URL, else the dashboard's own host.
+	PublicURL string
 }
 
 type nodeMeta struct {
@@ -266,6 +270,9 @@ func New(opt Options) *App {
 		sentAt:    map[string]int64{},
 		incidents: map[string]*incident{},
 		openInc:   map[string]string{},
+	}
+	if a.opt.PublicURL == "" {
+		a.opt.PublicURL = os.Getenv("PUBLIC_URL")
 	}
 	if a.opt.EscalateAfter == 0 {
 		a.opt.EscalateAfter = DefaultEscalateAfter
@@ -598,7 +605,7 @@ func inZone(p *pipeline, ph detect.PhoneResult, zone string) bool {
 }
 
 func briefInfo(p *pipeline, zone, level string, now int64) brief.Info {
-	in := brief.Info{Kind: protocol.KindWave, Zone: zone, Where: zoneName(p, zone), Level: level}
+	in := brief.Info{Kind: protocol.KindWave, Zone: zone, Where: zoneLabel(p, zone), Level: level}
 	if z, ok := p.last.Zone(zone); ok {
 		in.Direction, in.LagMs = z.Direction, z.LagMs
 	}
@@ -632,7 +639,7 @@ func zoneName(p *pipeline, zone string) string {
 
 // densityInfo describes a cluster that packed past the danger density.
 func densityInfo(p *pipeline, c crowd.Cluster, zone string) brief.Info {
-	in := brief.Info{Kind: protocol.KindDensity, Zone: zone, Where: zoneName(p, zone), Level: c.Level, Density: round2(c.Est),
+	in := brief.Info{Kind: protocol.KindDensity, Zone: zone, Where: zoneLabel(p, zone), Level: c.Level, Density: round2(c.Est),
 		People: c.People, AreaM2: math.Round(c.Area()*10) / 10, Trend: c.Trend, X: math.Round(c.X), Y: math.Round(c.Y),
 		Danger: p.cfg().DensityDanger}
 	if c.Early && c.Level == protocol.LevelYellow {
@@ -751,9 +758,11 @@ func (a *App) snapshotLocked(now int64) protocol.Snapshot {
 	}
 	for _, c := range p.clusters {
 		s.Clusters = append(s.Clusters, protocol.Cluster{ID: c.ID, X: r2(c.X), Y: r2(c.Y), R: r2(c.R), Count: c.Count,
-			Density: round2(c.Density), People: c.People, Trend: c.Trend, Level: c.Level,
+			Density: round2(c.Density), People: c.People, Trend: c.Trend, Level: c.Level, Est: round2(c.Est),
 			Rate: round2(c.Rate), ETA: math.Round(c.ETA*10) / 10})
 	}
+	st := a.statusLocked(p)
+	s.Status = &st
 	return s
 }
 

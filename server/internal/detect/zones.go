@@ -173,6 +173,10 @@ func zoneThresholds(cfg *Config, sens string) Thresholds {
 	return th
 }
 
+// ZoneThresholds is the wave-score thresholds of a zone with this
+// sensitivity (normal | high).
+func (c Config) ZoneThresholds(sens string) Thresholds { return zoneThresholds(&c, sens) }
+
 // dirName names the dominant axis of a net travel vector: +x is left to
 // right on the map, +y top to bottom.
 func dirName(vx, vy float64) string {
