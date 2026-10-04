@@ -120,6 +120,13 @@ type Motion struct {
 	AY   float64 `json:"ay"`
 	AZ   float64 `json:"az"`
 	Rot  float64 `json:"rot"`
+	// G is the unit gravity vector in the device frame ([gx, gy, gz], 2
+	// decimals): the direction of "down" as the phone sees it, so the server
+	// can level the sample whatever way the phone is carried. Optional; the
+	// server holds a phone's last value, so a phone may send it only when it
+	// changed. A phone that never sends it is taken to be upright against
+	// the chest (x, z horizontal, y vertical).
+	G []float64 `json:"g,omitempty"`
 }
 
 // ---- Server → phone ----
@@ -145,6 +152,13 @@ type PhoneState struct {
 	Y float64 `json:"y"`
 	W float64 `json:"w"`
 	H float64 `json:"h"`
+	// Name and Color: the phone's generated name ("Blue Otter") and its
+	// colour (CSS hex), the same as on the dashboard map.
+	Name  string `json:"name,omitempty"`
+	Color string `json:"color,omitempty"`
+	// Sim: this state comes from the crowd simulation running around the
+	// phone (a drill), not from the real crowd.
+	Sim bool `json:"sim,omitempty"`
 }
 
 // Move is personal guidance: a unit vector in venue coordinates (x right,
@@ -179,6 +193,12 @@ type Node struct {
 	Acc     float64 `json:"acc"`     // GPS accuracy (m); 0 = placed by hand
 	Src     string  `json:"src"`     // gps | manual
 	Outside bool    `json:"outside"` // GPS put it outside the venue (clamped; counts toward nothing)
+	// Name and Color: a real phone's generated name and colour (absent for
+	// simulated and replayed phones).
+	Name  string `json:"name,omitempty"`
+	Color string `json:"color,omitempty"`
+	Shake bool   `json:"shake,omitempty"` // being shaken right now ("that's me")
+	Real  bool   `json:"real,omitempty"`  // mode "sim": a real phone standing in the simulated crowd
 }
 
 // Point is [x, y] in venue metres.
@@ -486,6 +506,9 @@ type Config struct {
 	Yellow          float64 `json:"yellow"`
 	Red             float64 `json:"red"`
 	NeighbourRadius float64 `json:"neighbourRadius"`
+	// Demo: the demo spot is on (GET /api/demo): a phone that joins is
+	// placed by the server, so the phone page skips GPS and the map.
+	Demo bool `json:"demo,omitempty"`
 }
 
 // Sample is one 100 ms motion summary as the server received it.

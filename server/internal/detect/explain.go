@@ -23,6 +23,7 @@ type pairRec struct {
 	a, b         *phone
 	handA, handB bool
 	swayA, swayB float64
+	walkA, walkB bool
 	preChain     bool // passed every per-pair test (before the chain test)
 }
 
@@ -84,6 +85,20 @@ func (d *Detector) Explain(from, to string) (protocol.EdgeExplain, bool) {
 		add("Not handling", false, "%s is being handled (rotation over %.0f°/s)", shortID(id), cfg.HandlingRot)
 	default:
 		add("Not handling", true, "neither phone is being handled")
+	}
+	if a.lev.on || b.lev.on { // only phones that send gravity are checked for walking
+		switch {
+		case pr.walkA && pr.walkB:
+			add("Not walking", false, "both phones bounce and swing to a step rhythm (walking, phone in a pocket)")
+		case pr.walkA || pr.walkB:
+			id := e.From
+			if pr.walkB {
+				id = e.To
+			}
+			add("Not walking", false, "%s bounces and swings to a step rhythm (walking, phone in a pocket)", shortID(id))
+		default:
+			add("Not walking", true, "no step rhythm")
+		}
 	}
 	if !ok {
 		add("Strong correlation", false, "not enough overlapping readings to correlate")

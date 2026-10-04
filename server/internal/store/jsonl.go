@@ -33,28 +33,29 @@ const (
 // Privacy: positions are venue metres only. GPS fixes are converted on
 // arrival; latitude and longitude are never recorded.
 type Record struct {
-	K      string   `json:"k"`
-	T      int64    `json:"t"` // server time (ms) the event happened
-	ID     string   `json:"id,omitempty"`
-	X      *float64 `json:"x,omitempty"` // venue metres
-	Y      *float64 `json:"y,omitempty"`
-	Acc    float64  `json:"acc,omitempty"` // GPS accuracy (m); 0 = placed by hand
-	Out    bool     `json:"out,omitempty"` // GPS fix outside the venue (clamped)
-	Row    int      `json:"row,omitempty"` // legacy grid cell
-	Col    int      `json:"col,omitempty"`
-	UA     string   `json:"ua,omitempty"`
-	CT     int64    `json:"ct,omitempty"` // clock-corrected phone time of a reading
-	AX     float64  `json:"ax,omitempty"`
-	AY     float64  `json:"ay,omitempty"`
-	AZ     float64  `json:"az,omitempty"`
-	Rot    float64  `json:"rot,omitempty"`
-	RTT    int64    `json:"rtt,omitempty"`
-	Offset int64    `json:"off,omitempty"`
-	Label  string   `json:"label,omitempty"`
-	Rows   int      `json:"rows,omitempty"` // legacy grid size
-	Cols   int      `json:"cols,omitempty"`
-	W      float64  `json:"w,omitempty"` // meta: venue size (m)
-	H      float64  `json:"h,omitempty"`
+	K      string    `json:"k"`
+	T      int64     `json:"t"` // server time (ms) the event happened
+	ID     string    `json:"id,omitempty"`
+	X      *float64  `json:"x,omitempty"` // venue metres
+	Y      *float64  `json:"y,omitempty"`
+	Acc    float64   `json:"acc,omitempty"` // GPS accuracy (m); 0 = placed by hand
+	Out    bool      `json:"out,omitempty"` // GPS fix outside the venue (clamped)
+	Row    int       `json:"row,omitempty"` // legacy grid cell
+	Col    int       `json:"col,omitempty"`
+	UA     string    `json:"ua,omitempty"`
+	CT     int64     `json:"ct,omitempty"` // clock-corrected phone time of a reading
+	AX     float64   `json:"ax,omitempty"`
+	AY     float64   `json:"ay,omitempty"`
+	AZ     float64   `json:"az,omitempty"`
+	Rot    float64   `json:"rot,omitempty"`
+	G      []float64 `json:"g,omitempty"` // gravity in the device frame, when the reading carried one (protocol.Motion.G)
+	RTT    int64     `json:"rtt,omitempty"`
+	Offset int64     `json:"off,omitempty"`
+	Label  string    `json:"label,omitempty"`
+	Rows   int       `json:"rows,omitempty"` // legacy grid size
+	Cols   int       `json:"cols,omitempty"`
+	W      float64   `json:"w,omitempty"` // meta: venue size (m)
+	H      float64   `json:"h,omitempty"`
 }
 
 // F returns a pointer to v, for Record positions.

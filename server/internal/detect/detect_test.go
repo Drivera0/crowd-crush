@@ -18,6 +18,7 @@ type outcome struct {
 	waveSteps    int            // steps with at least one wave edge
 	handlingSeen bool           // some node was marked handling
 	swayingSeen  bool           // some node was marked swaying or wave
+	swayFrac     float64        // fraction of phone-steps shown as swaying or wave
 	directions   map[string]int // wave direction counts at red
 	finalLevels  map[string]string
 }
@@ -47,6 +48,15 @@ func runScenarioCfg(t *testing.T, name string, n int, dur float64, clockErrMs in
 // phones report their position every 500 ms, like the phone page does.
 func runScenarioLayout(t *testing.T, name string, n int, dur float64, clockErrMs int64, flipOdd bool, seed int64, cfg Config, lay sim.Layout) outcome {
 	t.Helper()
+	return runScenarioVia(t, name, n, dur, clockErrMs, flipOdd, seed, cfg, lay, nil)
+}
+
+// runScenarioVia is runScenarioLayout with a say in what each phone sends:
+// via (if not nil) turns each simulated reading (body frame: x right, y up,
+// z forward, what an upright phone on the chest reports) into the sample
+// the phone would send, e.g. seen through a phone lying in a pocket.
+func runScenarioVia(t *testing.T, name string, n int, dur float64, clockErrMs int64, flipOdd bool, seed int64, cfg Config, lay sim.Layout, via func(e sim.Event, s Sample) Sample) outcome {
+	t.Helper()
 	sc, err := sim.NewLayout(name, n, seed, lay)
 	if err != nil {
 		t.Fatal(err)
@@ -69,6 +79,7 @@ func runScenarioLayout(t *testing.T, name string, n int, dur float64, clockErrMs
 	out := outcome{maxLevel: protocol.LevelCalm, redAt: -1, yellowAt: -1, directions: map[string]int{}}
 	j := 0
 	moves := sc.Moves()
+	var phoneSteps, swaySteps float64
 	for now := int64(t0); now <= t0+int64(dur*1000); now += 250 {
 		if moves && (now-t0)%500 == 0 {
 			for i := 0; i < n; i++ {
@@ -82,7 +93,11 @@ func runScenarioLayout(t *testing.T, name string, n int, dur float64, clockErrMs
 			if flipOdd && e.Phone%2 == 1 {
 				ax = -ax
 			}
-			d.Add(fmt.Sprint(e.Phone), Sample{T: e.T + errs[e.Phone], AX: ax, AY: e.AY, AZ: e.AZ, Rot: e.Rot})
+			s := Sample{T: e.T + errs[e.Phone], AX: ax, AY: e.AY, AZ: e.AZ, Rot: e.Rot}
+			if via != nil {
+				s = via(e, s)
+			}
+			d.Add(fmt.Sprint(e.Phone), s)
 			j++
 		}
 		r := d.Step(now)
@@ -92,6 +107,10 @@ func runScenarioLayout(t *testing.T, name string, n int, dur float64, clockErrMs
 		for _, p := range r.Phones {
 			out.handlingSeen = out.handlingSeen || p.Status == protocol.StatusHandling
 			out.swayingSeen = out.swayingSeen || p.Status == protocol.StatusSwaying || p.Status == protocol.StatusWave
+			phoneSteps++
+			if p.Status == protocol.StatusSwaying || p.Status == protocol.StatusWave {
+				swaySteps++
+			}
 		}
 		for _, z := range r.Zones {
 			if levelRank[z.Level] > levelRank[out.maxLevel] {
@@ -112,6 +131,7 @@ func runScenarioLayout(t *testing.T, name string, n int, dur float64, clockErrMs
 			out.finalLevels[z.ID] = z.Level
 		}
 	}
+	out.swayFrac = swaySteps / math.Max(1, phoneSteps)
 	return out
 }
 
