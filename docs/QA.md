@@ -97,6 +97,33 @@ A false alarm costs a steward a look: each alert is an incident card that staff 
 **27. What does the hardware add?**
 Staff and attendees can't all watch a screen. The Arduino UNO R4 sign flashes STOP for the worst zone; the two ESP32 zone lights show their zone's level. All three run over USB with no Wi-Fi. The ESP32s also count nearby Bluetooth devices (counts only, no addresses) and hear each other. Everything works without them.
 
+## What each sponsor does
+
+The rule across all of them: math detects, the services explain, store and reach people. Every one can be down or missing its key and Pulse still detects and alerts. `./bin/pulse -check` shows which are connected.
+
+**Tiger Data (TimescaleDB): the memory.**
+- Every phone's motion summary (10 a second per phone: acceleration, rotation, gravity, venue position, zone) is written to a `readings` hypertable in batches with Postgres `COPY`, so 1,000 phones don't mean 10,000 single inserts a second.
+- Every alert goes to an `alerts` hypertable, and labelled recordings ("wave-push-end") to a `runs` table.
+- A continuous aggregate, `zone_1s`, rolls readings up per zone per second (phones, horizontal motion, peak rotation) and refreshes every 5 s: the per-second zone history without rescanning raw rows.
+- Replays can read a recorded run back out of Tiger and play it through the same detector as live phones.
+- If the database is unreachable, the same records go to local JSONL files instead and nothing stops.
+
+**Google Gemini: writes the sentence and reads the floor plan.**
+- When an alert fires, Gemini gets the facts (place, level, kind of incident, how dense, which way the push travels, the nearest exit) and returns structured JSON, a headline and one action, for example "Stage front: crowd push travelling left to right." / "Stop entry and open the side exit now." Early warnings are worded as a projection ("reaches a dangerous 4 per m² in about 12 s").
+- On the Venue page it reads an uploaded floor-plan image and suggests the venue size, stage, exits and walls, which staff review before applying.
+- It never decides whether something is dangerous: the alert exists before Gemini is asked. 5 s timeout, then a template sentence. A message staff wrote for an area replaces the action word for word.
+
+**ElevenLabs: says it out loud.**
+- Each briefing is turned into an MP3 (Flash v2.5 model) that the dashboard plays the moment the alert arrives, so a steward who isn't looking at the screen still hears "Stage front: crowd push…".
+- An alert nobody acknowledges is re-voiced as "Still unacknowledged. …"; "Escalate now" does the same on demand.
+- A fallback clip is generated once at startup, so there's always something to play. Without a key, the browser's own voice reads the text.
+
+**.Tech domain: the address on the QR code.** `[TECH: claim it and say the address]` A short, memorable HTTPS address for the join QR, pointing at the Cloudflare tunnel. Phones need HTTPS for the motion sensors, so this is what makes "scan and join" work.
+
+**Not sponsors, but they'll ask** (check against this year's track list, `[TRACKS]` in TRACKS.md):
+- **Cloudflare Tunnel** gives the laptop a public HTTPS address with no port forwarding.
+- **Arduino UNO R4 WiFi and ESP32** are the sign and zone lights (question 27).
+
 ## If you don't know
 
 Say "I don't know; here's how I'd find out" and name the test. Don't guess a number.
