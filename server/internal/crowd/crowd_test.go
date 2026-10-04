@@ -171,3 +171,87 @@ func TestParticipation(t *testing.T) {
 		t.Fatalf("peak %.2f at 50%% participation vs %.2f at 100%%", half.maxEst, full.maxEst)
 	}
 }
+
+// ring is n phones evenly on a disc of radius r around (10, 10) (plus the centre).
+func ring(n int, r float64) []Point {
+	pts := []Point{{"c", 10, 10}}
+	for i := 0; i < n; i++ {
+		a := 2 * math.Pi * float64(i) / float64(n)
+		pts = append(pts, Point{fmt.Sprint(i), 10 + r*math.Cos(a), 10 + r*math.Sin(a)})
+	}
+	return pts
+}
+
+// TestEarlyWarning: a group packing in steadily is yellow (early) before
+// its density alone would make it yellow, and reports rate and ETA; the
+// same group standing still never warns early.
+func TestEarlyWarning(t *testing.T) {
+	cfg := ConfigFrom(detect.DefaultConfig())
+	tr := NewTracker(cfg)
+	var early *Change
+	var normalYellow int64 = -1
+	plain := NewTracker(func() Config { c := cfg; c.EarlyWarnS = 0; return c }())
+	for ms := int64(0); ms <= 40_000; ms += 250 {
+		// 24 phones, radius shrinking from 3.5 m to 1 m over 15 s, then holding.
+		r := math.Max(1, 3.5-2.5*float64(ms)/15_000)
+		pts := ring(24, r)
+		cs, ch := tr.Update(ms, pts)
+		_, pch := plain.Update(ms, pts)
+		for i := range ch {
+			if ch[i].Early && early == nil {
+				early = &ch[i]
+			}
+		}
+		for _, c := range pch {
+			if c.To == "yellow" && normalYellow < 0 {
+				normalYellow = c.T
+			}
+		}
+		if len(cs) != 1 {
+			t.Fatalf("%d clusters", len(cs))
+		}
+		if ms == 12_000 && cs[0].Rate <= 0 {
+			t.Errorf("rate %.2f while packing in", cs[0].Rate)
+		}
+	}
+	if early == nil {
+		t.Fatal("no early warning while packing in")
+	}
+	c := early.Cluster
+	t.Logf("early yellow at %.2f s (est %.2f, rate %.2f/min, eta %.1f s); plain yellow at %.2f s",
+		float64(early.T)/1000, c.Est, c.Rate, c.ETA, float64(normalYellow)/1000)
+	if early.From != "calm" || early.To != "yellow" || c.ETA <= 0 || c.ETA > cfg.EarlyWarnS || c.Rate <= 0 || c.Est < cfg.EarlyFloor*cfg.Danger {
+		t.Errorf("early change %+v", early)
+	}
+	if normalYellow < 0 || early.T >= normalYellow {
+		t.Errorf("early warning at %d ms, not before plain yellow at %d ms", early.T, normalYellow)
+	}
+
+	// Standing still at the same density: no rate, no early warning.
+	still := NewTracker(cfg)
+	for ms := int64(0); ms <= 30_000; ms += 250 {
+		cs, ch := still.Update(ms, ring(20, 2))
+		for _, x := range ch {
+			if x.Early {
+				t.Fatalf("early warning for a group standing still: %+v", x)
+			}
+		}
+		if ms > 6000 && (cs[0].Rate != 0 || cs[0].ETA != 0) {
+			t.Fatalf("still group: rate %.2f eta %.2f", cs[0].Rate, cs[0].ETA)
+		}
+	}
+}
+
+// TestSlope: least squares over the window, nothing until it spans 5 s.
+func TestSlope(t *testing.T) {
+	var h []sample
+	for ms := int64(0); ms <= 10_000; ms += 250 {
+		h = append(h, sample{t: ms, est: 1 + 0.0002*float64(ms)}) // 0.2 per second
+	}
+	if s := slope(h, 10_000-RateWindowMs) * 1000; math.Abs(s-0.2) > 1e-9 {
+		t.Errorf("slope %.4f/s, want 0.2", s)
+	}
+	if s := slope(h[:12], 0); s != 0 {
+		t.Errorf("slope over 2.75 s: %.4f, want 0", s)
+	}
+}

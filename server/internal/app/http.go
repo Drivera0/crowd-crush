@@ -8,6 +8,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -180,6 +182,31 @@ func (a *App) Routes(mux *http.ServeMux) {
 		}
 		a.mu.Unlock()
 		writeJSON(w, d)
+	})
+	// The detector evaluation written by `make eval` (cmd/eval), for the
+	// dashboard's evaluation card. Served from the working directory.
+	mux.HandleFunc("GET /api/eval", func(w http.ResponseWriter, r *http.Request) {
+		b, err := os.ReadFile(filepath.Join("docs", "eval.json"))
+		if err != nil {
+			httpError(w, errors.New("no evaluation yet: run make eval"), http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Write(b)
+	})
+	mux.HandleFunc("GET /api/edge", func(w http.ResponseWriter, r *http.Request) {
+		from, to := r.URL.Query().Get("from"), r.URL.Query().Get("to")
+		if from == "" || to == "" {
+			httpError(w, errors.New("want ?from=<id>&to=<id>"), http.StatusBadRequest)
+			return
+		}
+		ex, ok := a.ExplainEdge(from, to)
+		if !ok {
+			httpError(w, errors.New("not a neighbour pair in the latest detector step"), http.StatusNotFound)
+			return
+		}
+		writeJSON(w, ex)
 	})
 	mux.HandleFunc("GET /api/recordings", func(w http.ResponseWriter, r *http.Request) {
 		files, _ := store.ListJSONL(a.opt.RecordingsDir)

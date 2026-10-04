@@ -363,13 +363,13 @@ func TestAlertIncidents(t *testing.T) {
 	a, srv := testServer(t, Options{EscalateAfter: 2 * time.Second})
 	info := func() brief.Info { return brief.Info{Zone: "A", Level: "red"} }
 	a.mu.Lock()
-	y, _ := a.raiseLocked("live", protocol.KindWave, "A", "calm", "yellow", 0.35, ft0, false, info)
-	r, job := a.raiseLocked("live", protocol.KindWave, "A", "yellow", "red", 0.65, ft0+1000, false, info)
-	back, _ := a.raiseLocked("live", protocol.KindWave, "A", "red", "yellow", 0.5, ft0+2000, false, info)
-	calm, _ := a.raiseLocked("live", protocol.KindWave, "A", "yellow", "calm", 0.1, ft0+3000, false, info)
-	again, _ := a.raiseLocked("live", protocol.KindWave, "A", "calm", "yellow", 0.4, ft0+4000, false, info)
-	other, _ := a.raiseLocked("live", protocol.KindDensity, "A", "yellow", "red", 4.5, ft0+4000, false, info)
-	sim, _ := a.raiseLocked("sim", protocol.KindWave, "A", "calm", "yellow", 0.3, ft0+4000, true, info)
+	y, _ := a.raiseLocked("live", protocol.KindWave, "A", "calm", "yellow", 0.35, ft0, false, false, info)
+	r, job := a.raiseLocked("live", protocol.KindWave, "A", "yellow", "red", 0.65, ft0+1000, false, false, info)
+	back, _ := a.raiseLocked("live", protocol.KindWave, "A", "red", "yellow", 0.5, ft0+2000, false, false, info)
+	calm, _ := a.raiseLocked("live", protocol.KindWave, "A", "yellow", "calm", 0.1, ft0+3000, false, false, info)
+	again, _ := a.raiseLocked("live", protocol.KindWave, "A", "calm", "yellow", 0.4, ft0+4000, false, false, info)
+	other, _ := a.raiseLocked("live", protocol.KindDensity, "A", "yellow", "red", 4.5, ft0+4000, false, false, info)
+	sim, _ := a.raiseLocked("sim", protocol.KindWave, "A", "calm", "yellow", 0.3, ft0+4000, true, false, info)
 	a.mu.Unlock()
 	if y.ID == "" || y.Status != protocol.StatusOpen || r.ID != y.ID || r.Level != protocol.LevelRed || r.T != ft0+1000 || job == nil {
 		t.Fatalf("yellow→red should update the incident and ask for a briefing: %+v %+v %v", y, r, job)
@@ -423,7 +423,7 @@ func TestAlertIncidents(t *testing.T) {
 		t.Fatalf("resolve: %d %+v", code, got)
 	}
 	a.mu.Lock()
-	fresh, _ := a.raiseLocked("live", protocol.KindWave, "A", "calm", "yellow", 0.4, ft0+9000, false, info)
+	fresh, _ := a.raiseLocked("live", protocol.KindWave, "A", "calm", "yellow", 0.4, ft0+9000, false, false, info)
 	a.mu.Unlock()
 	if fresh.ID == y.ID {
 		t.Error("after resolve, the next change opens a new incident")

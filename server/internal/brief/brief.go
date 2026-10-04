@@ -47,6 +47,12 @@ type Info struct {
 	Trend   string  `json:"trend,omitempty"` // forming | steady | dispersing
 	X       float64 `json:"x,omitempty"`     // where on the venue map (m)
 	Y       float64 `json:"y,omitempty"`
+	// Early warning: not dangerous yet, but at the current rate the density
+	// reaches Danger (people/m²) in about ETA seconds.
+	Early  bool    `json:"earlyWarning,omitempty"`
+	ETA    float64 `json:"secondsUntilDangerous,omitempty"`
+	Rate   float64 `json:"densityRisePerMinute,omitempty"`
+	Danger float64 `json:"dangerDensity,omitempty"`
 
 	// Rule alerts: which rule ("density" or "capacity") and its limit
 	// (people/m² or phones).
@@ -127,6 +133,12 @@ func template(in Info) Briefing {
 	at := Place(in)
 	switch in.Kind {
 	case "density":
+		if in.Early && in.Level != "red" {
+			return Briefing{
+				fmt.Sprintf("%s: about %d people packing in fast; at this rate it reaches a dangerous %s per m² in about %.0f s.",
+					at, in.People, trimNum(math.Max(1, in.Danger)), math.Max(1, in.ETA)),
+				"Open space ahead of them now."}
+		}
 		if in.Level != "red" {
 			return Briefing{fmt.Sprintf("%s: people bunching up near %.0f, %.0f.", at, in.X, in.Y), "Watch closely."}
 		}
@@ -224,6 +236,10 @@ func (c *Client) Brief(ctx context.Context, in Info) (Briefing, error) {
 	meaning := "Alert type: a push wave travelling through the crowd. Direction meaning: " + DirectionText(in.Direction)
 	switch in.Kind {
 	case "density":
+		if in.Early && in.Level != "red" {
+			meaning = "Alert type: early warning of crowding. It is not dangerous yet: the density is rising fast and, at the current rate, is projected to reach the danger density (dangerDensity, people per square metre) in about secondsUntilDangerous seconds. Say clearly that this is a projection, e.g. 'at this rate it reaches a dangerous level in about 12 seconds'."
+			break
+		}
 		meaning = "Alert type: crowding. People are packed too tightly in one spot (positions are metres on the venue map, origin top-left); this is a density alert, not a push wave. Trend: " + TrendText(in.Trend)
 	case "rule":
 		if in.Rule == "capacity" {

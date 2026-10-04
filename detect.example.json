@@ -15,6 +15,8 @@
   "densityWatch": 2,
   "densityDanger": 4,
   "participation": 1,
+  "earlyWarnS": 30,
+  "earlyFloor": 0.55,
   "gpsMaxAcc": 25,
   "handlingRot": 200,
   "handlingSettleMs": 1000,

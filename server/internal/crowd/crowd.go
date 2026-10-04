@@ -72,7 +72,22 @@ type Config struct {
 	Participation float64
 	Margin        float64 // hysteresis as a fraction of the threshold
 	HoldMs        int64
+	// Early warning from the density trend: a cluster at or above
+	// EarlyFloor × Danger whose estimated density is projected to reach
+	// Danger within EarlyWarnS seconds (at its current rate) is at least
+	// yellow. EarlyWarnS 0 = off.
+	EarlyWarnS float64
+	EarlyFloor float64
 }
+
+// Early-warning rate estimate: least-squares slope of the estimated density
+// over the last RateWindowMs, once the samples span at least RateMinSpanMs.
+// The projection must hold for EarlyHoldMs before it raises the level.
+const (
+	RateWindowMs  = 8000
+	RateMinSpanMs = 5000
+	EarlyHoldMs   = 500
+)
 
 // ConfigFrom takes the crowd settings from the detector config. The level
 // hysteresis reuses Margin as a fraction of the threshold (0.1 → yellow
@@ -80,7 +95,7 @@ type Config struct {
 func ConfigFrom(c detect.Config) Config {
 	return Config{Eps: c.ClusterEps, MinPts: c.ClusterMinPts, TrendMs: c.ClusterTrendMs,
 		Watch: c.DensityWatch, Danger: c.DensityDanger, Participation: c.Participation,
-		Margin: c.Margin, HoldMs: c.HoldMs}
+		Margin: c.Margin, HoldMs: c.HoldMs, EarlyWarnS: c.EarlyWarnS, EarlyFloor: c.EarlyFloor}
 }
 
 // Cluster is one group of phones.
@@ -98,6 +113,14 @@ type Cluster struct {
 	Trend   string
 	Level   string
 	Members []string
+	// Rate is how fast Est is changing (people/m² per minute; 0 until the
+	// cluster has RateMinSpanMs of history). ETA is the projected seconds
+	// until Est reaches Danger at that rate, only when Rate > 0, Est is
+	// below Danger and the projection is within EarlyWarnS (else 0).
+	Rate float64
+	ETA  float64
+	// Early: the projection holds (ETA set, Est ≥ EarlyFloor × Danger).
+	Early bool
 }
 
 // Area of the cluster's disc, m² (at least 1).
@@ -109,6 +132,9 @@ type Change struct {
 	Cluster Cluster // the cluster as it is now (Level = To)
 	From    string
 	To      string
+	// Early: the density projection (not the density itself) raised the
+	// cluster to yellow.
+	Early bool
 }
 
 type sample struct {
@@ -118,12 +144,13 @@ type sample struct {
 }
 
 type track struct {
-	id       string
-	c        Cluster
-	born     int64
-	lastSeen int64
-	hist     []sample
-	state    detect.LevelState
+	id         string
+	c          Cluster
+	born       int64
+	lastSeen   int64
+	hist       []sample
+	state      detect.LevelState
+	earlySince int64 // when the projection started holding (0 = not)
 }
 
 // Tracker follows clusters over time. Not safe for concurrent use.
@@ -182,12 +209,40 @@ func (t *Tracker) Update(now int64, pts []Point) ([]Cluster, []Change) {
 		usedT[p.ti], usedF[p.fi] = true, true
 		owner[p.fi] = t.tracks[p.ti]
 	}
+	// Where each phone was a tick ago, for new clusters' history.
+	was := map[string]*track{}
+	for _, tr := range t.tracks {
+		if tr.lastSeen >= now-GraceMs {
+			for _, id := range tr.c.Members {
+				was[id] = tr
+			}
+		}
+	}
 	for fi := range found {
 		if owner[fi] == nil {
 			t.seq++
 			tr := &track{id: fmt.Sprintf("c%d", t.seq), born: now, state: detect.NewLevelState()}
 			t.tracks = append(t.tracks, tr)
 			owner[fi] = tr
+		}
+		// Clusters merge and split as a crowd moves (a surge pulls small
+		// groups into one big one): a cluster with little history takes the
+		// older density history of the cluster most of its phones came
+		// from, so its rate (early warning) doesn't restart from nothing.
+		tr := owner[fi]
+		if src := mostOf(found[fi].Members, was); src != nil && src != tr && len(src.hist) > 0 &&
+			(len(tr.hist) == 0 || tr.hist[len(tr.hist)-1].t-tr.hist[0].t < RateMinSpanMs) {
+			first := now + 1
+			if len(tr.hist) > 0 {
+				first = tr.hist[0].t
+			}
+			var older []sample
+			for _, s := range src.hist {
+				if s.t < first {
+					older = append(older, s)
+				}
+			}
+			tr.hist = append(older, tr.hist...)
 		}
 	}
 
@@ -206,11 +261,31 @@ func (t *Tracker) Update(now int64, pts []Point) ([]Cluster, []Change) {
 		tr.hist = tr.hist[cut:]
 		f.ID = tr.id
 		f.Trend = t.trend(tr, now)
+		f.Rate, f.ETA, f.Early = t.project(tr, f.Est)
 		from, to, changed := tr.state.Update(now, f.Est, th)
+		if changed && to == protocol.LevelCalm && f.Early {
+			// Still projected to be dangerous soon (a floor below the
+			// yellow hysteresis): stay yellow.
+			tr.state.Level, changed = from, false
+		}
+		early := false
+		if f.Early {
+			if tr.earlySince == 0 {
+				tr.earlySince = now
+			}
+			// Projected to be dangerous soon: at least yellow, without
+			// waiting for the density itself to hold above the watch level.
+			if tr.state.Level == protocol.LevelCalm && now-tr.earlySince >= EarlyHoldMs {
+				tr.state.Level, tr.state.Since = protocol.LevelYellow, now
+				from, to, changed, early = protocol.LevelCalm, protocol.LevelYellow, true, true
+			}
+		} else {
+			tr.earlySince = 0
+		}
 		f.Level = tr.state.Level
 		tr.c = f
 		if changed {
-			changes = append(changes, Change{T: now, Cluster: f, From: from, To: to})
+			changes = append(changes, Change{T: now, Cluster: f, From: from, To: to, Early: early})
 		}
 		out = append(out, f)
 	}
@@ -230,6 +305,21 @@ func (t *Tracker) Update(now int64, pts []Point) ([]Cluster, []Change) {
 	t.tracks = keep
 	sort.Slice(out, func(i, j int) bool { return idLess(out[i].ID, out[j].ID) })
 	return out, changes
+}
+
+// mostOf is the track most of these phones were in, nil if none.
+func mostOf(members []string, was map[string]*track) *track {
+	n := map[*track]int{}
+	var best *track
+	for _, id := range members {
+		if tr := was[id]; tr != nil {
+			n[tr]++
+			if best == nil || n[tr] > n[best] || (n[tr] == n[best] && tr.id < best.id) {
+				best = tr
+			}
+		}
+	}
+	return best
 }
 
 // idLess sorts c2 before c10.
@@ -278,6 +368,52 @@ func (t *Tracker) trend(tr *track, now int64) string {
 		return Dispersing
 	}
 	return Steady
+}
+
+// project estimates the density trend of a track: rate (people/m² per
+// minute) from a least-squares slope over the last RateWindowMs of its
+// estimated density, the projected seconds until Danger at that rate (when
+// rate > 0, est < Danger and it is within EarlyWarnS), and whether that
+// projection is an early warning (est ≥ EarlyFloor × Danger).
+func (t *Tracker) project(tr *track, est float64) (rate, eta float64, early bool) {
+	cfg := t.cfg
+	rate = slope(tr.hist, tr.hist[len(tr.hist)-1].t-RateWindowMs) * 60_000
+	if cfg.EarlyWarnS <= 0 || rate <= 0 || est >= cfg.Danger {
+		return rate, 0, false
+	}
+	eta = (cfg.Danger - est) / (rate / 60)
+	if eta > cfg.EarlyWarnS {
+		return rate, 0, false
+	}
+	return rate, eta, est >= cfg.EarlyFloor*cfg.Danger
+}
+
+// slope is the least-squares slope (per ms) of the estimated density over
+// the samples at or after from, 0 when they span less than RateMinSpanMs.
+func slope(h []sample, from int64) float64 {
+	i := sort.Search(len(h), func(i int) bool { return h[i].t >= from })
+	h = h[i:]
+	if len(h) < 3 || h[len(h)-1].t-h[0].t < RateMinSpanMs {
+		return 0
+	}
+	t0 := h[0].t
+	var st, se float64
+	for _, s := range h {
+		st += float64(s.t - t0)
+		se += s.est
+	}
+	n := float64(len(h))
+	mt, me := st/n, se/n
+	var stt, ste float64
+	for _, s := range h {
+		dt := float64(s.t-t0) - mt
+		stt += dt * dt
+		ste += dt * (s.est - me)
+	}
+	if stt == 0 {
+		return 0
+	}
+	return ste / stt
 }
 
 // describe turns a group of points into a cluster (no ID, trend or level).
