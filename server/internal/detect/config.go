@@ -36,6 +36,11 @@ type Config struct {
 	EdgeMinSway   float64 `json:"edgeMinSway"`   // both phones need at least this RMS
 	LatencyMs     int64   `json:"latencyMs"`     // analyse up to now-LatencyMs so late packets have arrived
 
+	// False-positive guards.
+	VerticalRatio float64 `json:"verticalRatio"` // veto a wave edge when non-rhythmic vertical motion this many times stronger than the horizontal travels down the line with it (Mexican wave); 0 = off
+	MinChain      int     `json:"minChain"`      // a wave edge must be part of a run of at least this many phones along a row/column, same direction; ≤ 2 = off
+	ChainCorr     float64 `json:"chainCorr"`     // the other hops of a chain need only this |corr| at a wave-like lag in the same direction; 0 = they must be full wave edges
+
 	// Per zone.
 	ZoneSmoothMs int64   `json:"zoneSmoothMs"` // EMA time constant for the zone score
 	YellowScore  float64 `json:"yellowScore"`
@@ -67,6 +72,10 @@ func DefaultConfig() Config {
 		PeakMargin:    0.2,
 		EdgeMinSway:   0.15,
 		LatencyMs:     300,
+
+		VerticalRatio: 1.0,
+		MinChain:      3,
+		ChainCorr:     0.4,
 
 		ZoneSmoothMs: 8000,
 		YellowScore:  0.3,

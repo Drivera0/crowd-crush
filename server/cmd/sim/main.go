@@ -4,7 +4,9 @@
 //	go run ./server/cmd/sim -n 8 -scenario wave
 //	go run ./server/cmd/sim -n 8 -scenario wave -out recordings/sim-wave.jsonl -duration 70s
 //
-// Scenarios: calm, walk, dance, handle, shove, wave.
+// Scenarios: calm, walk, dance, handle, shove, wave, wave-jump, and the
+// false-positive checks sway, sway-slow, mexican, walkpast, procession,
+// march, pocket, bump, jump-stagger (see internal/sim).
 package main
 
 import (
