@@ -1159,6 +1159,8 @@ const actionText: Record<string, string> = {
   spawn: 'arriving',
   disperse: 'evacuating',
   exit: 'exits changed',
+  dance: 'dancing',
+  intermission: 'intermission',
 };
 
 for (const [id, out, fmt] of [
@@ -1223,6 +1225,8 @@ for (const b of document.querySelectorAll<HTMLButtonElement>('[data-sim]')) {
       case 'calm':
       case 'stage':
       case 'disperse':
+      case 'dance':
+      case 'intermission':
         void simAction({ type });
         break;
       case 'surge':

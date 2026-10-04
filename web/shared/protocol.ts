@@ -387,7 +387,7 @@ export interface SimState {
 }
 
 export type SimAction =
-  | { type: 'calm' | 'stage' | 'disperse' }
+  | { type: 'calm' | 'stage' | 'disperse' | 'dance' | 'intermission' }
   | { type: 'surge'; strength: number }
   | { type: 'attract'; x: number; y: number }
   | { type: 'shove'; x: number; y: number; dx: number; dy: number }
