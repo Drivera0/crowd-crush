@@ -54,7 +54,7 @@
 #include "arduino_secrets.h"
 
 #ifndef TX_POWER_1M
-#define TX_POWER_1M -59 // dBm one Pulse board hears from another 1 m away
+#define TX_POWER_1M -64 // dBm one Pulse board hears from another 1 m away (measured: A↔B at 1 m, median of 26 scans, Oct 3 2026)
 #endif
 #define PATH_LOSS_N 2.2f // 2 = open air, ~2.2 indoors, up to 3–4 in a packed crowd
 
