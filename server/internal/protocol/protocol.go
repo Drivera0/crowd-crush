@@ -812,6 +812,7 @@ type SimStatus struct {
 	Phones        int          `json:"phones,omitempty"`
 	Participation float64      `json:"participation,omitempty"`
 	Action        string       `json:"action,omitempty"`
+	Gather        *Point       `json:"gather,omitempty"` // the "Gather here" spot (m), while the action is attract
 	Exits         []SimExit    `json:"exits"`
 	Walls         [][4]float64 `json:"walls"`
 	Truth         *SimTruth    `json:"truth,omitempty"`

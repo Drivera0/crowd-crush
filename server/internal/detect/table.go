@@ -225,8 +225,8 @@ func (d *Detector) tableTogether(now int64, edges []Edge, recs []pairRec, long f
 			why = "a phone is being handled or missing readings"
 		case pr.walkA || pr.walkB:
 			why = "walking (step rhythm)"
-		case pr.swayA < d.cfg.EdgeMinSway || pr.swayB < d.cfg.EdgeMinSway:
-			why = fmt.Sprintf("not moving enough (sway %.2f and %.2f m/s², need %.2f)", pr.swayA, pr.swayB, d.cfg.EdgeMinSway)
+		case pr.swayA < pr.minSway || pr.swayB < pr.minSway:
+			why = fmt.Sprintf("not moving enough (sway %.2f and %.2f m/s², need %.2f)", pr.swayA, pr.swayB, pr.minSway)
 		default:
 			ok, lag, corr, why = d.togetherNow(long(a), long(b), maxLag)
 		}

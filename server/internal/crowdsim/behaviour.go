@@ -418,8 +418,9 @@ func (w *World) depart() {
 }
 
 // pickFollowers sends whole groups to the attraction point, nearest first
-// (distance plus a random 0–6 m), until about 40 % of the crowd is going.
-// Groups on a trip carry on; the rest stay where they are.
+// (distance plus a random 0–6 m), until about 80 % of the crowd is going.
+// Groups at or on their way to the bar come too; only people arriving or
+// leaving carry on. The rest stay where they are.
 func (w *World) pickFollowers() {
 	type cand struct {
 		g *group
@@ -427,8 +428,8 @@ func (w *World) pickFollowers() {
 	}
 	var cs []cand
 	for _, g := range w.groups {
-		if g.purpose == pFollow || g.purpose == pEvac {
-			w.toIdle(g)
+		if g.purpose == pFollow || g.purpose == pEvac || g.purpose == pToPOI || g.purpose == pAtPOI || g.purpose == pBack {
+			w.toIdle(g) // groups on a trip to the bar come too
 		}
 		if g.purpose == pIdle && len(g.members) > 0 {
 			cs = append(cs, cand{g, math.Hypot(g.cx-w.attX, g.cy-w.attY) + 6*w.rng.Float64()})
@@ -684,14 +685,14 @@ func (w *World) intent(a *Agent) (speed, ex, ey float64, h how) {
 	case pFollow:
 		if grp.walking {
 			a.gx, a.gy = w.attX, w.attY
-			speed, ex, ey = w.slotVel(a, grp, 0.8*formationSpeed(grp))
+			speed, ex, ey = w.slotVel(a, grp, 1.15*formationSpeed(grp)) // brisk: something is happening there
 			return speed, ex, ey, howWalk
 		}
 		// Head for the point; stop pushing once it is crowded around you
-		// (about 3.5 people/m² within 1 m) near the group.
+		// (about 4 people/m² within 1 m) near the group.
 		a.gx, a.gy = w.attX, w.attY
 		ex, ey, d := toward(a, a.gx, a.gy)
-		speed = 0.8 * a.V0 * clamp((d-0.3)/1.0, 0, 1)
+		speed = 1.1 * a.V0 * clamp((d-0.3)/1.0, 0, 1)
 		if a.Density >= attractPack && d < w.packR+1.5 {
 			speed = 0
 		}
@@ -746,7 +747,7 @@ func (w *World) desire() {
 			nFollow++
 		}
 	}
-	// Followers stop pressing once inside the disc they would fill at ~3.5/m².
+	// Followers stop pressing once inside the disc they would fill at ~4/m².
 	w.packR = math.Sqrt(float64(nFollow) / (attractPack * math.Pi))
 	for i, a := range w.agents {
 		a.idx = i

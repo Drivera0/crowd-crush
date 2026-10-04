@@ -1,6 +1,6 @@
 # Pulse — common tasks. `make demo` builds everything and starts the server.
 
-.PHONY: all web build run demo sim test check env doctor preflight boards tunnel recordings eval loadtest clean
+.PHONY: all web build run demo live sim test check env doctor preflight boards tunnel recordings eval loadtest clean
 
 all: build
 
@@ -22,6 +22,10 @@ run:
 
 demo: build
 	./bin/pulse $(ARGS)
+
+# Pulse + the Cloudflare tunnel (pulsecrowd.tech, else a quick tunnel); Ctrl-C stops both.
+live:
+	./scripts/live.sh $(ARGS)
 
 # make sim SCENARIO=dance N=24 (crowd layout; ARGS="-layout line -n 8" for the line demo)
 SCENARIO ?= wave

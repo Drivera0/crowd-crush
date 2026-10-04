@@ -173,6 +173,9 @@ func (w *World) Status() protocol.SimStatus {
 	s := protocol.SimStatus{Running: true, T: round1(w.T), People: len(w.agents), Phones: w.Phones(),
 		Participation: w.Participation, Action: w.Action, Scenario: w.Scenario(),
 		Venue: &protocol.VenueSize{W: w.G.W, H: w.G.H}, Furniture: w.vs.furniture}
+	if w.Action == ActAttract {
+		s.Gather = &protocol.Point{round2(w.attX), round2(w.attY)}
+	}
 	s.Exits, s.Walls = GeometryJSON(w.G)
 	tr := w.truth
 	s.Truth = &protocol.SimTruth{MaxDensity: round2(tr.MaxDensity), MaxPressure: math.Round(tr.MaxPressure), Crushing: tr.Crushing}

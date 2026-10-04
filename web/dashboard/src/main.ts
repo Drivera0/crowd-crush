@@ -1174,7 +1174,26 @@ function onAlert(a: Alert, fresh: boolean) {
     if (fresh) playBrief(a);
   } else if (fresh && a.level === 'red') {
     beep();
+  } else if (fresh && a.level === 'yellow' && !a.test) {
+    headsUp(a, where);
   }
+}
+
+// A new yellow incident has no briefing (that waits for red), so the operator
+// gets a heads-up: a toast, and a short line in the browser's voice. At most
+// one per zone and kind every 30 s, so a zone flickering in and out of yellow
+// doesn't repeat itself.
+const headsUpAt = new Map<string, number>();
+function headsUp(a: Alert, where: string) {
+  const key = `${a.zone}|${a.kind}`;
+  const now = Date.now();
+  if (now - (headsUpAt.get(key) ?? 0) < 30_000) return;
+  headsUpAt.set(key, now);
+  const text = a.kind === 'density'
+    ? `Heads up: ${where} is getting crowded. Keep an eye on it.`
+    : `Heads up: pressure is building in ${where}. Stay alert.`;
+  toast(text, 'watch');
+  if (soundOn && areas.get(a.zone)?.rules?.notify?.voice !== false) speak(text);
 }
 
 // ---------------------------------------------------------------------------
@@ -2123,21 +2142,34 @@ function renderSimActions(s: SimScenario | undefined) {
   $('simStrengthLabel').textContent = strength ? `${strength.label} strength` : 'Shove strength';
 }
 
+/** Highlight the action the crowd is doing now, so it's clear which option was picked. */
+function markSimAction(type: string | undefined) {
+  for (const b of $('simActions').querySelectorAll<HTMLButtonElement>('button')) {
+    const on = !!type && b.dataset.sim === type;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-pressed', String(on));
+  }
+}
+
 /** Run an action from its spec: a plain button, one with the strength slider, a click on the map, or a drag. */
 function runSimAction(a: SimActionSpec) {
   const strength = Number(($('simStrength') as HTMLInputElement).value) / 100;
+  if (lastMode === 'sim') markSimAction(a.type); // straight away; the next poll confirms it
   areas.cancelPick(); // a new choice replaces a pick still waiting for a click
   switch (a.kind) {
     case 'behaviour':
+      mesh.gatherPin = null; // a new behaviour ends the gathering
       void simAction({ type: a.type } as SimAction);
       break;
     case 'strength':
+      mesh.gatherPin = null;
       void simAction({ type: a.type, strength } as SimAction);
       break;
     case 'point':
-      pickOnMap(a.type === 'spawn' ? 'Click where 20 people arrive' : 'Click where the group should gather', false, (p) =>
-        void simAction(a.type === 'spawn' ? { type: 'spawn', x: p.x, y: p.y, n: 20 } : ({ type: a.type, x: p.x, y: p.y } as SimAction)),
-      );
+      pickOnMap(a.type === 'spawn' ? 'Click where 20 people arrive' : 'Click where the group should gather', false, (p) => {
+        if (a.type === 'attract') mesh.gatherPin = { x: p.x, y: p.y }; // straight away; the next poll confirms it
+        void simAction(a.type === 'spawn' ? { type: 'spawn', x: p.x, y: p.y, n: 20 } : ({ type: a.type, x: p.x, y: p.y } as SimAction));
+      });
       break;
     case 'drag':
       pickOnMap('Drag on the map: where the push starts, and which way', true, (p) => {
@@ -2254,6 +2286,7 @@ function renderSimRunning(running: boolean) {
 /** The simulation ended (stopped, replaced by a saved run): nothing of it may linger as if current. */
 function simEnded() {
   simState = null;
+  mesh.gatherPin = null;
   simStarted = null;
   simSlidersTouched = false;
   exitsSig = '';
@@ -2398,6 +2431,7 @@ async function pollSim() {
     const st = (await r.json()) as SimState;
     if (!st.running) {
       // Not running (any more): keep nothing of the last run.
+      mesh.gatherPin = null;
       if (simState) simEnded();
       return;
     }
@@ -2414,6 +2448,8 @@ async function pollSim() {
     // The action buttons are the running scenario's (not the picker's) while it runs.
     const running = scenarioOf(st.scenario ?? 'concert');
     if (running && $('simActions').childElementCount !== running.actions.length) renderSimActions(running);
+    markSimAction(st.running ? st.action : undefined);
+    mesh.gatherPin = st.running && st.action === 'attract' && st.gather ? { x: st.gather[0], y: st.gather[1] } : null;
     renderSimState(st);
     renderSimApply();
   } catch {
@@ -2649,6 +2685,31 @@ async function alertAction(a: Alert, what: 'ack' | 'resolve', note = '') {
 // area alert rules
 // ---------------------------------------------------------------------------
 
+/** Ready-made rule sets: one click fills the form below, which staff can then adjust (Custom). */
+const RULE_PRESETS: { id: string; name: string; tip: string; rules: AlertRules }[] = [
+  { id: 'standard', name: 'Standard', tip: 'Any part of the venue: crowding above 4 per m² for 5 s, pushes on',
+    rules: { density: 4, densityHoldS: 5, push: true } },
+  { id: 'stage', name: 'Stage front', tip: 'Barrier at the stage: alerts sooner, at 3.5 per m² for 3 s',
+    rules: { density: 3.5, densityHoldS: 3, push: true, message: 'Ease the crowd back from the barrier and pause the show if it keeps building' } },
+  { id: 'exit', name: 'Exit or gate', tip: 'Exits and entrances must stay clear: 3 per m² for 5 s',
+    rules: { density: 3, densityHoldS: 5, push: true, message: 'Keep the exit clear: hold entry and open the next gate' } },
+  { id: 'queue', name: 'Bar or queue', tip: 'Queues pack in slowly: 3 per m² held for 10 s',
+    rules: { density: 3, densityHoldS: 10, push: true, message: 'Open another serving point and space out the queue' } },
+  { id: 'room', name: 'Small room', tip: 'A classroom or meeting room: 50 people at most, crowding above 2.5 per m² for 10 s',
+    rules: { density: 2.5, densityHoldS: 10, maxPhones: 50, push: true, message: 'Stop more people coming in and open the doors' } },
+];
+
+/** The preset these rules match (ignoring where alerts go), if any. */
+function presetOf(r?: AlertRules): string | undefined {
+  if (!r) return undefined;
+  return RULE_PRESETS.find((p) =>
+    (p.rules.density ?? undefined) === (r.density ?? undefined) &&
+    (p.rules.densityHoldS ?? undefined) === (r.densityHoldS ?? undefined) &&
+    (p.rules.maxPhones ?? undefined) === (r.maxPhones ?? undefined) &&
+    (p.rules.push !== false) === (r.push !== false) &&
+    (p.rules.message ?? '') === (r.message ?? ''))?.id;
+}
+
 function buildRules(box: HTMLElement, id: string) {
   const a = areas.get(id);
   if (!a) return;
@@ -2658,6 +2719,9 @@ function buildRules(box: HTMLElement, id: string) {
   // Empty boxes mean the rule is off; the server's limits are mirrored in min/max.
   box.innerHTML =
     `<div class="rules-form">` +
+    `<div class="rf-block"><span>Start from a standard set</span><div class="rf-chips rf-presets">` +
+    RULE_PRESETS.map((p) => `<button type="button" class="sm" data-preset="${p.id}" data-tip="${esc(p.tip)}">${esc(p.name)}</button>`).join('') +
+    `<button type="button" class="sm" data-preset="custom" data-tip="Set your own limits in the boxes below">Custom</button></div></div>` +
     `<p class="rf-note muted">Three ways this area can raise an alert. Leave a box empty to turn that rule off; changes save as you go.</p>` +
     `<div class="rf-rule"><span class="rf-name">Crowding</span>` +
     `<label class="rf-line"><span>more than</span><input type="number" name="density" min="0.5" max="20" step="0.5" placeholder="off" value="${r.density ?? ''}" aria-label="People per square metre" /><span>people per m²</span></label>` +
@@ -2694,7 +2758,35 @@ function buildRules(box: HTMLElement, id: string) {
     };
   };
   const saved = box.querySelector<HTMLElement>('.rf-saved')!;
+  const markPreset = () => {
+    const cur = presetOf(read()) ?? 'custom';
+    for (const b of box.querySelectorAll<HTMLButtonElement>('[data-preset]')) {
+      b.classList.toggle('on', b.dataset.preset === cur);
+      b.setAttribute('aria-pressed', String(b.dataset.preset === cur));
+    }
+  };
+  // Only highlight Custom once staff have touched the rules; a fresh area shows no choice yet.
+  if (hasRules(a.rules)) markPreset();
+  box.querySelector('.rf-presets')!.addEventListener('click', (e) => {
+    const b = (e.target as HTMLElement).closest<HTMLButtonElement>('[data-preset]');
+    if (!b) return;
+    const p = RULE_PRESETS.find((x) => x.id === b.dataset.preset);
+    if (!p) {
+      // Custom: keep what's there and go to the first box.
+      for (const x of box.querySelectorAll<HTMLButtonElement>('[data-preset]')) x.classList.toggle('on', x === b);
+      box.querySelector<HTMLInputElement>('[name=density]')!.focus();
+      return;
+    }
+    const set = (name: string, v: string) => ((box.querySelector(`[name=${name}]`) as HTMLInputElement).value = v);
+    set('density', String(p.rules.density ?? ''));
+    set('densityHoldS', String(p.rules.densityHoldS ?? ''));
+    set('maxPhones', String(p.rules.maxPhones ?? ''));
+    set('message', p.rules.message ?? '');
+    (box.querySelector('[name=push]') as HTMLInputElement).checked = p.rules.push !== false;
+    box.dispatchEvent(new Event('change'));
+  });
   box.addEventListener('change', () => {
+    markPreset();
     areas.setRules(id, read());
     // Inline confirmation next to the form, instead of a toast per keystroke.
     saved.textContent = 'Saved ✓';

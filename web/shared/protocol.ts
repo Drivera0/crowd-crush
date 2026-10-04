@@ -644,6 +644,8 @@ export interface SimState {
   phones?: number;
   participation?: number;
   action?: string;
+  /** The "Gather here" spot (venue metres) while the action is attract. */
+  gather?: Point;
   exits?: SimExit[];
   walls?: [number, number, number, number][];
   /** The running (or previewed) scenario, the venue it built, and its furniture. */

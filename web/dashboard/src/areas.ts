@@ -46,8 +46,15 @@ export function inPoly(poly: Point[], x: number, y: number): boolean {
   return inside;
 }
 
+/** A detector zone that staff didn't draw: the default split of the venue (A, B, ...), with its live phone count. */
+interface ZoneView extends Zone {
+  phones: number;
+}
+
 export class Areas {
   list: AreaView[] = [];
+  /** The default zones, drawn so it's clear which part of the map is Zone A or B (empty once staff draw areas). */
+  private zones: ZoneView[] = [];
   selected: string | null = null;
   private tool: Tool = 'select';
   private draft: Draft | null = null;
@@ -244,6 +251,11 @@ export class Areas {
   /** Take levels from the server's zones and count the phones inside each area. */
   sync(zones: Zone[], nodes: Node[]) {
     const byId = new Map(zones.map((z) => [z.id, z]));
+    const inside = (poly: Point[]) =>
+      nodes.filter((n) => n.status !== 'stale' && !n.outside && inPoly(poly, n.x, n.y)).length;
+    this.zones = zones
+      .filter((z) => !z.custom && z.id !== 'rest' && z.poly?.length >= 3)
+      .map((z) => ({ ...z, phones: inside(z.poly) }));
     let changed = false;
     for (const a of this.list) {
       const z = byId.get(a.id);
@@ -500,7 +512,64 @@ export class Areas {
   // drawing (called by the mesh under the nodes)
   // -------------------------------------------------------------------------
 
+  /**
+   * The default zones: a dashed outline, a large faint letter in the middle and
+   * a label with the phone count (and the level when not calm), tinted when the zone is on watch or
+   * in danger. Drawn even when areas are hidden: a simulated classroom or
+   * stadium gate has its own zones.
+   */
+  private drawZones(g: CanvasRenderingContext2D) {
+    const light = document.documentElement.dataset.theme === 'light';
+    const ink = light ? '15,23,42' : '230,235,242';
+    for (const z of this.zones) {
+      const level = toLevel(z.level);
+      const rgb = level === 'calm' ? ink : LEVEL_RGB[level];
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (const [px, py] of z.poly) {
+        const w = this.mesh.venueToWorld(px, py);
+        x0 = Math.min(x0, w.x); y0 = Math.min(y0, w.y);
+        x1 = Math.max(x1, w.x); y1 = Math.max(y1, w.y);
+      }
+      this.path(g, z.poly);
+      if (level !== 'calm') {
+        g.fillStyle = `rgba(${rgb},${level === 'danger' ? 0.1 : 0.07})`;
+        g.fill();
+      }
+      g.setLineDash(level === 'calm' ? [10, 8] : []);
+      g.lineWidth = level === 'danger' ? 3 : level === 'watch' ? 2.5 : 1.5;
+      g.strokeStyle = `rgba(${rgb},${level === 'calm' ? 0.5 : 0.9})`;
+      g.stroke();
+      g.setLineDash([]);
+
+      // The zone's letter, big and faint, behind the crowd.
+      const big = Math.min(x1 - x0, y1 - y0) * 0.45;
+      if (big >= 24) {
+        g.font = `700 ${Math.min(big, 220)}px Inter, system-ui, sans-serif`;
+        g.textAlign = 'center';
+        g.textBaseline = 'middle';
+        g.fillStyle = `rgba(${rgb},${level === 'calm' ? 0.09 : 0.16})`;
+        g.fillText(z.id.length <= 2 ? z.id : z.name, (x0 + x1) / 2, (y0 + y1) / 2);
+        g.textAlign = 'start';
+        g.textBaseline = 'alphabetic';
+      }
+
+      // Label at the bottom middle of the zone: the stage and the crowd badges sit at the top.
+      const word = level === 'danger' ? ' · danger' : level === 'watch' ? ' · watch' : '';
+      const text = `${z.name}${word} · ${z.phones} phone${z.phones === 1 ? '' : 's'}`;
+      g.font = '600 12px Inter, system-ui, sans-serif';
+      const tw = g.measureText(text).width;
+      const lx = (x0 + x1) / 2 - tw / 2 - 8, ly = y1 - 34;
+      g.fillStyle = `rgba(${rgb},${level === 'calm' ? 0.14 : 0.85})`;
+      g.beginPath();
+      g.roundRect(lx, ly, tw + 16, 22, 11);
+      g.fill();
+      g.fillStyle = level !== 'calm' ? '#ffffff' : light ? '#0f172a' : '#e6ebf2';
+      g.fillText(text, lx + 8, ly + 15);
+    }
+  }
+
   private draw(g: CanvasRenderingContext2D, now: number) {
+    this.drawZones(g);
     if (this.hidden) return;
     const light = document.documentElement.dataset.theme === 'light';
     for (const a of this.list) {
