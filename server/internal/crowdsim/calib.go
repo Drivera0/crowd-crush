@@ -66,3 +66,100 @@ func (w *World) MeanSpeedX() float64 {
 	}
 	return s / float64(len(w.agents))
 }
+
+// NewCounterflow is NewCorridor with a share of the people (chosen at
+// random) walking the other way, steering as they do in the venue (the
+// wider headings and passing on the right). share 0.5 is bidirectional
+// flow; share 0 is the one-way reference with the same steering.
+func NewCounterflow(length, width, density, share float64, seed int64) *World {
+	w := NewCorridor(length, width, density, seed)
+	w.counter = true
+	for _, a := range w.agents {
+		if w.rng.Float64() < share {
+			a.cdir = -1
+		}
+		a.hd = math.Pi * (1 - a.cdir) / 2
+		a.face, a.prevFace = a.hd, a.hd
+	}
+	return w
+}
+
+// MeanSpeedOwn is the crowd's mean velocity along each person's own
+// walking direction (corridor and counterflow).
+func (w *World) MeanSpeedOwn() float64 {
+	if len(w.agents) == 0 {
+		return 0
+	}
+	s := 0.0
+	for _, a := range w.agents {
+		s += a.VX * a.cdir
+	}
+	return s / float64(len(w.agents))
+}
+
+// LaneOrder is the lane order parameter of a counterflow (Rex & Löwen
+// 2007; used for pedestrians by e.g. Feliciani & Nishinari 2016): the
+// corridor is cut into strips one body wide along the walking direction;
+// for each person, φ_i = ((n₊ − n₋)/(n₊ + n₋))² over the people in their
+// strip, and LaneOrder is the mean of φ_i. Fully separated lanes give 1;
+// a random mix gives about 1/(people per strip).
+func (w *World) LaneOrder(strip float64) float64 {
+	ns := int(math.Ceil(w.G.H / strip))
+	plus, minus := make([]int, ns), make([]int, ns)
+	idx := func(a *Agent) int { return max(0, min(ns-1, int(a.Y/strip))) }
+	for _, a := range w.agents {
+		if a.cdir > 0 {
+			plus[idx(a)]++
+		} else {
+			minus[idx(a)]++
+		}
+	}
+	phi := 0.0
+	for _, a := range w.agents {
+		i := idx(a)
+		p, m := float64(plus[i]), float64(minus[i])
+		phi += ((p - m) / (p + m)) * ((p - m) / (p + m))
+	}
+	return phi / float64(len(w.agents))
+}
+
+// Bottleneck room (m): people wait in front of a door in the middle of
+// the right-hand wall.
+const (
+	bottleW = 10.0
+	bottleH = 8.0
+)
+
+// NewBottleneck builds a 10 × 8 m room with a door `door` m wide in the
+// middle of its right wall and n people waiting in the 6 m in front of it,
+// all leaving through it (the disperse behaviour, as one-person groups).
+// Nobody carries a phone. Used to compare the flow through the door with
+// bottleneck experiments (Kretz et al. 2006; Seyfried et al. 2009).
+func NewBottleneck(door float64, n int, seed int64) *World {
+	w := &World{Participation: 1e-9, Action: ActDisperse, rng: rand.New(rand.NewSource(seed))}
+	W, H := bottleW, bottleH
+	y0, y1 := H/2-door/2, H/2+door/2
+	g := &Geometry{W: W, H: H, BarrierY: -1, custom: true}
+	e := &Exit{ID: "door", Name: "Door", X0: W, Y0: y0, X1: W, Y1: y1, Open: true, nx: 1}
+	g.Exits = []*Exit{e}
+	g.Walls = []Seg{{0, 0, W, 0}, {0, H, W, H}, {0, 0, 0, H}, {W, 0, W, y0}, {W, y1, W, H}}
+	w.G = g
+	w.solid = g.solid()
+	w.truth.Init()
+	for tries := 0; len(w.agents) < n && tries < n*400; tries++ {
+		x := W - 6 + 5.6*w.rng.Float64()
+		y := 0.4 + (H-0.8)*w.rng.Float64()
+		r := 0.20 + 0.06*w.rng.Float64()
+		if !w.free(x, y, r) {
+			continue
+		}
+		a := w.newAgent(x, y)
+		a.R, a.phone = r, nil
+		a.hd, a.face = 0, 0
+		w.agents = append(w.agents, a)
+		gr := w.addGroup([]*Agent{a})
+		gr.exit = e
+		w.setOff(gr, pEvac, 0, 0)
+	}
+	return w
+}

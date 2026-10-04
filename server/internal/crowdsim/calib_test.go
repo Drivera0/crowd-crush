@@ -28,6 +28,7 @@ func corridorSpeed(density float64, seed int64, warm, measure float64) float64 {
 // curve is followed within a tolerance (see the package doc for the full
 // table: PULSE_WEIDMANN=1 go test ./server/internal/crowdsim -run Weidmann -v).
 func TestWeidmann(t *testing.T) {
+	t.Parallel()
 	cases := []struct{ rho, tol float64 }{
 		{0.5, 0.2},
 		{2, 0.15},
@@ -68,5 +69,24 @@ func TestWeidmannSweep(t *testing.T) {
 		}
 		want := Weidmann(rho)
 		t.Logf("%6.1f %10.2f %10.2f %+8.2f", rho, v, want, v-want)
+	}
+}
+
+// TestBottleneckSweep prints flows for evacuation time gaps (env-gated):
+// PULSE_BOTTLE=1 go test ./server/internal/crowdsim -run BottleneckSweep -v
+func TestBottleneckSweep(t *testing.T) {
+	if os.Getenv("PULSE_BOTTLE") == "" {
+		t.Skip("set PULSE_BOTTLE=1")
+	}
+	defer func(v float64) { EvacTimeGap = v }(EvacTimeGap)
+	for _, tg := range []float64{0.6, 0.45, 0.3, 0.2, 0.1} {
+		EvacTimeGap = tg
+		for _, door := range []float64{0.8, 1.0, 1.2} {
+			j := 0.0
+			for seed := int64(1); seed <= 3; seed++ {
+				j += bottleneckFlow(door, 120, seed) / 3
+			}
+			t.Logf("time gap %.2f s, door %.1f m: %.2f persons/(m·s)", tg, door, j)
+		}
 	}
 }
