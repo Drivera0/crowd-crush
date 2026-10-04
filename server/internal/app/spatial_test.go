@@ -358,31 +358,27 @@ func TestDensityAlert(t *testing.T) {
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		a.mu.Lock()
-		var red, briefed *protocol.Alert
-		for i, al := range a.alerts {
-			if al.Kind == protocol.KindDensity && al.Level == protocol.LevelRed && al.Brief == "" && red == nil {
-				red = &a.alerts[i]
+		var red protocol.Alert
+		n := 0
+		for _, al := range a.alerts {
+			if al.Kind == protocol.KindDensity && al.Level == protocol.LevelRed {
+				red = al
+				n++
 			}
-			if al.Kind == protocol.KindDensity && al.Brief != "" {
-				briefed = &a.alerts[i]
-			}
-		}
-		var redCopy, briefCopy protocol.Alert
-		if red != nil {
-			redCopy = *red
-		}
-		if briefed != nil {
-			briefCopy = *briefed
 		}
 		a.mu.Unlock()
-		if red != nil && briefed != nil {
-			if redCopy.Zone == "" || redCopy.Score < detect.DefaultConfig().DensityDanger {
-				t.Errorf("red density alert %+v", redCopy)
+		if n > 1 {
+			t.Fatalf("one incident per zone and kind, got %d red density alerts", n)
+		}
+		// The briefing updates the same alert (same ID) when it arrives.
+		if red.Brief != "" {
+			if red.Zone == "" || red.ID == "" || red.Score < detect.DefaultConfig().DensityDanger {
+				t.Errorf("red density alert %+v", red)
 			}
-			if !strings.Contains(briefCopy.Brief, "people packed into") || !strings.Contains(briefCopy.Brief, "Zone "+redCopy.Zone) {
-				t.Errorf("briefing %q", briefCopy.Brief)
+			if !strings.Contains(red.Brief, "people packed into") || !strings.Contains(red.Brief, "Zone "+red.Zone) || red.Headline == "" || red.Action == "" {
+				t.Errorf("briefing %+v", red)
 			}
-			t.Logf("alert %+v; brief %q", redCopy, briefCopy.Brief)
+			t.Logf("alert %+v", red)
 			return
 		}
 		time.Sleep(20 * time.Millisecond)

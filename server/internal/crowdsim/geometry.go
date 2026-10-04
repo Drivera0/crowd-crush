@@ -32,6 +32,10 @@ type Geometry struct {
 	Exits                []*Exit
 	BarrierY             float64 // y of the stage barrier's front
 	BarrierX0, BarrierX1 float64
+	// Stage is the stage outline from a venue layout (LayoutGeometry); empty
+	// = the default stage pit above the barrier.
+	Stage  [][2]float64
+	custom bool // built from a venue layout
 }
 
 // Geometry constants (m).
@@ -94,6 +98,9 @@ func (g *Geometry) solid() []Seg {
 
 // inStage reports whether a point is inside the stage pit (no one may stand there).
 func (g *Geometry) inStage(x, y float64) bool {
+	if len(g.Stage) >= 3 {
+		return inPoly(g.Stage, x, y)
+	}
 	return y < g.BarrierY && x > g.BarrierX0 && x < g.BarrierX1
 }
 

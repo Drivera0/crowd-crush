@@ -1,12 +1,14 @@
-// Package brief asks Gemini to explain an alert in two sentences.
+// Package brief asks Gemini to explain an alert as a structured briefing
+// (a headline and one action), and to read a venue's floor plan.
 //
 // Gemini never decides whether a zone is in danger: the detector already has.
-// Every call has a 5 s timeout and falls back to a template sentence.
+// Every briefing call has a 5 s timeout and falls back to a template.
 package brief
 
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,16 +20,16 @@ import (
 	"time"
 )
 
-// Timeout bounds every Gemini call.
+// Timeout bounds every briefing and "ask" call.
 const Timeout = 5 * time.Second
 
 // Info is what the detector knows about an alert.
 //
 // Kind "wave" (the default) is a push travelling through the crowd; kind
 // "density" is a cluster of people packing too tightly, described by the
-// density fields.
+// density fields; kind "rule" is an area rule staff set (Rule says which).
 type Info struct {
-	Kind        string    `json:"kind,omitempty"` // wave | density
+	Kind        string    `json:"kind,omitempty"` // wave | density | rule
 	Zone        string    `json:"zoneId"`
 	Where       string    `json:"where,omitempty"` // the zone's name for people: "Zone A", "Stage front"
 	Level       string    `json:"level"`
@@ -38,13 +40,33 @@ type Info struct {
 	Phones      int       `json:"phonesInZone"`
 	Swaying     int       `json:"phonesSwaying,omitempty"`
 
-	// Density alerts.
+	// Density alerts (and density rules).
 	Density float64 `json:"peoplePerSquareMetre,omitempty"` // estimated
 	People  int     `json:"estimatedPeople,omitempty"`
 	AreaM2  float64 `json:"areaSquareMetres,omitempty"`
 	Trend   string  `json:"trend,omitempty"` // forming | steady | dispersing
 	X       float64 `json:"x,omitempty"`     // where on the venue map (m)
 	Y       float64 `json:"y,omitempty"`
+
+	// Rule alerts: which rule ("density" or "capacity") and its limit
+	// (people/m² or phones).
+	Rule  string  `json:"rule,omitempty"`
+	Limit float64 `json:"ruleLimit,omitempty"`
+
+	// Message is the action staff set for this area: used verbatim.
+	Message string `json:"staffAction,omitempty"`
+}
+
+// Briefing is a structured briefing: what is happening and where, and the
+// one thing staff should do.
+type Briefing struct {
+	Headline string `json:"headline"`
+	Action   string `json:"action"`
+}
+
+// Text is the briefing as one string, for the voice and the timeline.
+func (b Briefing) Text() string {
+	return strings.TrimSpace(b.Headline + " " + b.Action)
 }
 
 // DirectionText describes a wave direction for people. +x is left to
@@ -91,25 +113,55 @@ func Place(in Info) string {
 	return "Zone " + in.Zone
 }
 
-// Template is the fallback briefing when Gemini is unavailable.
-func Template(in Info) string {
+// Template is the fallback briefing when Gemini is unavailable. A staff
+// message replaces the action.
+func Template(in Info) Briefing {
+	b := template(in)
+	if m := strings.TrimSpace(in.Message); m != "" {
+		b.Action = m
+	}
+	return b
+}
+
+func template(in Info) Briefing {
 	at := Place(in)
-	if in.Kind == "density" {
+	switch in.Kind {
+	case "density":
 		if in.Level != "red" {
-			return fmt.Sprintf("%s: people bunching up near %.0f, %.0f, watch closely.", at, in.X, in.Y)
+			return Briefing{fmt.Sprintf("%s: people bunching up near %.0f, %.0f.", at, in.X, in.Y), "Watch closely."}
 		}
-		return fmt.Sprintf("%s: about %d people packed into %.0f square metres near %.0f, %.0f, %s. Stop entry to %s and open space around them now.",
-			at, in.People, math.Max(1, math.Round(in.AreaM2)), in.X, in.Y, TrendText(in.Trend), at)
+		return Briefing{
+			fmt.Sprintf("%s: about %d people packed into %.0f square metres near %.0f, %.0f, %s.",
+				at, in.People, math.Max(1, math.Round(in.AreaM2)), in.X, in.Y, TrendText(in.Trend)),
+			fmt.Sprintf("Stop entry to %s and open space around them now.", at)}
+	case "rule":
+		if in.Rule == "capacity" {
+			return Briefing{
+				fmt.Sprintf("%s: %d phones inside, over this area's limit of %.0f.", at, in.Phones, in.Limit),
+				fmt.Sprintf("Stop entry to %s until it clears.", at)}
+		}
+		if in.Level != "red" {
+			return Briefing{fmt.Sprintf("%s: crowd density nearing this area's limit.", at), "Watch closely."}
+		}
+		return Briefing{
+			fmt.Sprintf("%s: about %.0f people per square metre, above this area's limit of %s.", at, math.Max(1, in.Density), trimNum(in.Limit)),
+			fmt.Sprintf("Stop entry to %s and open space now.", at)}
 	}
 	if in.Level != "red" {
-		return fmt.Sprintf("%s: crowd sway building, watch closely.", at)
+		return Briefing{fmt.Sprintf("%s: crowd sway building.", at), "Watch closely."}
 	}
 	speed := ""
 	if in.LagMs > 0 {
 		speed = fmt.Sprintf(", about one person every %d milliseconds", in.LagMs)
 	}
-	return fmt.Sprintf("%s: crowd waves travelling %s%s. Stop entry to %s and open relief exits now.",
-		at, DirectionText(in.Direction), speed, at)
+	return Briefing{
+		fmt.Sprintf("%s: crowd waves travelling %s%s.", at, DirectionText(in.Direction), speed),
+		fmt.Sprintf("Stop entry to %s and open relief exits now.", at)}
+}
+
+// trimNum prints 4 as "4" and 2.5 as "2.5".
+func trimNum(v float64) string {
+	return strings.TrimSuffix(strings.TrimRight(fmt.Sprintf("%.1f", v), "0"), ".")
 }
 
 // Client talks to the Gemini REST API.
@@ -128,7 +180,15 @@ func New(key, model string) *Client {
 	if model == "" {
 		model = "gemini-flash-latest"
 	}
-	return &Client{key: key, model: model, base: "https://generativelanguage.googleapis.com", http: &http.Client{Timeout: Timeout}}
+	// No client-level timeout: each call's context bounds it (5 s for
+	// briefings, longer for floor plans).
+	return &Client{key: key, model: model, base: "https://generativelanguage.googleapis.com", http: &http.Client{}}
+}
+
+// WithBase points the client at another API host (a fake one in tests).
+func (c *Client) WithBase(u string) *Client {
+	c.base = strings.TrimRight(u, "/")
+	return c
 }
 
 // Enabled reports whether a key is configured.
@@ -136,29 +196,93 @@ func (c *Client) Enabled() bool { return c != nil && c.key != "" }
 
 const system = `You are the voice of a crowd-safety early-warning system used by event stewards.
 The detector (not you) has already decided the alert level from phone motion sensors.
-Write exactly two short sentences to be read aloud over a radio:
-1) what is happening and where, in plain words;
-2) one concrete action for stewards.
+Reply as JSON with two fields, to be read aloud over a radio:
+- "headline": one short sentence saying what is happening and where, in plain words;
+- "action": one short sentence with one concrete instruction for stewards.
 Name the place exactly as the "where" field says; never read out zoneId.
-No preamble, no markdown, no numbers with decimals, under 40 words total.`
+If the data has a "staffAction", that is the action staff chose for this area: use it verbatim as "action".
+No markdown, no numbers with decimals, under 40 words in total.`
 
-// Brief returns a two-sentence briefing. On any failure it returns the
-// template text together with the error, so callers can always use the text.
-func (c *Client) Brief(ctx context.Context, in Info) (string, error) {
+// briefSchema is the structured-output schema for a briefing.
+var briefSchema = map[string]any{
+	"type": "OBJECT",
+	"properties": map[string]any{
+		"headline": map[string]any{"type": "STRING"},
+		"action":   map[string]any{"type": "STRING"},
+	},
+	"required":         []string{"headline", "action"},
+	"propertyOrdering": []string{"headline", "action"},
+}
+
+// Brief returns a structured briefing. On any failure it returns the
+// template together with the error, so callers can always use it.
+func (c *Client) Brief(ctx context.Context, in Info) (Briefing, error) {
 	if !c.Enabled() {
 		return Template(in), ErrNoKey
 	}
 	b, _ := json.Marshal(in)
 	meaning := "Alert type: a push wave travelling through the crowd. Direction meaning: " + DirectionText(in.Direction)
-	if in.Kind == "density" {
+	switch in.Kind {
+	case "density":
 		meaning = "Alert type: crowding. People are packed too tightly in one spot (positions are metres on the venue map, origin top-left); this is a density alert, not a push wave. Trend: " + TrendText(in.Trend)
+	case "rule":
+		if in.Rule == "capacity" {
+			meaning = "Alert type: an area rule set by staff. More phones are inside the area than its limit (ruleLimit); this is about capacity, not a push wave."
+		} else {
+			meaning = "Alert type: an area rule set by staff. The estimated crowd density inside the area (peoplePerSquareMetre) has stayed above its limit (ruleLimit, people per square metre); this is crowding, not a push wave."
+		}
 	}
-	out, err := c.generate(ctx, system, "Alert data:\n"+string(b)+"\n"+meaning, 120)
+	user := "Alert data:\n" + string(b) + "\n" + meaning
+	if m := strings.TrimSpace(in.Message); m != "" {
+		user += fmt.Sprintf("\nUse this action verbatim: %q", m)
+	}
+	out, err := c.generate(ctx, request{sys: system, user: user, maxTokens: 200, schema: briefSchema, timeout: Timeout})
 	if err != nil {
 		return Template(in), err
 	}
-	return out, nil
+	bf, err := parseBriefing(out)
+	if err != nil {
+		return Template(in), err
+	}
+	if m := strings.TrimSpace(in.Message); m != "" {
+		bf.Action = m // staff's words, whatever the model did with them
+	}
+	return bf, nil
 }
+
+// parseBriefing reads the model's JSON. A model that ignored the schema and
+// wrote plain sentences still works: first sentence headline, rest action.
+func parseBriefing(s string) (Briefing, error) {
+	var b Briefing
+	if err := json.Unmarshal([]byte(stripFence(s)), &b); err == nil {
+		b.Headline, b.Action = oneLine(b.Headline), oneLine(b.Action)
+		if b.Headline == "" && b.Action == "" {
+			return b, errors.New("gemini: empty briefing")
+		}
+		return b, nil
+	}
+	s = oneLine(s)
+	if strings.HasPrefix(s, "{") {
+		return b, errors.New("gemini: briefing is not valid JSON")
+	}
+	if i := strings.IndexAny(s, ".!?"); i >= 0 && i < len(s)-1 {
+		return Briefing{strings.TrimSpace(s[:i+1]), strings.TrimSpace(s[i+1:])}, nil
+	}
+	return Briefing{Headline: s}, nil
+}
+
+// stripFence removes a ```json … ``` fence some models add anyway.
+func stripFence(s string) string {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "```") {
+		s = strings.TrimPrefix(s, "```")
+		s = strings.TrimPrefix(s, "json")
+		s = strings.TrimSuffix(strings.TrimSpace(s), "```")
+	}
+	return strings.TrimSpace(s)
+}
+
+func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
 
 // Ask answers a free-form question about recent activity.
 func (c *Client) Ask(ctx context.Context, question, history string) (string, error) {
@@ -167,32 +291,59 @@ func (c *Client) Ask(ctx context.Context, question, history string) (string, err
 	}
 	sys := `You answer questions from event stewards about the last minutes of a crowd-safety monitor.
 Use only the log provided. Be brief: at most three sentences. If the log doesn't say, say so.`
-	return c.generate(ctx, sys, "Log:\n"+history+"\n\nQuestion: "+question, 250)
+	out, err := c.generate(ctx, request{sys: sys, user: "Log:\n" + history + "\n\nQuestion: " + question, maxTokens: 250, timeout: Timeout})
+	return oneLine(out), err
 }
 
 // errThinking means the model rejected the thinking budget.
 var errThinking = errors.New("gemini: thinking config rejected")
 
-func (c *Client) generate(ctx context.Context, sys, user string, maxTokens int) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, Timeout)
+// request is one generateContent call.
+type request struct {
+	sys, user string
+	image     []byte // optional inline image
+	mime      string
+	maxTokens int
+	schema    map[string]any // structured JSON output when set
+	timeout   time.Duration
+	temp      float64 // 0 = 0.4
+}
+
+func (c *Client) generate(ctx context.Context, r request) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
 	// Thinking off keeps briefings fast; models that refuse that get a retry
 	// without it (with room for the thinking tokens).
-	out, err := c.call(ctx, sys, user, maxTokens, true)
+	out, err := c.call(ctx, r, true)
 	if errors.Is(err, errThinking) {
-		out, err = c.call(ctx, sys, user, maxTokens+1024, false)
+		r.maxTokens += 1024
+		out, err = c.call(ctx, r, false)
 	}
 	return out, err
 }
 
-func (c *Client) call(ctx context.Context, sys, user string, maxTokens int, noThinking bool) (string, error) {
-	gen := map[string]any{"temperature": 0.4, "maxOutputTokens": maxTokens}
+func (c *Client) call(ctx context.Context, r request, noThinking bool) (string, error) {
+	temp := r.temp
+	if temp == 0 {
+		temp = 0.4
+	}
+	gen := map[string]any{"temperature": temp, "maxOutputTokens": r.maxTokens}
 	if noThinking {
 		gen["thinkingConfig"] = map[string]any{"thinkingBudget": 0}
 	}
+	if r.schema != nil {
+		gen["responseMimeType"] = "application/json"
+		gen["responseSchema"] = r.schema
+	}
+	parts := []map[string]any{}
+	if len(r.image) > 0 {
+		parts = append(parts, map[string]any{"inlineData": map[string]string{
+			"mimeType": r.mime, "data": base64.StdEncoding.EncodeToString(r.image)}})
+	}
+	parts = append(parts, map[string]any{"text": r.user})
 	body := map[string]any{
-		"systemInstruction": map[string]any{"parts": []map[string]string{{"text": sys}}},
-		"contents":          []map[string]any{{"role": "user", "parts": []map[string]string{{"text": user}}}},
+		"systemInstruction": map[string]any{"parts": []map[string]string{{"text": r.sys}}},
+		"contents":          []map[string]any{{"role": "user", "parts": parts}},
 		"generationConfig":  gen,
 	}
 	b, _ := json.Marshal(body)
@@ -225,7 +376,7 @@ func (c *Client) call(ctx context.Context, sys, user string, maxTokens int, noTh
 		}
 		return "", fmt.Errorf("gemini: %s: %s", resp.Status, truncate(string(raw), 200))
 	}
-	var r struct {
+	var res struct {
 		Candidates []struct {
 			Content struct {
 				Parts []struct {
@@ -235,18 +386,18 @@ func (c *Client) call(ctx context.Context, sys, user string, maxTokens int, noTh
 			} `json:"content"`
 		} `json:"candidates"`
 	}
-	if err := json.Unmarshal(raw, &r); err != nil {
+	if err := json.Unmarshal(raw, &res); err != nil {
 		return "", fmt.Errorf("gemini: decode: %w", err)
 	}
 	var sb strings.Builder
-	if len(r.Candidates) > 0 {
-		for _, p := range r.Candidates[0].Content.Parts {
+	if len(res.Candidates) > 0 {
+		for _, p := range res.Candidates[0].Content.Parts {
 			if !p.Thought {
 				sb.WriteString(p.Text)
 			}
 		}
 	}
-	text := strings.Join(strings.Fields(sb.String()), " ")
+	text := strings.TrimSpace(sb.String())
 	if text == "" {
 		return "", errors.New("gemini: empty response")
 	}

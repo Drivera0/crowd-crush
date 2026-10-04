@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -50,8 +51,8 @@ func (a *App) Routes(mux *http.ServeMux) {
 	})
 	mux.HandleFunc("PUT /api/venue", func(w http.ResponseWriter, r *http.Request) {
 		var v protocol.Venue
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&v); err != nil {
-			httpError(w, errors.New("want {w, h, lat, lon, bearing, geo}"), http.StatusBadRequest)
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&v); err != nil {
+			httpError(w, errors.New("want {w, h, lat, lon, bearing, geo, template, layout}"), http.StatusBadRequest)
 			return
 		}
 		out, err := a.SetVenue(v)
@@ -61,8 +62,94 @@ func (a *App) Routes(mux *http.ServeMux) {
 		}
 		writeJSON(w, out)
 	})
+	mux.HandleFunc("POST /api/venue/floorplan", func(w http.ResponseWriter, r *http.Request) {
+		img, err := io.ReadAll(http.MaxBytesReader(w, r.Body, MaxFloorplanSize))
+		if err != nil {
+			var tooBig *http.MaxBytesError
+			if errors.As(err, &tooBig) {
+				httpError(w, fmt.Errorf("the image is over %d MB", MaxFloorplanSize>>20), http.StatusRequestEntityTooLarge)
+				return
+			}
+			httpError(w, err, http.StatusBadRequest)
+			return
+		}
+		v, err := a.SetFloorplan(img)
+		if err != nil {
+			httpError(w, err, http.StatusUnsupportedMediaType)
+			return
+		}
+		writeJSON(w, v)
+	})
+	mux.HandleFunc("GET /api/venue/floorplan", func(w http.ResponseWriter, r *http.Request) {
+		img, mime := a.Floorplan()
+		if img == nil {
+			httpError(w, errors.New("no floor plan uploaded"), http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", mime)
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Write(img)
+	})
+	mux.HandleFunc("DELETE /api/venue/floorplan", func(w http.ResponseWriter, r *http.Request) {
+		v, err := a.DeleteFloorplan()
+		if err != nil {
+			httpError(w, err, http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, v)
+	})
+	mux.HandleFunc("POST /api/venue/floorplan/analyze", func(w http.ResponseWriter, r *http.Request) {
+		s, err := a.AnalyzeFloorplan(r.Context())
+		switch {
+		case errors.Is(err, brief.ErrNoKey):
+			httpError(w, errors.New("Gemini isn't configured (GEMINI_API_KEY)"), http.StatusServiceUnavailable)
+		case errors.Is(err, errNoFloorplan):
+			httpError(w, err, http.StatusNotFound)
+		case err != nil:
+			log.Printf("floor plan: %v", err)
+			httpError(w, err, http.StatusBadGateway)
+		default:
+			writeJSON(w, s)
+		}
+	})
+	mux.HandleFunc("POST /api/alerts/{id}/ack", func(w http.ResponseWriter, r *http.Request) {
+		al, err := a.AckAlert(r.PathValue("id"))
+		if err != nil {
+			httpError(w, err, http.StatusNotFound)
+			return
+		}
+		writeJSON(w, al)
+	})
+	mux.HandleFunc("POST /api/alerts/{id}/resolve", func(w http.ResponseWriter, r *http.Request) {
+		al, err := a.ResolveAlert(r.PathValue("id"))
+		if err != nil {
+			httpError(w, err, http.StatusNotFound)
+			return
+		}
+		writeJSON(w, al)
+	})
 	mux.HandleFunc("GET /api/hardware", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, a.Hardware())
+	})
+	mux.HandleFunc("PUT /api/hardware/{key}/pos", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			X *float64 `json:"x"`
+			Y *float64 `json:"y"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<12)).Decode(&req); err != nil || req.X == nil || req.Y == nil {
+			httpError(w, errors.New("want {x, y} in venue metres"), http.StatusBadRequest)
+			return
+		}
+		hw, err := a.SetHardwarePos(r.PathValue("key"), *req.X, *req.Y)
+		switch {
+		case errors.Is(err, ErrNoBoard):
+			httpError(w, err, http.StatusNotFound)
+		case err != nil:
+			httpError(w, err, http.StatusBadRequest)
+		default:
+			writeJSON(w, hw)
+		}
 	})
 	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]bool{
@@ -229,6 +316,12 @@ func (a *App) History() string {
 		fmt.Fprintf(&sb, "- %s zone %s → %s (score %.2f)", time.UnixMilli(al.T).Format("15:04:05"), al.Zone, al.Level, al.Score)
 		if al.Test {
 			sb.WriteString(" [test]")
+		}
+		if al.Status != "" && al.Status != protocol.StatusOpen && al.Level != protocol.LevelCalm {
+			fmt.Fprintf(&sb, " [%s]", al.Status)
+		}
+		if al.Escalated {
+			sb.WriteString(" [escalated]")
 		}
 		if al.Brief != "" {
 			fmt.Fprintf(&sb, ": %q", al.Brief)

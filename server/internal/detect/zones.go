@@ -25,6 +25,10 @@ type ZoneDef struct {
 	// Rest zones contain every phone that is in no other zone (Poly is only
 	// for drawing).
 	Rest bool
+	// NoPush turns travelling-wave detection off for this zone (an area
+	// rule): its score stays 0 and its level calm, so its level comes only
+	// from the app's density and rule alerts.
+	NoPush bool
 }
 
 // DefaultZones splits the venue into ZoneCols × ZoneRows rectangles, named

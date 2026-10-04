@@ -47,6 +47,7 @@ func main() {
 	venueBearing := flag.Float64("venue-bearing", envFloat("VENUE_BEARING", 0), "compass bearing of the map's up, degrees clockwise from north (env VENUE_BEARING)")
 	zoneCols := flag.Int("zone-cols", 0, "default zones across the venue (overrides config)")
 	zoneRows := flag.Int("zone-rows", 0, "default zones down the venue (overrides config)")
+	escalate := flag.Duration("escalate-after", envDuration("PULSE_ESCALATE_AFTER", app.DefaultEscalateAfter), "re-announce a red alert nobody acknowledged after this long; 0 = never (env PULSE_ESCALATE_AFTER)")
 	check := flag.Bool("check", false, "test the services configured in .env and exit")
 	dumpConfig := flag.Bool("dump-config", false, "print the detector config as JSON and exit")
 	publicURL := flag.String("public-url", os.Getenv("PUBLIC_URL"), "URL phones should open (for the QR code); default: the dashboard's own host")
@@ -106,7 +107,7 @@ func main() {
 		venue.Lat, venue.Lon, venue.Bearing, venue.Geo = *venueLat, *venueLon, *venueBearing, true
 	}
 	a := app.New(app.Options{Detect: cfg, RecordingsDir: *recDir, DataDir: *dataDir, Venue: venue,
-		Sink: sink, Tiger: tiger, Brief: b, Voice: v, Sign: s})
+		Sink: sink, Tiger: tiger, Brief: b, Voice: v, Sign: s, EscalateAfter: escalateOpt(*escalate)})
 	cfg = a.Config()
 	go a.Run(ctx)
 
@@ -210,6 +211,21 @@ func envFloat(k string, def float64) float64 {
 		return v
 	}
 	return def
+}
+
+func envDuration(k string, def time.Duration) time.Duration {
+	if v, err := time.ParseDuration(strings.TrimSpace(os.Getenv(k))); err == nil {
+		return v
+	}
+	return def
+}
+
+// escalateOpt maps the flag (0 = never) to app.Options (0 = default, < 0 = never).
+func escalateOpt(d time.Duration) time.Duration {
+	if d <= 0 {
+		return -1
+	}
+	return d
 }
 
 func envOr(k, def string) string {

@@ -303,25 +303,11 @@ func describe(pts []Point, idx []int, participation float64) Cluster {
 	// biased high). A big crowd (say 20 m of people pressed against a
 	// barrier) is one cluster whose disc is mostly thin crowd, so the disc
 	// average hides a packed front; the local peak does not.
-	r2 := LocalR * LocalR
-	type local struct {
-		k    int
-		x, y float64
+	sub := make([]Point, len(idx))
+	for k, i := range idx {
+		sub[k] = pts[i]
 	}
-	loc := make([]local, 0, len(idx))
-	for _, i := range idx {
-		k := 0
-		for _, j := range idx {
-			dx, dy := pts[i].X-pts[j].X, pts[i].Y-pts[j].Y
-			if dx*dx+dy*dy <= r2 {
-				k++
-			}
-		}
-		loc = append(loc, local{k, pts[i].X, pts[i].Y})
-	}
-	sort.SliceStable(loc, func(a, b int) bool { return loc[a].k < loc[b].k })
-	q := loc[min(len(loc)-1, int(PeakQuantile*float64(len(loc))))]
-	c.Peak, c.PeakX, c.PeakY = float64(q.k)/(math.Pi*r2), q.x, q.y
+	c.Peak, c.PeakX, c.PeakY = LocalPeak(sub)
 	if participation <= 0 {
 		participation = 1
 	}
@@ -329,6 +315,35 @@ func describe(pts []Point, idx []int, participation float64) Cluster {
 	c.Est = math.Max(c.Density, c.Peak) / participation
 	sort.Strings(c.Members)
 	return c
+}
+
+// LocalPeak is the peak local density of a set of phones: for each one,
+// the phones within LocalR (itself included) ÷ that disc's area, taken at
+// the PeakQuantile of the set, and where that phone stands. Phones per m²;
+// divide by participation for people per m². Zero for no points.
+func LocalPeak(pts []Point) (peak, x, y float64) {
+	if len(pts) == 0 {
+		return 0, 0, 0
+	}
+	r2 := LocalR * LocalR
+	type local struct {
+		k    int
+		x, y float64
+	}
+	loc := make([]local, 0, len(pts))
+	for _, p := range pts {
+		k := 0
+		for _, q := range pts {
+			dx, dy := p.X-q.X, p.Y-q.Y
+			if dx*dx+dy*dy <= r2 {
+				k++
+			}
+		}
+		loc = append(loc, local{k, p.X, p.Y})
+	}
+	sort.SliceStable(loc, func(a, b int) bool { return loc[a].k < loc[b].k })
+	q := loc[min(len(loc)-1, int(PeakQuantile*float64(len(loc))))]
+	return float64(q.k) / (math.Pi * r2), q.x, q.y
 }
 
 // DBSCAN groups points that have at least minPts points (themselves

@@ -85,6 +85,8 @@ import (
 	"math"
 	"math/rand"
 	"sort"
+
+	"github.com/Drivera0/crowd-crush/server/internal/protocol"
 )
 
 // Physics constants.
@@ -181,6 +183,9 @@ type Config struct {
 	Scenario      string  // "concert" (the only one for now)
 	Seed          int64
 	StartMs       int64 // server clock at t = 0, for phone timestamps
+	// Layout, when it has walls or exits, replaces the default geometry
+	// (see LayoutGeometry).
+	Layout *protocol.VenueLayout
 }
 
 // Scenarios lists the start scenarios.
@@ -224,7 +229,7 @@ func New(c Config) (*World, error) {
 	if !(c.Participation > 0 && c.Participation <= 1) {
 		return nil, errors.New("participation must be in (0, 1]")
 	}
-	w := &World{G: NewGeometry(c.W, c.H), StartMs: c.StartMs, Participation: c.Participation,
+	w := &World{G: LayoutGeometry(c.W, c.H, c.Layout), StartMs: c.StartMs, Participation: c.Participation,
 		Action: ActCalm, rng: rand.New(rand.NewSource(c.Seed))}
 	w.solid = w.G.solid()
 	w.truth.Init()
@@ -267,7 +272,18 @@ func (w *World) free(x, y, r float64) bool {
 	if x < r+0.1 || y < r+0.1 || x > w.G.W-r-0.1 || y > w.G.H-r-0.1 {
 		return false
 	}
-	if w.G.inStage(x, y) || (y < w.G.BarrierY+r+0.05 && x > w.G.BarrierX0-r-0.05 && x < w.G.BarrierX1+r+0.05) {
+	if w.G.custom {
+		// A venue layout: keep clear of the stage and every wall.
+		if w.G.inStage(x, y) || w.G.inStage(x-r, y) || w.G.inStage(x+r, y) || w.G.inStage(x, y-r) || w.G.inStage(x, y+r) {
+			return false
+		}
+		for _, s := range w.solid {
+			cx, cy := closest(s, x, y)
+			if math.Hypot(cx-x, cy-y) < r+0.05 {
+				return false
+			}
+		}
+	} else if w.G.inStage(x, y) || (y < w.G.BarrierY+r+0.05 && x > w.G.BarrierX0-r-0.05 && x < w.G.BarrierX1+r+0.05) {
 		return false
 	}
 	for _, b := range w.agents {
