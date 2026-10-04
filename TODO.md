@@ -2,8 +2,8 @@
 
 Ordered by value per hour. Judging: technical complexity · design · pitch · originality; 3-minute table demo, something working by 0:90.
 
-## In progress
-- [ ] **Free-moving phones** (branch `free-positions`): GPS → venue metres on the server (AirTag-style: the server works out every distance), manual "tap your spot" fallback, nearest-neighbour push detection in any direction, crowd clusters with density alerts (forming / dispersing), staff-drawn areas become real server zones, ant-like simulator with a `gather` scenario.
+## Done this afternoon
+- [x] **Free-moving phones** (branch `free-positions`): GPS → venue metres on the server (AirTag-style: the server works out every distance), manual "tap your spot" fallback, nearest-neighbour push detection in any direction, crowd clusters with density alerts (forming / dispersing), staff-drawn areas become real server zones, ant-like simulator with a `gather` scenario.
 
 ## Next
 1. [ ] **"Move this way" on the attendee's phone** (~2–3 h). When a cluster gets too dense or a push travels through it, the server works out the least crowded direction for each affected phone, and its screen turns red with an arrow. Judging moment: the judge scans the QR, their phone becomes a dot, we push the line, their phone tells them where to go.
@@ -14,15 +14,15 @@ Ordered by value per hour. Judging: technical complexity · design · pitch · o
    - Power bank: test 10–15 min first; some switch off when the draw is this low.
 
 ## Requested next (business-facing product)
-- [ ] **Setup flow / main menu** (~2 h): first-run wizard and a home screen. 1) Event name and venue, 2) floor plan, 3) watch areas and alert rules, 4) hardware and lights, 5) share the join QR → Go live.
-- [ ] **ElevenLabs-style redesign** (~2–3 h): clean monochrome, sidebar navigation (Live · Venue · Areas & alerts · Hardware · Simulation · Recordings · Settings), calmer typography, motion on state changes.
-- [ ] **Venue templates + floor plan import** (~1.5 h): preset sizes (club, theatre floor, arena floor, festival field) that bound where phones can be; upload a floor-plan image as the map background.
-- [ ] **Gemini reads the floor plan** (~2 h): from an uploaded image, extract the outline, stage, exits and scale as editable geometry (MLH Best Use of Gemini).
-- [ ] **Custom alert rules per area** (~2 h): e.g. density above X/m² for Y s, any push, more than N phones; who/what gets notified (sign, light, voice, message text).
-- [ ] **Better AI briefing** (~1.5 h): structured card (what / where / what to do / confidence), acknowledge and resolve, escalation if unacknowledged, briefing history.
-- [ ] **Boards find each other** (~2–3 h): ESP32s and the sign advertise Bluetooth beacons; each reports the signal strength of the others → estimated distances, board-to-board links on the map, staff drag boards onto their real spots.
+- [x] **Setup flow / main menu** (~2 h): first-run wizard and a home screen. 1) Event name and venue, 2) floor plan, 3) watch areas and alert rules, 4) hardware and lights, 5) share the join QR → Go live.
+- [x] **ElevenLabs-style redesign** (~2–3 h): clean monochrome, sidebar navigation (Live · Venue · Areas & alerts · Hardware · Simulation · Recordings · Settings), calmer typography, motion on state changes.
+- [x] **Venue templates + floor plan import** (~1.5 h): preset sizes (club, theatre floor, arena floor, festival field) that bound where phones can be; upload a floor-plan image as the map background.
+- [x] **Gemini reads the floor plan** (~2 h): from an uploaded image, extract the outline, stage, exits and scale as editable geometry (MLH Best Use of Gemini).
+- [x] **Custom alert rules per area** (~2 h): e.g. density above X/m² for Y s, any push, more than N phones; who/what gets notified (sign, light, voice, message text).
+- [x] **Better AI briefing** (~1.5 h): structured card (what / where / what to do / confidence), acknowledge and resolve, escalation if unacknowledged, briefing history.
+- [x] **Boards find each other** (~2–3 h): ESP32s and the sign advertise Bluetooth beacons; each reports the signal strength of the others → estimated distances, board-to-board links on the map, staff drag boards onto their real spots.
 - [ ] **Node animation polish** (~1 h).
-- [ ] **Realistic crowd simulation** (in progress, background): Social Force Model people, steerable from the dashboard (surge, gather, shove, exits), with ground-truth lead time.
+- [x] **Realistic crowd simulation**: Social Force Model people, steerable from the dashboard (surge, gather, shove, exits), with ground-truth lead time.
 
 ## Cheap wins (< 1 h each)
 - [ ] **Venue floor plan as the map background**: upload an image, or an iPhone 15 Pro Max LiDAR room scan exported as an image.
@@ -77,3 +77,8 @@ The demo runs on the **MacBook**, on a different network from home. Nothing belo
 - [x] Detector false-positive guards (sway, Mexican wave, walk-past, pockets, bumps, staggered jumping)
 - [x] Gemini, ElevenLabs and Tiger Data connected; Gemini thinking-retry fix
 - [x] Arduino sign flashed and wired up (with a retry for dropped connections)
+
+## Findings to act on
+- Simulation: Pulse catches crowding early (+17–19 s when the crowd builds at the stage) but is ~2 s late on a sudden surge. Idea: early warning from the density trend (cluster forming and densifying fast → yellow before it crosses the limit).
+- Simulation: the wave (push) detector never fires on simulated crowds (pushes cross packed neighbours faster than its 120 ms floor; loose crowds damp them). Needs real recorded pushes to tell whether it's the model or the detector.
+- Board distances: calibrate the Bluetooth 1 m reference with zone lights A and B 1 m apart.
