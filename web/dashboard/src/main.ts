@@ -1174,7 +1174,26 @@ function onAlert(a: Alert, fresh: boolean) {
     if (fresh) playBrief(a);
   } else if (fresh && a.level === 'red') {
     beep();
+  } else if (fresh && a.level === 'yellow' && !a.test) {
+    headsUp(a, where);
   }
+}
+
+// A new yellow incident has no briefing (that waits for red), so the operator
+// gets a heads-up: a toast, and a short line in the browser's voice. At most
+// one per zone and kind every 30 s, so a zone flickering in and out of yellow
+// doesn't repeat itself.
+const headsUpAt = new Map<string, number>();
+function headsUp(a: Alert, where: string) {
+  const key = `${a.zone}|${a.kind}`;
+  const now = Date.now();
+  if (now - (headsUpAt.get(key) ?? 0) < 30_000) return;
+  headsUpAt.set(key, now);
+  const text = a.kind === 'density'
+    ? `Heads up: ${where} is getting crowded. Keep an eye on it.`
+    : `Heads up: pressure is building in ${where}. Stay alert.`;
+  toast(text, 'watch');
+  if (soundOn && areas.get(a.zone)?.rules?.notify?.voice !== false) speak(text);
 }
 
 // ---------------------------------------------------------------------------
@@ -2123,9 +2142,19 @@ function renderSimActions(s: SimScenario | undefined) {
   $('simStrengthLabel').textContent = strength ? `${strength.label} strength` : 'Shove strength';
 }
 
+/** Highlight the action the crowd is doing now, so it's clear which option was picked. */
+function markSimAction(type: string | undefined) {
+  for (const b of $('simActions').querySelectorAll<HTMLButtonElement>('button')) {
+    const on = !!type && b.dataset.sim === type;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-pressed', String(on));
+  }
+}
+
 /** Run an action from its spec: a plain button, one with the strength slider, a click on the map, or a drag. */
 function runSimAction(a: SimActionSpec) {
   const strength = Number(($('simStrength') as HTMLInputElement).value) / 100;
+  if (lastMode === 'sim') markSimAction(a.type); // straight away; the next poll confirms it
   areas.cancelPick(); // a new choice replaces a pick still waiting for a click
   switch (a.kind) {
     case 'behaviour':
@@ -2414,6 +2443,7 @@ async function pollSim() {
     // The action buttons are the running scenario's (not the picker's) while it runs.
     const running = scenarioOf(st.scenario ?? 'concert');
     if (running && $('simActions').childElementCount !== running.actions.length) renderSimActions(running);
+    markSimAction(st.running ? st.action : undefined);
     renderSimState(st);
     renderSimApply();
   } catch {
