@@ -11,7 +11,7 @@ StormHacks 2026, solo build (Dan). Phones in a crowd stream their motion to a Go
 - One Go binary serves everything: phone page, dashboard, WebSockets, APIs. One process to start in front of judges.
 - Every external service (Tiger Data, Gemini, ElevenLabs, Arduino) must fail soft. If it's down or the key is missing, log it and keep detecting. The demo never depends on Wi-Fi to a third party.
 - Math detects, AI explains. Gemini never decides whether a zone is in danger.
-- Privacy: no names, contacts, location history, audio or photos. Random session ID + grid position + motion numbers only.
+- Privacy: no names, contacts, location history, audio or photos. Random session ID + venue position + motion numbers only. Positions are venue-relative metres only (no GPS coordinates stored): the current position is used live and stored in recordings (and Tiger readings) so runs can be replayed. GPS is converted to venue-relative metres on arrival; raw coordinates are never stored or sent to the dashboard (nor logged).
 - Build order matters more than polish: phones streaming → dashboard showing nodes → simulator → detector → sponsors → hardware.
 
 ## Architecture
@@ -33,10 +33,12 @@ StormHacks 2026, solo build (Dan). Phones in a crowd stream their motion to a Go
 ```
 server/
   cmd/pulse/main.go          # wires everything, flags/env, serves web/*/dist
-  cmd/sim/main.go            # fake phones: calm, walk, dance, shove, wave scenarios
+  cmd/sim/main.go            # fake phones: crowd or line layout, wave/gather/false-positive scenarios
   internal/hub/              # phone + dashboard connections, broadcast
   internal/clocksync/        # NTP-style offset per phone
-  internal/detect/           # filters, per-phone features, wave detection, alert state
+  internal/detect/           # filters, per-phone features, spatial neighbours, wave detection, zones, alert state
+  internal/crowd/            # DBSCAN crowd clusters, tracking, trend, density levels
+  internal/geo/              # GPS → venue metres (equirectangular around the venue anchor)
   internal/store/            # Tiger Data (pgx) + JSONL fallback recorder
   internal/brief/            # Gemini client
   internal/voice/            # ElevenLabs client
@@ -54,28 +56,46 @@ Suggested Go deps: `github.com/coder/websocket`, `github.com/jackc/pgx/v5`, `goo
 
 ## Wire protocol (JSON over WebSocket)
 
+Positions are **venue metres**: origin at the top-left of the venue map, x to the right, y down. Venue size comes from `GET /api/venue` / `GET /api/config` (default 24 × 16 m).
+
 Phone → server
 ```jsonc
-{ "type": "hello", "id": "<random uuid>", "row": 0, "col": 3, "ua": "iPhone" }
+{ "type": "hello", "id": "<random uuid>", "x": 3.2, "y": 7.5, "ua": "iPhone" }   // x,y optional
+// hello may instead carry "lat","lon","acc" (GPS), or legacy "row","col" (old phones/recordings:
+// x = legacyX0 + col*0.6, y = venueH/2 + row*0.6)
+{ "type": "pos", "x": 3.4, "y": 7.1 }                             // moved by hand (or a simulated phone walked); clamped to the venue
+{ "type": "gps", "lat": 49.2781, "lon": -122.9199, "acc": 6.5 }   // ~1 Hz or on >1 m moves; converted to metres on arrival
 { "type": "pong", "t0": 1728000000000, "t1": 1728000000004 }     // reply to ping, t1 = phone clock
 { "type": "m", "t": 1728000000123, "ax": 0.12, "ay": -0.03, "az": 0.01, "rot": 4.2 }
 // "m" is a 100 ms summary of ~6 raw samples (mean accel per axis, max rotation rate)
 ```
+GPS needs a venue geo-anchor (`PUT /api/venue` with `geo:true`); without one the server ignores `gps` (logged once per phone) and the phone falls back to manual placement. Fixes with `acc` > `gpsMaxAcc` (25 m) are ignored; accepted fixes are smoothed (EMA, weight 1/(1+acc/10)). Fixes outside the venue are clamped and the node is `outside` (no zones, clusters or neighbours).
 
 Server → phone
 ```jsonc
 { "type": "ping", "t0": 1728000000000 }
-{ "type": "state", "node": "ok" | "handling", "zone": "calm" | "yellow" | "red" }  // optional feedback on phone screen
+{ "type": "state", "node": "ok" | "handling", "zone": "calm" | "yellow" | "red" }  // zone = level of the worst zone containing the phone
 ```
 
 Server → dashboard (broadcast ~10 Hz)
 ```jsonc
-{ "type": "snapshot", "t": ..., 
-  "nodes": [ { "id": "...", "row": 0, "col": 3, "status": "<node status>", "sway": 0.4, "rtt": 38 } ],
-  "zones": [ { "id": "B", "level": "calm|yellow|red", "score": 0.62 } ],
-  "waves": [ { "from": "<id>", "to": "<id>", "lagMs": 220 } ] }
-{ "type": "alert", "zone": "B", "level": "red", "brief": "...", "audioUrl": "/audio/123.mp3" }
+{ "type": "snapshot", "t": ..., "mode": "live|replay", "replay": "...", "progress": 0.4, "recording": "...",
+  "venue": { "w": 24, "h": 16 },
+  "nodes": [ { "id": "...", "x": 3.2, "y": 7.5, "status": "<node status>", "sway": 0.4, "rtt": 38, "offset": -12, "age": 80,
+               "ua": "...", "zone": "A", "acc": 6.5, "src": "gps|manual", "outside": false } ],
+  "zones": [ { "id": "A", "name": "Zone A", "level": "calm|yellow|red", "score": 0.12, "poly": [[x,y],...], "custom": false, "sens": "normal|high" } ],
+  "waves": [ { "from": "<id>", "to": "<id>", "lagMs": 220, "corr": 0.8 } ],     // direction of travel
+  "links": [ ["idA", "idB"], ... ],                                              // every neighbour pair the detector compares
+  "clusters": [ { "id": "c3", "x": 5.1, "y": 6.0, "r": 1.8, "count": 7, "density": 0.69, "people": 7,
+                  "trend": "forming|steady|dispersing", "level": "calm|yellow|red" } ],
+  "stats": { "phones": 8, "msgPerSec": 79, "medianRtt": 41 } }
+{ "type": "alert", "kind": "wave|density", "zone": "B", "level": "red", "brief": "...", "audioUrl": "/audio/123.mp3" }
 ```
+`node.zone` = first zone containing the phone ("" if none or outside). `density` = phones per m² of the cluster disc (count / max(π r², 1)); `people` = count / `participation`, and the cluster level uses the estimated density (phones/m² ÷ participation).
+
+Zones: with no staff-drawn areas, the venue is split into `zoneCols` × `zoneRows` rectangles (default 2 × 1: A left half, B right half). With areas, zones = the areas (`custom: true`) plus `"rest"` ("Rest of venue", phones in no area). A phone may be in several areas. `sens: "high"` halves that zone's thresholds (`highRiskFactor`) and hold time.
+
+HTTP: `GET /api/config` → `{venueW, venueH, geo, yellow, red, neighbourRadius}`; `GET/PUT /api/areas` (array of `{id, name, sens, poly}`; ≥ 3 points, unique ids, names ≤ 40 chars, ≤ 50 areas, points clamped; saved to `data/areas.json`); `GET/PUT /api/venue` (`{w, h, lat, lon, bearing, geo}`; lat/lon = the map's top-left corner, bearing = degrees clockwise from north of the map's up; saved to `data/venue.json`; initial values from `VENUE_W/H/LAT/LON/BEARING`); `GET /api/node/{id}` (x, y, acc, src, outside, samples …).
 
 ## Clock sync
 

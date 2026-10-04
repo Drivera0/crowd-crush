@@ -2,7 +2,7 @@
 
 **Early warning for crowd crushes, using the phones already in the crowd.**
 
-Phones in a crowd stream their motion to one Go server. When neighbouring phones start swaying together in a wave that travels person to person, the zone goes yellow then red, Gemini writes a briefing, ElevenLabs speaks it, and an Arduino sign flashes. Dancing and jumping (everyone moving *together*) don't trigger it; a push travelling *down the line* does.
+Phones in a crowd stream their motion to one Go server. Each phone is a dot on the venue map (dragged to where its owner stands, or placed by GPS). When physically neighbouring phones start swaying together in a wave that travels person to person, the zone goes yellow then red, Gemini writes a briefing, ElevenLabs speaks it, and an Arduino sign flashes. Dancing and jumping (everyone moving *together*) don't trigger it; a push travelling *through the crowd* does. Pulse also watches where people bunch up: a group packing past a safe density raises its own alert.
 
 Math detects, AI explains. Every external service fails soft: with no keys and no internet, Pulse still detects, records, speaks (browser voice) and alerts.
 
@@ -11,7 +11,7 @@ Math detects, AI explains. Every external service fails soft: with no keys and n
 ```sh
 make build          # npm install + build the two web apps + Go binaries
 ./bin/pulse         # http://localhost:8080/ (phone)  http://localhost:8080/dash/ (dashboard)
-make sim            # 8 fake phones, "wave" scenario, in another terminal
+make sim            # 24 fake phones in a crowd, "wave" scenario, in another terminal
 ```
 
 **Laptop setup (keys, .tech domain, flashing boards): [docs/SETUP.md](docs/SETUP.md).** Needs Go 1.25+ and Node 20+. `make test` runs the Go tests (detector scenarios, recordings, clock sync, sponsor clients).
@@ -26,7 +26,7 @@ make tunnel         # cloudflared tunnel --url http://localhost:8080 → https:/
 
 For the demo, point the `.tech` domain at a named tunnel and set `PUBLIC_URL=https://<name>.tech` so the dashboard QR code shows it (otherwise the QR uses whatever host the dashboard was opened on — open the dashboard through the tunnel URL and it just works).
 
-**Test on a real iPhone first**: tap Join → allow Motion & Orientation → tap your spot → hold the phone flat on your chest. The dashboard node should go green within a second or two.
+**Test on a real iPhone first**: tap Join → allow Motion & Orientation → drag your dot to where you stand → hold the phone flat on your chest. The dashboard node should go green within a second or two.
 
 ### Secrets
 
@@ -39,13 +39,15 @@ Copy `.env.example` to `.env` (git-ignored); the server reads it on start. All o
 | `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` | dashboard uses the browser's speech synthesis |
 | `SIGN_URL` | no sign (Arduino + ESP32 zone lights: see docs/SETUP.md) |
 | `PUBLIC_URL` | QR code uses the dashboard's own host |
+| `VENUE_W`, `VENUE_H` | 24 × 16 m venue |
+| `VENUE_LAT`, `VENUE_LON`, `VENUE_BEARING` | no geo-anchor: GPS fixes are ignored and phones are placed by hand (set it later with `PUT /api/venue`; it's saved in `data/venue.json`, which wins over the env on restart) |
 
 The dashboard header shows which services are live.
 
 ## Demo script (~60 s)
 
 1. Open `/dash/` full-screen (⛶). The QR shows while nobody has joined. Click **Enable sound** once (browsers block audio until a click).
-2. People join and stand in a line, phones flat on chest. Nodes appear green; hover one for RTT and clock offset.
+2. People join, drag their dot to where they stand (a line works well), phones flat on chest. Nodes appear green; hover one for RTT and clock offset.
 3. Someone checks their phone → that node goes **blue** (handling: readings ignored).
 4. Everyone jumps together → nodes may go **yellow** (swaying) but no wave edges, zone stays calm.
 5. Push the end of the line repeatedly → pulses race along the edges, nodes go **red**, zone goes red, the briefing plays, the sign flashes.
@@ -64,49 +66,62 @@ Record real runs early with **Record run** and a label that says what happened (
                                        └─ Arduino sign on level change
 ```
 
+**Positions.** Everything is in venue metres: origin at the top-left of the venue map, x to the right, y down (default 24 × 16 m). A phone is placed by hand (`hello` x/y, then `pos` when it's dragged) or by GPS (`gps` lat/lon/acc, converted on arrival with the venue's geo-anchor; fixes worse than 25 m are ignored and the rest lightly smoothed; fixes outside the venue are clamped and that phone counts toward nothing). Old phone pages and recordings that send a grid `row`/`col` land on a line at x = 4 + 0.6·col, y = venue height / 2.
+
 **Detection** (`server/internal/detect`), per phone on clock-corrected 10 Hz summaries:
 
 1. **Handling**: rotation > 200°/s → readings ignored until 1 s of quiet.
 2. **Band-pass** x (left/right with the phone upright on the chest) to 0.15–1.5 Hz: sway is slow.
 3. **Sway** = RMS over 5 s; above 0.25 m/s² → *swaying*.
 
-Per pair of grid neighbours, cross-correlate the last 6 s at lags ±1.5 s. A **wave edge** needs |correlation| ≥ 0.6 at a lag of 120–1200 ms, and that peak must be *unambiguous*: periodic motion like walking or swaying to music has several equally good lags, so the best peak must beat any other by 0.2. Lag ≈ 0 means moving together (dancing) and is never a wave.
+**Neighbours** are whoever is physically near: each active phone keeps its 6 nearest within `neighbourRadius` (1.1 m), and a pair is compared if either side keeps the other. Per pair, cross-correlate the last 6 s at lags ±1.5 s. A **wave edge** needs |correlation| ≥ 0.6 at a lag of 120–1200 ms, and that peak must be *unambiguous*: periodic motion like walking or swaying to music has several equally good lags, so the best peak must beat any other by 0.2. Lag ≈ 0 means moving together (dancing) and is never a wave.
 
 Two guards keep look-alikes out:
 
 - **Vertical veto** (`verticalRatio`): a push is horizontal. If the phones' vertical (y) motion is stronger than the horizontal, isn't rhythmic (its autocorrelation doesn't come back above 0.6 within 1.5 s, unlike jumping or walking to a beat), and travels between the pair by itself (|corr| ≥ 0.6 at a 120–1200 ms lag, same direction), it's people standing up in sequence: a stadium Mexican wave whose lean and tilt leak into x. A crowd jumping on the spot while a push goes through is rhythmic, so it never vetoes the push.
-- **Chains** (`minChain`, `chainCorr`): a crowd wave passes person to person to person. A wave edge only counts if it's part of a run of ≥ 3 phones along a row or column travelling the same way. The other hops only need to *support* it (|corr| ≥ 0.4 at a wave-like lag, same direction), like hysteresis in edge linking, so one noisy hop doesn't break a real wave. Two neighbours bumping into each other make an isolated edge and are dropped.
+- **Chains** (`minChain`, `chainCorr`, `chainAngleDeg`): a crowd wave passes person to person to person. Each wave edge is oriented in its direction of travel, and it only counts as part of a run of ≥ 3 phones whose hops keep going the same way (each hop within 90° of the one before; on a line that is simply "the same way along the line"). The other hops only need to *support* it (|corr| ≥ 0.4 at a wave-like lag), like hysteresis in edge linking, so one noisy hop doesn't break a real wave. Two neighbours bumping into each other make an isolated edge and are dropped.
 
-Per zone: score = net fraction of edges carrying a wave in one direction, smoothed (8 s). Yellow above 0.3 for 2 s, red above 0.6 for 2 s, clearing 0.1 lower (hysteresis). Red already needs persistence: a single travelling event shows in the 6 s correlation window for at most ~6 s, which takes the 8 s-smoothed score to ~0.5 at most, so one shove or one person squeezing past can reach yellow but never red.
+**Zones.** With no staff-drawn areas the venue splits into `zoneCols` × `zoneRows` rectangles (2 × 1: A is the left half, B the right). Staff can draw watch areas on the dashboard (`PUT /api/areas`, saved in `data/areas.json`); the zones are then those areas plus "rest" (everyone in no area). A phone may be in several areas, and a **high-risk** area alerts at half the thresholds (`highRiskFactor`) with half the hold time.
 
-Every threshold lives in one struct: `./bin/pulse -dump-config > detect.json`, edit, `./bin/pulse -config detect.json`.
+Per zone: score = |Σ unit travel vectors of the wave edges| ÷ the zone's edges that could show a wave, smoothed over 8 s: the net fraction of edges carrying a wave in one direction. "Could show a wave" leaves out pairs standing side by side across the direction of travel: at the wave's own speed (median length ÷ lag of its wave edges) they are hit less than 120 ms apart, so their near-zero lag fits the wave rather than counting against it. On a line every hop counts. Yellow above 0.3 for 2 s, red above 0.6 for 2 s, clearing 0.1 lower (hysteresis). Red already needs persistence: a single travelling event shows in the 6 s correlation window for at most ~6 s, which takes the 8 s-smoothed score to ~0.5 at most, so one shove or one person squeezing past can reach yellow but not red (in a normal-sensitivity zone). The briefing's direction is the dominant axis of the net travel vector: `+x` is left to right on the map, `+y` top to bottom.
 
-| Simulator scenario | Detector outcome (tested) |
-|---|---|
-| `calm`, `walk`, `handle` | calm; handling nodes blue |
-| `dance` | nodes swaying, no wave edges, calm |
-| `shove` (one push) | yellow at most, decays back to calm |
-| `wave` (growing push every 2.5 s, 250 ms/person) | red in ~25 s (23–26 s over 20 crowds), direction left → right |
-| `wave-jump` (the same wave while everyone jumps to a beat) | red, slower: ~50 s (39–84 s over 20 crowds) |
-| `sway` (whole crowd sways to music at 0.5 Hz, 100 ms/person lag gradient + 50–200 ms each) | calm: periodic, lag ambiguous |
-| `sway-slow` (0.2 Hz ballad sway, ±19 cm) | calm: small, and the few edges don't chain |
-| `mexican` (stand up + arms up, 250 ms/person, every 8 s) | calm: vertical veto (red in 8/20 crowds without it) |
-| `walkpast` (one person squeezes along the line, one nudge per phone) | brief yellow, decays to calm; a single travelling jolt is a shove |
-| `procession` (people walk past alongside, lightly brushing about half the phones) | calm (yellow allowed; 4/20 crowds went yellow without chains) |
-| `march` (the line walks off together, near-identical cadence) | calm: periodic |
-| `pocket` (phones pocketed, jostled, dropped, picked up; some slower than the handling threshold) | calm |
-| `bump` (random neighbour pairs bump, 30–300 ms apart) | calm, no wave edges: isolated pairs don't chain |
-| `jump-stagger` (jumping to a 2 Hz beat, 0–300 ms reaction delays) | calm: periodic and vertical |
+**Crowd clusters** (`server/internal/crowd`): every detector tick, DBSCAN (eps 1.2 m, ≥ 3 phones) over the phones that aren't stale or outside. Each cluster has a centroid, a radius (farthest member + 0.5 m) and a density = phones ÷ max(π r², 1 m²). Clusters keep their ID across ticks (nearest centroid within 2 m). The **trend** compares now with 10 s ago (each end averaged over 2 s): *forming* if there are ≥ max(2, 10 %) more phones, or else the density rose ≥ 15 %; *dispersing* is the mirror image; *steady* otherwise. A cluster younger than 5 s is *forming*.
 
-Also tested: ±25 ms clock-sync error, every other phone held upside down, and the false-positive scenarios over 8 different random crowds each. `PULSE_SWEEP=1 go test ./server/internal/detect -run Sweep -v` prints outcomes over 20 crowds per scenario, and `PULSE_CFG='{"minChain":0}'` overrides config fields for comparisons.
+**Density alerts.** A cluster's level comes from its estimated density = phones/m² ÷ `participation`: yellow above `densityWatch` (2 people/m²) for 2 s, red above `densityDanger` (4 people/m²) for 2 s, each clearing 10 % below its threshold. Yellow → red raises an alert through the same chain as a wave (timeline, a Gemini briefing worded as crowding, voice, sign) for the zone the cluster's centre is in, with the same one-briefing-per-zone-per-30-s limit. **The participation caveat:** density counts *phones*. The default `participation` of 1.0 assumes everyone in the cluster has the page open. If only a third do, set 0.33, so that 4 phones in a few m² read as 12 people. Set it too high and real crushes read as half as dense; too low and comfortable groups raise alarms. It's the weakest number in the system, so tune it per event.
+
+Every threshold lives in one struct: `./bin/pulse -dump-config > detect.json`, edit, `./bin/pulse -config detect.json` (`detect.example.json` holds the defaults).
+
+The line demo (`-layout line`, 8 phones 0.6 m apart) and the crowd layout (`-layout crowd`, the default: about 70 % of phones in one or two dense groups, the rest scattered, all wandering slowly) run through the same detector. Outcomes over 20 random crowds each, ±25 ms clock error:
+
+| Simulator scenario | Line (8 phones) | Crowd (24 phones, wandering) |
+|---|---|---|
+| `calm`, `walk`, `handle` | calm; handling nodes blue | calm |
+| `dance` | nodes swaying, no wave edges, calm | calm |
+| `shove` (one push) | yellow, decays back to calm | calm (yellow in 6/20) |
+| `wave` (growing push every 2.5 s at 2.4 m/s, i.e. 250 ms per person on the line) | red in ~24 s (23–26 s), direction +x | red in 17/20 crowds at ~34 s (30–47 s), yellow in the rest |
+| `wave-jump` (the same wave while everyone jumps to a beat) | red, slower: ~52 s (39–84 s) | yellow (red in 1/20): jumping noise plus free positions |
+| `sway` (whole crowd sways to music at 0.5 Hz, 100 ms/person lag gradient + 50–200 ms each) | calm: periodic, lag ambiguous | calm |
+| `sway-slow` (0.2 Hz ballad sway, ±19 cm) | calm: small, and the few edges don't chain | calm |
+| `mexican` (stand up + arms up, 250 ms/person, every 8 s) | calm: vertical veto | calm |
+| `walkpast` (one person squeezes through, one nudge per phone) | brief yellow, decays to calm | calm (yellow in 1/20) |
+| `procession` (people walk past, lightly brushing about half the phones) | calm (yellow allowed) | calm |
+| `march` (everyone walks off together, near-identical cadence) | calm: periodic | calm |
+| `pocket` (phones pocketed, jostled, dropped, picked up) | calm | calm |
+| `bump` (random neighbour pairs bump, 30–300 ms apart) | calm: isolated pairs don't chain | calm |
+| `jump-stagger` (jumping to a 2 Hz beat, 0–300 ms reaction delays) | calm: periodic and vertical | calm |
+| `gather` (scattered people walk to the stage over ~40 s, pack in at ~10/m², hold, leave from 75 s) | n/a | no wave; with 40 phones the cluster is *forming*, goes red on density at ~35–40 s, turns *dispersing* as people leave, then clears |
+
+Also tested: every other phone held upside down, the false-positive scenarios over 8 random lines and 3 random crowds, high-risk areas (a single shove that stays yellow in a normal area goes red in a high-risk one), GPS conversion and privacy, and old row/col recordings replaying. `PULSE_SWEEP=1 go test ./server/internal/detect -run Sweep -v` prints outcomes over 20 crowds per scenario (`PULSE_LAYOUT=crowd PULSE_N=24` for the crowd layout, `PULSE_ONLY=wave,gather` to pick scenarios), and `PULSE_CFG='{"minChain":0}'` overrides config fields for comparisons.
 
 ## Layout
 
 ```
-server/cmd/pulse      the server (flags: -rows -cols -zone-cols -config -addr …)
-server/cmd/sim        fake phones: -n 8 -scenario wave [-out file.jsonl for offline recordings]
+server/cmd/pulse      the server (flags: -venue-w -venue-h -venue-lat -venue-lon -venue-bearing -zone-cols -zone-rows -config -data -addr …)
+server/cmd/sim        fake phones: -scenario wave [-layout crowd|line] [-n 24] [-move=false] [-rows -cols for the line]
+                      [-out file.jsonl for offline recordings, with hello x/y and pos records]
 server/cmd/dashtail   dashboard snapshots in a terminal
-server/internal/      hub, clocksync, detect, store, brief, voice, sign, protocol, app, sim
+server/internal/      hub, clocksync, detect, crowd (clusters), geo (GPS → metres), store, brief, voice, sign, protocol, app, sim
+data/                 saved venue anchor and staff-drawn areas (git-ignored)
 web/phone             phone page (Vite + TS)       web/dashboard   dashboard (Vite + TS, SVG)
 web/shared            protocol.ts — mirror of server/internal/protocol
 arduino/sign          Uno R4 WiFi sign sketch
@@ -121,11 +136,12 @@ Web dev with hot reload: run `./bin/pulse`, then `cd web && npm run dev:dash` (o
 
 ## Privacy
 
-Random session ID + tapped grid spot + motion numbers. No names, contacts, location, audio or photos.
+Random session ID + position in the venue + motion numbers. No names, contacts, location history, audio or photos. Positions are venue-relative metres only: the current one is used live and stored in recordings (and Tiger readings) so runs can be replayed. GPS is converted to venue metres the moment it arrives; latitude and longitude are never stored, logged or sent to the dashboard.
 
 ## Honest limits
 
 - A web page only streams while open; a real event would build this into its official app.
 - Phone-to-phone relay when the cell network jams needs a native app.
-- Locating phones in a real crowd (GPS, ticket section) is the hard real-world problem; the demo uses tap-your-spot.
+- Locating phones in a real crowd is the hard real-world problem. Phone GPS is good to 5–25 m outdoors and worse indoors, far coarser than the 1.1 m neighbour radius, so the demo places people by hand (drag your dot); GPS suits open-air venues and coarse clusters.
+- Density counts phones, so its people/m² is only as good as the `participation` estimate.
 - A handful of testers proves the method, not the thresholds for 50,000 people.

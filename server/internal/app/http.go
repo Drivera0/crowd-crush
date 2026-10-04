@@ -21,8 +21,43 @@ func (a *App) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /ws/dash", a.Hub.ServeDash)
 
 	mux.HandleFunc("GET /api/config", func(w http.ResponseWriter, r *http.Request) {
-		d := a.opt.Detect
-		writeJSON(w, protocol.Config{Rows: d.Rows, Cols: d.Cols, Yellow: d.YellowScore, Red: d.RedScore})
+		a.mu.Lock()
+		d, geo := a.liveConfig(), a.venue.Geo
+		a.mu.Unlock()
+		writeJSON(w, protocol.Config{VenueW: d.VenueW, VenueH: d.VenueH, Geo: geo,
+			Yellow: d.YellowScore, Red: d.RedScore, NeighbourRadius: d.NeighbourRadius})
+	})
+	mux.HandleFunc("GET /api/areas", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, a.Areas())
+	})
+	mux.HandleFunc("PUT /api/areas", func(w http.ResponseWriter, r *http.Request) {
+		var areas []protocol.Area
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&areas); err != nil {
+			httpError(w, errors.New("want a JSON array of {id, name, sens, poly}"), http.StatusBadRequest)
+			return
+		}
+		out, err := a.SetAreas(areas)
+		if err != nil {
+			httpError(w, err, http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, out)
+	})
+	mux.HandleFunc("GET /api/venue", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, a.Venue())
+	})
+	mux.HandleFunc("PUT /api/venue", func(w http.ResponseWriter, r *http.Request) {
+		var v protocol.Venue
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&v); err != nil {
+			httpError(w, errors.New("want {w, h, lat, lon, bearing, geo}"), http.StatusBadRequest)
+			return
+		}
+		out, err := a.SetVenue(v)
+		if err != nil {
+			httpError(w, err, http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, out)
 	})
 	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]bool{
@@ -42,15 +77,19 @@ func (a *App) Routes(mux *http.ServeMux) {
 			httpError(w, errors.New("no such phone"), http.StatusNotFound)
 			return
 		}
+		zone := ""
+		if !m.outside {
+			zone = p.det.ZoneOf(m.x, m.y)
+		}
 		d := protocol.NodeDetail{
-			ID: id, Row: m.row, Col: m.col, UA: m.ua, Zone: p.det.ZoneOf(m.row, m.col),
+			ID: id, X: r2(m.x), Y: r2(m.y), Acc: m.acc, Src: m.src(), Outside: m.outside, UA: m.ua, Zone: zone,
 			Connected: m.connected, Synced: m.synced, RTT: m.rtt, Offset: m.offset,
 			JoinedAt: m.joinedAt, Messages: m.msgs, Samples: m.samples(),
 		}
 		a.mu.Unlock()
 		writeJSON(w, d)
 	})
-	mux.HandleFunc("GET /api/recordings",func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/recordings", func(w http.ResponseWriter, r *http.Request) {
 		files, _ := store.ListJSONL(a.opt.RecordingsDir)
 		out := map[string]any{"files": files, "runs": []store.Run{}}
 		if a.opt.Tiger != nil {

@@ -1,7 +1,12 @@
 // Package detect turns per-phone motion into node statuses, travelling-wave
-// edges between grid neighbours and zone alert levels.
+// edges between physical neighbours and zone alert levels.
 //
 // Math detects, AI explains: nothing in here calls out to a model.
+//
+// Phones are free points in the venue (metres, origin top-left, x right,
+// y down). Neighbours are whoever is physically near: active phones within
+// NeighbourRadius, each keeping its MaxNeighbours nearest; a pair is
+// compared if either side keeps the other.
 //
 // Pipeline per phone (clock-corrected timestamps, ~10 Hz):
 //  1. handling filter: high rotation → ignore readings until 1 s of quiet
@@ -18,11 +23,14 @@
 //     horizontal, travels between the pair too, it is people standing up in
 //     sequence (a stadium wave), not a push;
 //   - chains: a crowd wave passes person to person to person, so a wave edge
-//     only counts as part of a run of ≥ MinChain phones in one direction
-//     (the other hops only need to support it, at ChainCorr).
+//     only counts as part of a spatial run of ≥ MinChain phones whose hops
+//     travel within ChainAngleDeg of each other (the other hops only need to
+//     support it, at ChainCorr).
 //
-// Per zone: score = net fraction of edges carrying a wave in one direction,
-// smoothed; yellow/red with hold time and hysteresis.
+// Per zone: score = |Σ unit travel vectors of the wave edges| / number of
+// edges touching the zone that could carry the wave (the net fraction of
+// edges carrying a wave in one direction; see waveCapable), smoothed;
+// yellow/red with hold time and hysteresis.
 package detect
 
 import (
@@ -52,8 +60,9 @@ type point struct {
 }
 
 type phone struct {
-	id       string
-	row, col int
+	id      string
+	x, y    float64
+	outside bool // outside the venue: counts toward nothing
 
 	lastT         int64 // corrected time of the newest sample
 	handlingUntil int64
@@ -71,38 +80,35 @@ type phone struct {
 	valid []bool
 	sway  float64
 	wave  bool
+	zones []int
 	// RMS of the horizontal and vertical band-passed motion over the whole
 	// correlation window.
 	hrms, vrms float64
 }
 
 type zone struct {
-	id                     string
-	idx                    int
-	row0, col0, row1, col1 int
+	def ZoneDef
 
-	score       float64
-	raw         float64
-	level       string
-	yellowSince int64 // time score went above yellow (0 = not above)
-	redSince    int64
-	levelSince  int64
-	direction   string
-	lagMs       int64
+	score     float64
+	raw       float64
+	state     LevelState
+	direction string
+	lagMs     int64
 }
 
 // PhoneResult is the per-phone output of a step.
 type PhoneResult struct {
-	ID     string
-	Row    int
-	Col    int
-	Status string
-	Sway   float64
-	LastT  int64
+	ID      string
+	X, Y    float64
+	Outside bool
+	Status  string
+	Sway    float64
+	LastT   int64
 }
 
-// Edge is a neighbour pair. LagMs > 0 means To moves after From, i.e. the
-// motion travels From → To. Only edges with Wave set are travelling waves.
+// Edge is a neighbour pair. From is the phone with the smaller x (then y,
+// then id). LagMs > 0 means To moves after From, i.e. the motion travels
+// From → To. Only edges with Wave set are travelling waves.
 type Edge struct {
 	From  string
 	To    string
@@ -113,15 +119,17 @@ type Edge struct {
 
 // ZoneResult is the per-zone output of a step.
 type ZoneResult struct {
-	ID         string
-	Level      string
-	Score      float64 // smoothed
-	Raw        float64 // this step
-	Row0, Col0 int
-	Row1, Col1 int    // inclusive
-	Direction  string // dominant wave direction: +col, -col, +row, -row or ""
-	LagMs      int64  // mean |lag| of the wave edges (how fast it travels)
-	Since      int64  // when the zone entered its current level
+	ID        string
+	Name      string
+	Poly      [][2]float64
+	Custom    bool
+	Sens      string
+	Level     string
+	Score     float64 // smoothed
+	Raw       float64 // this step
+	Direction string  // dominant wave direction: +x, -x, +y, -y or ""
+	LagMs     int64   // mean |lag| of the wave edges (how fast it travels)
+	Since     int64   // when the zone entered its current level
 }
 
 // Change is a zone level transition.
@@ -137,7 +145,7 @@ type Change struct {
 type Result struct {
 	T       int64
 	Phones  []PhoneResult
-	Edges   []Edge // all neighbour pairs that could be correlated
+	Edges   []Edge // all neighbour pairs that were compared
 	Zones   []ZoneResult
 	Changes []Change
 }
@@ -171,63 +179,103 @@ type Detector struct {
 	lastStep int64
 }
 
-// New creates a detector for the grid described in cfg.
+// New creates a detector with the default zones for cfg's venue.
 func New(cfg Config) *Detector {
 	d := &Detector{cfg: cfg, phones: map[string]*phone{}}
-	nzr := (cfg.Rows + cfg.ZoneRows - 1) / cfg.ZoneRows
-	nzc := (cfg.Cols + cfg.ZoneCols - 1) / cfg.ZoneCols
-	for zr := 0; zr < nzr; zr++ {
-		for zc := 0; zc < nzc; zc++ {
-			i := zr*nzc + zc
-			d.zones = append(d.zones, &zone{
-				id:    ZoneName(i),
-				idx:   i,
-				row0:  zr * cfg.ZoneRows,
-				col0:  zc * cfg.ZoneCols,
-				row1:  min(cfg.Rows, (zr+1)*cfg.ZoneRows) - 1,
-				col1:  min(cfg.Cols, (zc+1)*cfg.ZoneCols) - 1,
-				level: protocol.LevelCalm,
-			})
-		}
-	}
+	d.SetZones(DefaultZones(cfg))
 	return d
 }
 
 // Config returns the detector's configuration.
 func (d *Detector) Config() Config { return d.cfg }
 
-// ZoneName turns a zone index into a letter: A, B, … Z, AA, AB …
-func ZoneName(i int) string {
-	s := ""
-	for {
-		s = string(rune('A'+i%26)) + s
-		i = i/26 - 1
-		if i < 0 {
-			return s
+// SetVenue changes the venue size. Callers usually follow with SetZones.
+func (d *Detector) SetVenue(w, h float64) {
+	d.cfg.VenueW, d.cfg.VenueH = w, h
+}
+
+// SetZones replaces the zones. A zone that keeps its ID keeps its score
+// and level.
+func (d *Detector) SetZones(defs []ZoneDef) {
+	old := map[string]*zone{}
+	for _, z := range d.zones {
+		old[z.def.ID] = z
+	}
+	d.zones = nil
+	for _, def := range defs {
+		if def.Sens == "" {
+			def.Sens = SensNormal
 		}
+		z := old[def.ID]
+		if z == nil {
+			z = &zone{state: NewLevelState()}
+		}
+		z.def = def
+		d.zones = append(d.zones, z)
 	}
 }
 
-// ZoneOf returns the zone ID for a grid cell.
-func (d *Detector) ZoneOf(row, col int) string {
-	return d.zones[d.zoneIdx(row, col)].id
+// Zones returns the current zone definitions.
+func (d *Detector) Zones() []ZoneDef {
+	out := make([]ZoneDef, len(d.zones))
+	for i, z := range d.zones {
+		out[i] = z.def
+	}
+	return out
 }
 
-func (d *Detector) zoneIdx(row, col int) int {
-	row = clamp(row, 0, d.cfg.Rows-1)
-	col = clamp(col, 0, d.cfg.Cols-1)
-	nzc := (d.cfg.Cols + d.cfg.ZoneCols - 1) / d.cfg.ZoneCols
-	return (row/d.cfg.ZoneRows)*nzc + col/d.cfg.ZoneCols
+// zoneIdxs lists the zones containing a point: every polygon zone that
+// contains it, else the rest zone(s).
+func (d *Detector) zoneIdxs(x, y float64) []int {
+	var out []int
+	for i, z := range d.zones {
+		if !z.def.Rest && z.contains(x, y, d.cfg.VenueW, d.cfg.VenueH) {
+			out = append(out, i)
+		}
+	}
+	if len(out) == 0 {
+		for i, z := range d.zones {
+			if z.def.Rest {
+				out = append(out, i)
+			}
+		}
+	}
+	return out
 }
 
-// SetPhone adds a phone or moves it to a new grid cell.
-func (d *Detector) SetPhone(id string, row, col int) {
+// ZonesOf lists the IDs of every zone containing (x, y).
+func (d *Detector) ZonesOf(x, y float64) []string {
+	var out []string
+	for _, i := range d.zoneIdxs(x, y) {
+		out = append(out, d.zones[i].def.ID)
+	}
+	return out
+}
+
+// ZoneOf is the first zone containing (x, y), "" if none.
+func (d *Detector) ZoneOf(x, y float64) string {
+	if z := d.zoneIdxs(x, y); len(z) > 0 {
+		return d.zones[z[0]].def.ID
+	}
+	return ""
+}
+
+// SetPhone adds a phone or moves it.
+func (d *Detector) SetPhone(id string, x, y float64) {
 	p, ok := d.phones[id]
 	if !ok {
 		p = &phone{id: id}
 		d.phones[id] = p
 	}
-	p.row, p.col = row, col
+	p.x, p.y = x, y
+}
+
+// SetOutside marks a phone as outside the venue (its GPS fix put it there):
+// it keeps its status but joins no zone or neighbour pair.
+func (d *Detector) SetOutside(id string, outside bool) {
+	if p, ok := d.phones[id]; ok {
+		p.outside = outside
+	}
 }
 
 // RemovePhone forgets a phone.
@@ -360,10 +408,12 @@ func (d *Detector) Step(now int64) Result {
 	sort.Strings(ids)
 
 	active := map[string]bool{}
+	var spatial []*phone // active and inside the venue
 	for _, id := range ids {
 		p := d.phones[id]
 		p.wave = false
 		p.sway = 0
+		p.zones = nil
 		if now-p.lastT > cfg.StaleMs {
 			continue
 		}
@@ -381,92 +431,73 @@ func (d *Detector) Step(now int64) Result {
 			p.sway = math.Sqrt(ss / float64(cnt))
 		}
 		p.hrms, p.vrms = rms(p.h, p.valid), rms(p.v, p.valid)
-	}
-
-	// Neighbour pairs: right and down, so each pair is visited once with
-	// From = the phone nearer the grid origin.
-	byCell := map[[2]int][]string{}
-	for _, id := range ids {
-		if active[id] {
-			p := d.phones[id]
-			byCell[[2]int{p.row, p.col}] = append(byCell[[2]int{p.row, p.col}], id)
+		if !p.outside {
+			p.zones = d.zoneIdxs(p.x, p.y)
+			spatial = append(spatial, p)
 		}
 	}
+
 	type tally struct {
-		hTot, hNet, vTot, vNet, waves int
-		lagSum                        int64
+		edges  []int     // every edge touching the zone
+		speeds []float64 // m/ms along the travel direction, per wave edge
+		waves  int
+		vx, vy float64
+		lagSum int64
 	}
 	tallies := make([]tally, len(d.zones))
 
 	maxLag := int(cfg.MaxLagMs / cfg.StepMs)
 	minOverlap := n - maxLag
-	var edges []Edge
-	var axes []int     // 0 = along a row (+col), 1 = along a column (+row)
-	var support []bool // hop is wave-like enough to extend a chain
-	for _, id := range ids {
-		if !active[id] {
-			continue
-		}
-		a := d.phones[id]
-		for ax, dir := range [][2]int{{0, 1}, {1, 0}} {
-			for _, bid := range byCell[[2]int{a.row + dir[0], a.col + dir[1]}] {
-				b := d.phones[bid]
-				e := Edge{From: a.id, To: b.id}
-				sup := false
-				canCorr := a.lastT >= a.handlingUntil && b.lastT >= b.handlingUntil &&
-					a.sway >= cfg.EdgeMinSway && b.sway >= cfg.EdgeMinSway
-				if canCorr {
-					// |corr|: a phone held upside down, or iOS vs Android sign conventions,
-					// flips the axis but not the timing.
-					lag, corr, second, ok := xcorr(a.h, b.h, a.valid, b.valid, maxLag, minOverlap, true)
-					if ok {
-						e.LagMs = int64(math.Round(lag * float64(cfg.StepMs)))
-						e.Corr = corr
-						al := abs64(e.LagMs)
-						waveLag := al >= cfg.MinWaveLagMs && al <= cfg.MaxWaveLagMs
-						// A periodic motion (walking cadence) has several equally good
-						// lags; only a clear single peak says which way it travels.
-						unambiguous := corr-second >= cfg.PeakMargin
-						e.Wave = corr >= cfg.CorrThreshold && waveLag && unambiguous
-						sup = cfg.ChainCorr > 0 && corr >= cfg.ChainCorr && waveLag
-						if (e.Wave || sup) && d.vertical(a, b, lag, maxLag, minOverlap) {
-							e.Wave, sup = false, false
-						}
-					}
+	pairs := d.neighbourPairs(spatial)
+	edges := make([]Edge, 0, len(pairs))
+	support := make([]bool, 0, len(pairs)) // hop is wave-like enough to extend a chain
+	for _, pr := range pairs {
+		a, b := pr[0], pr[1]
+		e := Edge{From: a.id, To: b.id}
+		sup := false
+		canCorr := a.lastT >= a.handlingUntil && b.lastT >= b.handlingUntil &&
+			a.sway >= cfg.EdgeMinSway && b.sway >= cfg.EdgeMinSway
+		if canCorr {
+			// |corr|: a phone held upside down, or iOS vs Android sign conventions,
+			// flips the axis but not the timing.
+			lag, corr, second, ok := xcorr(a.h, b.h, a.valid, b.valid, maxLag, minOverlap, true)
+			if ok {
+				e.LagMs = int64(math.Round(lag * float64(cfg.StepMs)))
+				e.Corr = corr
+				al := abs64(e.LagMs)
+				waveLag := al >= cfg.MinWaveLagMs && al <= cfg.MaxWaveLagMs
+				// A periodic motion (walking cadence) has several equally good
+				// lags; only a clear single peak says which way it travels.
+				unambiguous := corr-second >= cfg.PeakMargin
+				e.Wave = corr >= cfg.CorrThreshold && waveLag && unambiguous
+				sup = cfg.ChainCorr > 0 && corr >= cfg.ChainCorr && waveLag
+				if (e.Wave || sup) && d.vertical(a, b, lag, maxLag, minOverlap) {
+					e.Wave, sup = false, false
 				}
-				edges = append(edges, e)
-				axes = append(axes, ax)
-				support = append(support, sup)
 			}
 		}
+		edges = append(edges, e)
+		support = append(support, sup)
 	}
-	d.keepChains(edges, axes, support)
+	d.keepChains(edges, support)
 
 	for i, e := range edges {
 		a, b := d.phones[e.From], d.phones[e.To]
+		var tx, ty, speed float64
 		if e.Wave {
 			a.wave, b.wave = true, true
+			tx, ty, _ = travel(a, b, e.LagMs)
+			speed = math.Hypot(b.x-a.x, b.y-a.y) / float64(max(1, abs64(e.LagMs)))
 		}
-		sign := 0
-		if e.Wave {
-			sign = 1
-			if e.LagMs < 0 {
-				sign = -1
-			}
-		}
-		za, zb := d.zoneIdx(a.row, a.col), d.zoneIdx(b.row, b.col)
-		for _, zi := range uniq(za, zb) {
+		for _, zi := range unionIdx(a.zones, b.zones) {
 			t := &tallies[zi]
-			if axes[i] == 0 {
-				t.hTot++
-				t.hNet += sign
-			} else {
-				t.vTot++
-				t.vNet += sign
-			}
+			t.edges = append(t.edges, i)
 			if e.Wave {
 				t.waves++
+				t.vx += tx
+				t.vy += ty
 				t.lagSum += abs64(e.LagMs)
+				t.speeds = append(t.speeds, speed)
 			}
 		}
 	}
@@ -485,7 +516,7 @@ func (d *Detector) Step(now int64) Result {
 		case p.sway > cfg.SwayThreshold:
 			st = protocol.StatusSwaying
 		}
-		res.Phones = append(res.Phones, PhoneResult{ID: id, Row: p.row, Col: p.col, Status: st, Sway: p.sway, LastT: p.lastT})
+		res.Phones = append(res.Phones, PhoneResult{ID: id, X: p.x, Y: p.y, Outside: p.outside, Status: st, Sway: p.sway, LastT: p.lastT})
 	}
 
 	dt := now - d.lastStep
@@ -496,74 +527,247 @@ func (d *Detector) Step(now int64) Result {
 	alpha := 1 - math.Exp(-float64(dt)/float64(cfg.ZoneSmoothMs))
 	for i, z := range d.zones {
 		t := tallies[i]
-		raw, dirn := 0.0, ""
-		if t.hTot > 0 {
-			raw = math.Abs(float64(t.hNet)) / float64(t.hTot)
-			dirn = dirName(t.hNet, "col")
-		}
-		if t.vTot > 0 {
-			if v := math.Abs(float64(t.vNet)) / float64(t.vTot); v > raw {
-				raw, dirn = v, dirName(t.vNet, "row")
-			}
+		raw := 0.0
+		if net := math.Hypot(t.vx, t.vy); net > 0 {
+			raw = net / float64(d.waveCapable(edges, t.edges, t.vx/net, t.vy/net, median(t.speeds)))
 		}
 		z.raw = raw
 		z.score += alpha * (raw - z.score)
 		if t.waves > 0 {
-			z.direction = dirn
+			z.direction = dirName(t.vx, t.vy)
 			z.lagMs = t.lagSum / int64(t.waves)
 		}
-		if ch, ok := z.update(now, cfg); ok {
-			res.Changes = append(res.Changes, ch)
+		if from, to, ok := z.state.Update(now, z.score, zoneThresholds(cfg, z.def.Sens)); ok {
+			if to == protocol.LevelCalm {
+				z.direction, z.lagMs = "", 0
+			}
+			res.Changes = append(res.Changes, Change{T: now, Zone: z.def.ID, From: from, To: to, Score: z.score})
 		}
 		res.Zones = append(res.Zones, ZoneResult{
-			ID: z.id, Level: z.level, Score: z.score, Raw: z.raw,
-			Row0: z.row0, Col0: z.col0, Row1: z.row1, Col1: z.col1,
-			Direction: z.direction, LagMs: z.lagMs, Since: z.levelSince,
+			ID: z.def.ID, Name: z.def.Name, Poly: z.def.Poly, Custom: z.def.Custom, Sens: z.def.Sens,
+			Level: z.state.Level, Score: z.score, Raw: z.raw,
+			Direction: z.direction, LagMs: z.lagMs, Since: z.state.Since,
 		})
 	}
 	return res
 }
 
-// update runs the zone's level state machine.
-func (z *zone) update(now int64, cfg *Config) (Change, bool) {
-	since := func(p *int64, above bool) int64 {
-		if !above {
-			*p = 0
-			return 0
+// waveCapable counts the edges of a zone that could show a wave-like lag
+// at all: the wave edges themselves, plus every other edge whose length
+// along the wave's direction (ux, uy) is at least speed × MinWaveLagMs
+// (speed = median of the wave edges' length / lag). On
+// a line every hop qualifies; in a crowd, two people standing side by side
+// across the direction of travel are hit at almost the same moment, so
+// their near-zero lag is consistent with the wave rather than evidence
+// against it, and they are left out.
+func (d *Detector) waveCapable(edges []Edge, idx []int, ux, uy, speed float64) int {
+	minProj := speed * float64(d.cfg.MinWaveLagMs)
+	n := 0
+	for _, i := range idx {
+		e := edges[i]
+		a, b := d.phones[e.From], d.phones[e.To]
+		if e.Wave || math.Abs((b.x-a.x)*ux+(b.y-a.y)*uy) >= minProj {
+			n++
 		}
-		if *p == 0 {
-			*p = now
-		}
-		return now - *p
 	}
-	yHeld := since(&z.yellowSince, z.score > cfg.YellowScore)
-	rHeld := since(&z.redSince, z.score > cfg.RedScore)
+	return max(n, 1)
+}
 
-	from, to := z.level, z.level
-	switch z.level {
-	case protocol.LevelCalm:
-		if z.yellowSince != 0 && yHeld >= cfg.HoldMs {
-			to = protocol.LevelYellow
+func median(v []float64) float64 {
+	if len(v) == 0 {
+		return 0
+	}
+	s := append([]float64(nil), v...)
+	sort.Float64s(s)
+	return s[len(s)/2]
+}
+
+// before orders phones for edge direction: smaller x, then y, then id.
+func before(a, b *phone) bool {
+	if a.x != b.x {
+		return a.x < b.x
+	}
+	if a.y != b.y {
+		return a.y < b.y
+	}
+	return a.id < b.id
+}
+
+// neighbourPairs picks the pairs to compare: each phone keeps its
+// MaxNeighbours nearest within NeighbourRadius, and a pair counts if either
+// side keeps the other. Pairs come back ordered (From before To) and sorted,
+// so results are deterministic. ps must be sorted by id.
+func (d *Detector) neighbourPairs(ps []*phone) [][2]*phone {
+	r2 := d.cfg.NeighbourRadius * d.cfg.NeighbourRadius
+	type cand struct {
+		j  int
+		d2 float64
+	}
+	keep := map[[2]int]bool{}
+	var cs []cand
+	for i, a := range ps {
+		cs = cs[:0]
+		for j, b := range ps {
+			if i == j {
+				continue
+			}
+			dx, dy := a.x-b.x, a.y-b.y
+			if d2 := dx*dx + dy*dy; d2 <= r2 {
+				cs = append(cs, cand{j, d2})
+			}
 		}
-	case protocol.LevelYellow:
-		if z.redSince != 0 && rHeld >= cfg.HoldMs {
-			to = protocol.LevelRed
-		} else if z.score < cfg.YellowScore-cfg.Margin {
-			to = protocol.LevelCalm
-		}
-	case protocol.LevelRed:
-		if z.score < cfg.RedScore-cfg.Margin {
-			to = protocol.LevelYellow
+		sort.Slice(cs, func(x, y int) bool {
+			if cs[x].d2 != cs[y].d2 {
+				return cs[x].d2 < cs[y].d2
+			}
+			return cs[x].j < cs[y].j
+		})
+		for k := 0; k < len(cs) && k < d.cfg.MaxNeighbours; k++ {
+			lo, hi := i, cs[k].j
+			if lo > hi {
+				lo, hi = hi, lo
+			}
+			keep[[2]int{lo, hi}] = true
 		}
 	}
-	if to == from {
-		return Change{}, false
+	out := make([][2]*phone, 0, len(keep))
+	for k := range keep {
+		a, b := ps[k[0]], ps[k[1]]
+		if before(b, a) {
+			a, b = b, a
+		}
+		out = append(out, [2]*phone{a, b})
 	}
-	z.level, z.levelSince = to, now
-	if to == protocol.LevelCalm {
-		z.direction, z.lagMs = "", 0
+	sort.Slice(out, func(i, j int) bool {
+		if out[i][0] != out[j][0] {
+			return before(out[i][0], out[j][0])
+		}
+		return before(out[i][1], out[j][1])
+	})
+	return out
+}
+
+// travel is the unit vector of an edge in its direction of travel (a → b
+// when lag > 0). ok is false when the phones sit on the same spot.
+func travel(a, b *phone, lag int64) (ux, uy float64, ok bool) {
+	dx, dy := b.x-a.x, b.y-a.y
+	l := math.Hypot(dx, dy)
+	if l < 1e-9 {
+		return 0, 0, false
 	}
-	return Change{T: now, Zone: z.id, From: from, To: to, Score: z.score}, true
+	if lag < 0 {
+		dx, dy = -dx, -dy
+	}
+	return dx / l, dy / l, true
+}
+
+func unionIdx(a, b []int) []int {
+	out := append([]int(nil), a...)
+	for _, v := range b {
+		dup := false
+		for _, w := range a {
+			dup = dup || v == w
+		}
+		if !dup {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// keepChains clears Wave on edges that are not part of a run of at least
+// MinChain phones travelling the same way. A crowd wave passes from person
+// to person to person; two neighbours bumping into each other only make an
+// isolated edge.
+//
+// Each wave or support edge is oriented in its direction of travel; a run
+// continues from a→b to b→c when the two hops' travel directions are within
+// ChainAngleDeg of each other (on a line: the same way along the row). Like
+// edge linking with hysteresis, the other hops of a run only need to
+// support the wave (support[i]: |corr| ≥ ChainCorr at a wave-like lag), not
+// pass every test themselves, so one noisy hop doesn't break a real wave.
+func (d *Detector) keepChains(edges []Edge, support []bool) {
+	cfg := &d.cfg
+	if cfg.MinChain <= 2 {
+		return
+	}
+	type hop struct {
+		tail, head string
+		ux, uy     float64
+	}
+	hops := make([]hop, len(edges))
+	use := make([]bool, len(edges))
+	in, out := map[string][]int{}, map[string][]int{}
+	for i, e := range edges {
+		if !(e.Wave || support[i]) || e.LagMs == 0 {
+			continue
+		}
+		ux, uy, ok := travel(d.phones[e.From], d.phones[e.To], e.LagMs)
+		if !ok {
+			continue
+		}
+		h := hop{e.From, e.To, ux, uy}
+		if e.LagMs < 0 {
+			h.tail, h.head = e.To, e.From
+		}
+		hops[i], use[i] = h, true
+		out[h.tail] = append(out[h.tail], i)
+		in[h.head] = append(in[h.head], i)
+	}
+	cosMax := math.Cos(cfg.ChainAngleDeg * math.Pi / 180)
+	aligned := func(i, j int) bool {
+		return hops[i].ux*hops[j].ux+hops[i].uy*hops[j].uy >= cosMax-1e-9
+	}
+	limit := cfg.MinChain
+	// run is the longest aligned run of hops starting (fwd) or ending (back)
+	// with hop i, counted in hops (depth so far included) and capped at
+	// limit. Phones already on the run are never revisited, so cycles end.
+	var run func(i int, fwd bool, visited map[string]bool, depth int) int
+	run = func(i int, fwd bool, visited map[string]bool, depth int) int {
+		if depth >= limit {
+			return depth
+		}
+		next, nb := hops[i].head, out
+		if !fwd {
+			next, nb = hops[i].tail, in
+		}
+		best := depth
+		for _, j := range nb[next] {
+			far := hops[j].head
+			if !fwd {
+				far = hops[j].tail
+			}
+			if visited[far] || !aligned(i, j) {
+				continue
+			}
+			visited[far] = true
+			best = max(best, run(j, fwd, visited, depth+1))
+			delete(visited, far)
+			if best >= limit {
+				break
+			}
+		}
+		return best
+	}
+	var drop []int
+	for i, e := range edges {
+		if !e.Wave {
+			continue
+		}
+		if !use[i] {
+			drop = append(drop, i)
+			continue
+		}
+		visited := map[string]bool{hops[i].tail: true, hops[i].head: true}
+		back := run(i, false, visited, 1)
+		fwd := run(i, true, visited, 1)
+		if back+fwd < cfg.MinChain { // (back+fwd-1) hops = back+fwd phones
+			drop = append(drop, i)
+		}
+	}
+	for _, i := range drop {
+		edges[i].Wave = false
+	}
 }
 
 // xcorr finds the lag (in grid steps, sub-step refined) at which b best
@@ -712,73 +916,6 @@ func corrAt(a, b []float64, va, vb []bool, lag, minOverlap int) float64 {
 	return (sab - sa*sb/fm) / den
 }
 
-// keepChains clears Wave on edges that are not part of a run of at least
-// MinChain phones along one row or column, all travelling the same way. A
-// crowd wave passes from person to person to person; two neighbours bumping
-// into each other only make an isolated edge.
-//
-// Like edge linking with hysteresis, the other hops of a run only need to
-// support the wave (support[i]: |corr| ≥ ChainCorr at a wave-like lag),
-// not pass every test themselves, so one noisy hop doesn't break a real
-// wave. axes[i] is 0 for an edge along a row, 1 along a column.
-func (d *Detector) keepChains(edges []Edge, axes []int, support []bool) {
-	cfg := &d.cfg
-	if cfg.MinChain <= 2 {
-		return
-	}
-	type key struct {
-		id   string
-		axis int
-	}
-	in, out := map[key][]int{}, map[key][]int{}
-	for i, e := range edges {
-		if e.Wave || support[i] {
-			in[key{e.To, axes[i]}] = append(in[key{e.To, axes[i]}], i)
-			out[key{e.From, axes[i]}] = append(out[key{e.From, axes[i]}], i)
-		}
-	}
-	consistent := func(i, j int) bool {
-		return (edges[i].LagMs < 0) == (edges[j].LagMs < 0)
-	}
-	// Longest consistent run of edges ending at / starting from edge i.
-	// Edges only point right or down, so the recursion always terminates.
-	back, fwd := make([]int, len(edges)), make([]int, len(edges))
-	var runBack, runFwd func(i int) int
-	runBack = func(i int) int {
-		if back[i] == 0 {
-			best := 0
-			for _, j := range in[key{edges[i].From, axes[i]}] {
-				if consistent(i, j) {
-					best = max(best, runBack(j))
-				}
-			}
-			back[i] = best + 1
-		}
-		return back[i]
-	}
-	runFwd = func(i int) int {
-		if fwd[i] == 0 {
-			best := 0
-			for _, j := range out[key{edges[i].To, axes[i]}] {
-				if consistent(i, j) {
-					best = max(best, runFwd(j))
-				}
-			}
-			fwd[i] = best + 1
-		}
-		return fwd[i]
-	}
-	var drop []int
-	for i, e := range edges {
-		if e.Wave && runBack(i)+runFwd(i) < cfg.MinChain { // (back+fwd-1) edges = back+fwd phones
-			drop = append(drop, i)
-		}
-	}
-	for _, i := range drop {
-		edges[i].Wave = false
-	}
-}
-
 func rms(x []float64, valid []bool) float64 {
 	var ss float64
 	var n int
@@ -803,23 +940,6 @@ func abs(v int) int {
 		return -v
 	}
 	return v
-}
-
-func dirName(net int, axis string) string {
-	switch {
-	case net > 0:
-		return "+" + axis
-	case net < 0:
-		return "-" + axis
-	}
-	return ""
-}
-
-func uniq(a, b int) []int {
-	if a == b {
-		return []int{a}
-	}
-	return []int{a, b}
 }
 
 func growF(s []float64, n int) []float64 {

@@ -18,33 +18,50 @@ import (
 
 // Record kinds.
 const (
-	KindMeta  = "meta"  // first line: label, grid
-	KindHello = "hello" // phone joined at row/col
+	KindMeta  = "meta"  // first line: label, venue size
+	KindHello = "hello" // phone joined at x/y (old recordings: row/col)
+	KindPos   = "pos"   // phone moved to x/y (dragged, walked, or a GPS fix converted to metres)
 	KindSync  = "sync"  // clock sync result
 	KindM     = "m"     // one motion summary
 	KindBye   = "bye"   // phone disconnected
 )
 
 // Record is one line of a JSONL recording. Zero values are omitted, which is
-// lossless for numbers.
+// lossless for numbers; positions are pointers so 0 m stays distinguishable
+// from "absent" (old row/col recordings).
+//
+// Privacy: positions are venue metres only. GPS fixes are converted on
+// arrival; latitude and longitude are never recorded.
 type Record struct {
-	K      string  `json:"k"`
-	T      int64   `json:"t"` // server time (ms) the event happened
-	ID     string  `json:"id,omitempty"`
-	Row    int     `json:"row,omitempty"`
-	Col    int     `json:"col,omitempty"`
-	UA     string  `json:"ua,omitempty"`
-	CT     int64   `json:"ct,omitempty"` // clock-corrected phone time of a reading
-	AX     float64 `json:"ax,omitempty"`
-	AY     float64 `json:"ay,omitempty"`
-	AZ     float64 `json:"az,omitempty"`
-	Rot    float64 `json:"rot,omitempty"`
-	RTT    int64   `json:"rtt,omitempty"`
-	Offset int64   `json:"off,omitempty"`
-	Label  string  `json:"label,omitempty"`
-	Rows   int     `json:"rows,omitempty"`
-	Cols   int     `json:"cols,omitempty"`
+	K      string   `json:"k"`
+	T      int64    `json:"t"` // server time (ms) the event happened
+	ID     string   `json:"id,omitempty"`
+	X      *float64 `json:"x,omitempty"` // venue metres
+	Y      *float64 `json:"y,omitempty"`
+	Acc    float64  `json:"acc,omitempty"` // GPS accuracy (m); 0 = placed by hand
+	Out    bool     `json:"out,omitempty"` // GPS fix outside the venue (clamped)
+	Row    int      `json:"row,omitempty"` // legacy grid cell
+	Col    int      `json:"col,omitempty"`
+	UA     string   `json:"ua,omitempty"`
+	CT     int64    `json:"ct,omitempty"` // clock-corrected phone time of a reading
+	AX     float64  `json:"ax,omitempty"`
+	AY     float64  `json:"ay,omitempty"`
+	AZ     float64  `json:"az,omitempty"`
+	Rot    float64  `json:"rot,omitempty"`
+	RTT    int64    `json:"rtt,omitempty"`
+	Offset int64    `json:"off,omitempty"`
+	Label  string   `json:"label,omitempty"`
+	Rows   int      `json:"rows,omitempty"` // legacy grid size
+	Cols   int      `json:"cols,omitempty"`
+	W      float64  `json:"w,omitempty"` // meta: venue size (m)
+	H      float64  `json:"h,omitempty"`
 }
+
+// F returns a pointer to v, for Record positions.
+func F(v float64) *float64 { return &v }
+
+// HasPos reports whether the record carries an x/y position.
+func (r Record) HasPos() bool { return r.X != nil && r.Y != nil }
 
 // JSONLWriter appends records to a file. Safe for concurrent use.
 type JSONLWriter struct {

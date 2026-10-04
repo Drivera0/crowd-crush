@@ -9,3 +9,5 @@ recordings/auto/
 .env
 arduino/sign/arduino_secrets.h
 arduino/zone-light/arduino_secrets.h
+# saved venue anchor and staff-drawn areas
+/data/

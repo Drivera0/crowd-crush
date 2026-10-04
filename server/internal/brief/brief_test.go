@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-var info = Info{Zone: "B", Level: "red", Direction: "+col", LagMs: 250, Scores: []float64{0.4, 0.7}}
+var info = Info{Zone: "B", Level: "red", Direction: "+x", LagMs: 250, Scores: []float64{0.4, 0.7}}
 
 func TestNoKeyUsesTemplate(t *testing.T) {
 	text, err := New("", "").Brief(context.Background(), info)
@@ -74,6 +74,30 @@ func TestRetriesWithoutThinking(t *testing.T) {
 		srv.Close()
 		if err != nil || text != "ok" || calls != 2 {
 			t.Fatalf("%q: got %q %v after %d calls", reject, text, err, calls)
+		}
+	}
+}
+
+// A drawn area has a random id; people must hear its name.
+func TestTemplateUsesPlaceName(t *testing.T) {
+	text := Template(Info{Zone: "n2549bj", Where: "Stage front", Level: "red", Direction: "+x", LagMs: 250})
+	if strings.Contains(text, "n2549bj") || !strings.Contains(text, "Stage front") {
+		t.Fatalf("got %q", text)
+	}
+}
+
+func TestTemplates(t *testing.T) {
+	w := Template(Info{Zone: "A", Level: "red", Direction: "+x", LagMs: 250})
+	if !strings.Contains(w, "left to right") {
+		t.Errorf("wave template %q", w)
+	}
+	if DirectionText("-y") == DirectionText("") || DirectionText("+row") == DirectionText("") {
+		t.Error("direction text missing")
+	}
+	d := Template(Info{Kind: "density", Zone: "A", Level: "red", People: 18, AreaM2: 4.2, X: 12, Y: 4, Trend: "forming"})
+	for _, want := range []string{"Zone A", "18 people", "4 square metres", "denser"} {
+		if !strings.Contains(d, want) {
+			t.Errorf("density template %q lacks %q", d, want)
 		}
 	}
 }

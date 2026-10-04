@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strings"
@@ -21,20 +22,43 @@ import (
 const Timeout = 5 * time.Second
 
 // Info is what the detector knows about an alert.
+//
+// Kind "wave" (the default) is a push travelling through the crowd; kind
+// "density" is a cluster of people packing too tightly, described by the
+// density fields.
 type Info struct {
-	Zone        string    `json:"zone"`
+	Kind        string    `json:"kind,omitempty"` // wave | density
+	Zone        string    `json:"zoneId"`
+	Where       string    `json:"where,omitempty"` // the zone's name for people: "Zone A", "Stage front"
 	Level       string    `json:"level"`
-	SecondsHigh float64   `json:"secondsElevated"` // time since the zone left calm
-	Scores      []float64 `json:"scoreTrendLast20s"`
-	Direction   string    `json:"waveDirection"` // +col, -col, +row, -row
-	LagMs       int64     `json:"lagPerPersonMs"`
+	SecondsHigh float64   `json:"secondsElevated,omitempty"` // time since the zone left calm
+	Scores      []float64 `json:"scoreTrendLast20s,omitempty"`
+	Direction   string    `json:"waveDirection,omitempty"` // +x, -x, +y, -y (legacy +col, -col, +row, -row)
+	LagMs       int64     `json:"lagPerPersonMs,omitempty"`
 	Phones      int       `json:"phonesInZone"`
-	Swaying     int       `json:"phonesSwaying"`
+	Swaying     int       `json:"phonesSwaying,omitempty"`
+
+	// Density alerts.
+	Density float64 `json:"peoplePerSquareMetre,omitempty"` // estimated
+	People  int     `json:"estimatedPeople,omitempty"`
+	AreaM2  float64 `json:"areaSquareMetres,omitempty"`
+	Trend   string  `json:"trend,omitempty"` // forming | steady | dispersing
+	X       float64 `json:"x,omitempty"`     // where on the venue map (m)
+	Y       float64 `json:"y,omitempty"`
 }
 
-// DirectionText describes a wave direction for people.
+// DirectionText describes a wave direction for people. +x is left to
+// right on the venue map, +y top to bottom.
 func DirectionText(d string) string {
 	switch d {
+	case "+x":
+		return "across the venue, left to right"
+	case "-x":
+		return "across the venue, right to left"
+	case "+y":
+		return "from the top of the map to the bottom"
+	case "-y":
+		return "from the bottom of the map to the top"
 	case "+col":
 		return "along the line, left to right"
 	case "-col":
@@ -47,17 +71,45 @@ func DirectionText(d string) string {
 	return "through the crowd"
 }
 
+// TrendText describes a cluster trend for people.
+func TrendText(t string) string {
+	switch t {
+	case "forming":
+		return "and getting denser"
+	case "dispersing":
+		return "though it is starting to thin out"
+	}
+	return "and holding"
+}
+
+// Place is how people should hear the zone: its name ("Stage front",
+// "Zone A"), never an internal id like a drawn area's random one.
+func Place(in Info) string {
+	if in.Where != "" {
+		return in.Where
+	}
+	return "Zone " + in.Zone
+}
+
 // Template is the fallback briefing when Gemini is unavailable.
 func Template(in Info) string {
+	at := Place(in)
+	if in.Kind == "density" {
+		if in.Level != "red" {
+			return fmt.Sprintf("%s: people bunching up near %.0f, %.0f, watch closely.", at, in.X, in.Y)
+		}
+		return fmt.Sprintf("%s: about %d people packed into %.0f square metres near %.0f, %.0f, %s. Stop entry to %s and open space around them now.",
+			at, in.People, math.Max(1, math.Round(in.AreaM2)), in.X, in.Y, TrendText(in.Trend), at)
+	}
 	if in.Level != "red" {
-		return fmt.Sprintf("Zone %s: crowd sway building, watch closely.", in.Zone)
+		return fmt.Sprintf("%s: crowd sway building, watch closely.", at)
 	}
 	speed := ""
 	if in.LagMs > 0 {
 		speed = fmt.Sprintf(", about one person every %d milliseconds", in.LagMs)
 	}
-	return fmt.Sprintf("Zone %s: crowd waves travelling %s%s. Stop entry to Zone %s and open relief exits now.",
-		in.Zone, DirectionText(in.Direction), speed, in.Zone)
+	return fmt.Sprintf("%s: crowd waves travelling %s%s. Stop entry to %s and open relief exits now.",
+		at, DirectionText(in.Direction), speed, at)
 }
 
 // Client talks to the Gemini REST API.
@@ -87,6 +139,7 @@ The detector (not you) has already decided the alert level from phone motion sen
 Write exactly two short sentences to be read aloud over a radio:
 1) what is happening and where, in plain words;
 2) one concrete action for stewards.
+Name the place exactly as the "where" field says; never read out zoneId.
 No preamble, no markdown, no numbers with decimals, under 40 words total.`
 
 // Brief returns a two-sentence briefing. On any failure it returns the
@@ -96,7 +149,11 @@ func (c *Client) Brief(ctx context.Context, in Info) (string, error) {
 		return Template(in), ErrNoKey
 	}
 	b, _ := json.Marshal(in)
-	out, err := c.generate(ctx, system, "Alert data:\n"+string(b)+"\nDirection meaning: "+DirectionText(in.Direction), 120)
+	meaning := "Alert type: a push wave travelling through the crowd. Direction meaning: " + DirectionText(in.Direction)
+	if in.Kind == "density" {
+		meaning = "Alert type: crowding. People are packed too tightly in one spot (positions are metres on the venue map, origin top-left); this is a density alert, not a push wave. Trend: " + TrendText(in.Trend)
+	}
+	out, err := c.generate(ctx, system, "Alert data:\n"+string(b)+"\n"+meaning, 120)
 	if err != nil {
 		return Template(in), err
 	}

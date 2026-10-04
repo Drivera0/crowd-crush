@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -13,11 +14,26 @@ import (
 
 // TestSweep is a tuning aid, not a regression test: PULSE_SWEEP=1 runs every
 // scenario over many simulator seeds and prints how often each level is reached.
+// PULSE_LAYOUT=crowd runs the crowd layout (PULSE_N phones, default 16;
+// PULSE_MOVE=0 keeps them still), PULSE_SEEDS sets the number of crowds.
 func TestSweep(t *testing.T) {
 	if os.Getenv("PULSE_SWEEP") == "" {
 		t.Skip("set PULSE_SWEEP=1")
 	}
 	seeds := 20
+	if v, err := strconv.Atoi(os.Getenv("PULSE_SEEDS")); err == nil && v > 0 {
+		seeds = v
+	}
+	n := 8
+	lay := sim.LineLayout(1, n)
+	if os.Getenv("PULSE_LAYOUT") == "crowd" {
+		n = 16
+		if v, err := strconv.Atoi(os.Getenv("PULSE_N")); err == nil && v > 0 {
+			n = v
+		}
+		lay = sim.CrowdLayout(os.Getenv("PULSE_MOVE") != "0")
+	}
+	only := os.Getenv("PULSE_ONLY")
 	cfg := DefaultConfig()
 	if s := os.Getenv("PULSE_CFG"); s != "" {
 		if err := json.Unmarshal([]byte(s), &cfg); err != nil {
@@ -25,6 +41,9 @@ func TestSweep(t *testing.T) {
 		}
 	}
 	for _, name := range sim.Scenarios {
+		if only != "" && !strings.Contains(","+only+",", ","+name+",") {
+			continue
+		}
 		dur := 90.0
 		if name == "wave" {
 			dur = 70
@@ -33,7 +52,7 @@ func TestSweep(t *testing.T) {
 		var reds, ylw []float64
 		notCalmEnd, steps := 0, 0
 		for s := 1; s <= seeds; s++ {
-			o := runScenarioCfg(t, name, 8, dur, 25, false, int64(s), cfg)
+			o := runScenarioLayout(t, name, n, dur, 25, false, int64(s), cfg, lay)
 			counts[o.maxLevel]++
 			steps += o.waveSteps
 			if o.yellowAt >= 0 {

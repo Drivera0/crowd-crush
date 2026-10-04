@@ -22,9 +22,9 @@ run:
 demo: build
 	./bin/pulse $(ARGS)
 
-# make sim SCENARIO=dance N=8
+# make sim SCENARIO=dance N=24 (crowd layout; ARGS="-layout line -n 8" for the line demo)
 SCENARIO ?= wave
-N ?= 8
+N ?= 24
 sim:
 	go run ./server/cmd/sim -n $(N) -scenario $(SCENARIO) $(ARGS)
 
@@ -49,7 +49,7 @@ tunnel:
 
 # Regenerate the simulated safety-net recordings.
 recordings:
-	for s in wave dance shove; do go run ./server/cmd/sim -n 8 -scenario $$s -seed 42 -duration 70s -out recordings/sim-$$s.jsonl; done
+	for s in wave dance shove; do go run ./server/cmd/sim -layout line -n 8 -scenario $$s -seed 42 -duration 70s -out recordings/sim-$$s.jsonl; done
 
 clean:
 	rm -rf bin web/phone/dist web/dashboard/dist

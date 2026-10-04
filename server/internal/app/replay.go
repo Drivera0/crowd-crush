@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"path/filepath"
 	"strings"
 	"time"
@@ -31,21 +32,43 @@ func (a *App) LoadRecording(ctx context.Context, name string) ([]store.Record, e
 	return store.ReadJSONL(path)
 }
 
-// ReplayConfig sizes the detector grid to fit a recording.
+// ReplayConfig sizes the venue for a recording: the size its meta record
+// gives, else base's, grown if needed so every recorded position (or
+// legacy grid cell) fits.
 func ReplayConfig(base detect.Config, recs []store.Record) detect.Config {
 	cfg := base
 	for _, r := range recs {
-		switch r.K {
-		case store.KindMeta:
-			if r.Rows > 0 && r.Cols > 0 {
-				cfg.Rows, cfg.Cols = r.Rows, r.Cols
-			}
-		case store.KindHello, store.KindM:
-			cfg.Rows = max(cfg.Rows, r.Row+1)
-			cfg.Cols = max(cfg.Cols, r.Col+1)
+		if r.K == store.KindMeta && r.W >= 1 && r.H >= 1 {
+			cfg.VenueW, cfg.VenueH = r.W, r.H
+			break
 		}
 	}
+	w, h := cfg.VenueW, cfg.VenueH
+	for _, r := range recs {
+		var x, y float64
+		switch {
+		case r.HasPos():
+			x, y = *r.X, *r.Y
+		case r.K == store.KindHello || r.K == store.KindPos || r.K == store.KindM:
+			x, y = cfg.LegacyPos(r.Row, r.Col)
+		default:
+			continue
+		}
+		w, h = math.Max(w, math.Ceil(x+1)), math.Max(h, math.Ceil(y+1))
+	}
+	cfg.VenueW, cfg.VenueH = w, h
 	return cfg
+}
+
+// recPos is where a record puts its phone: its x/y, or the legacy mapping
+// of its row/col (recordings from before free positions).
+func recPos(cfg detect.Config, r store.Record) (x, y float64) {
+	if r.HasPos() {
+		x, y = *r.X, *r.Y
+	} else {
+		x, y = cfg.LegacyPos(r.Row, r.Col)
+	}
+	return cfg.Clamp(x, y)
 }
 
 // StartReplay plays a recording through a fresh detector at the given speed.
@@ -80,8 +103,11 @@ func (a *App) StartReplay(ctx context.Context, name string, speed float64) error
 		recEnd:    last,
 		wallStart: hub.Now(),
 		speed:     speed,
-		p:         newPipeline(ReplayConfig(a.opt.Detect, recs)),
 	}
+	a.mu.Lock()
+	rs.p = newPipeline(ReplayConfig(a.liveConfig(), recs))
+	a.applyZones(rs.p)
+	a.mu.Unlock()
 	// Feed the metadata (hellos, syncs) that precedes the first reading.
 	rs.recStart = first - 1
 	a.mu.Lock()
@@ -102,12 +128,14 @@ func (a *App) StopReplay() {
 // Caller holds mu.
 func (a *App) feedReplay(r *replayState, pnow int64) {
 	p := r.p
+	cfg := p.cfg()
 	ensure := func(rec store.Record) *nodeMeta {
 		m := p.meta[rec.ID]
 		if m == nil {
-			m = &nodeMeta{row: rec.Row, col: rec.Col, connected: true, synced: true}
+			m = &nodeMeta{connected: true, synced: true}
+			m.x, m.y = recPos(cfg, rec)
 			p.meta[rec.ID] = m
-			p.det.SetPhone(rec.ID, rec.Row, rec.Col)
+			p.place(rec.ID, m)
 		}
 		return m
 	}
@@ -117,8 +145,15 @@ func (a *App) feedReplay(r *replayState, pnow int64) {
 		switch rec.K {
 		case store.KindHello:
 			m := ensure(rec)
-			m.row, m.col, m.ua, m.connected, m.lastRecv = rec.Row, rec.Col, rec.UA, true, rec.T
-			p.det.SetPhone(rec.ID, rec.Row, rec.Col)
+			m.x, m.y = recPos(cfg, rec)
+			m.acc, m.outside = rec.Acc, rec.Out
+			m.ua, m.connected, m.lastRecv = rec.UA, true, rec.T
+			p.place(rec.ID, m)
+		case store.KindPos:
+			m := ensure(rec)
+			m.x, m.y = recPos(cfg, rec)
+			m.acc, m.outside = rec.Acc, rec.Out
+			p.place(rec.ID, m)
 		case store.KindSync:
 			if m := p.meta[rec.ID]; m != nil {
 				m.rtt, m.offset = rec.RTT, rec.Offset
@@ -160,12 +195,14 @@ func (a *App) StartRecording(label string) (string, error) {
 		w.Close()
 		return "", fmt.Errorf("already recording %q", a.rec.label)
 	}
-	cfg := a.opt.Detect
-	w.Write(store.Record{K: store.KindMeta, T: now, Label: label, Rows: cfg.Rows, Cols: cfg.Cols})
-	// Phones already connected need a hello so the replay knows where they are.
+	cfg := a.liveConfig()
+	w.Write(store.Record{K: store.KindMeta, T: now, Label: label, W: cfg.VenueW, H: cfg.VenueH})
+	// Phones already connected need a hello so the replay knows where they
+	// are (venue metres only, never GPS coordinates).
 	for id, m := range a.live.meta {
 		if m.connected {
-			w.Write(store.Record{K: store.KindHello, T: now, ID: id, Row: m.row, Col: m.col, UA: m.ua})
+			w.Write(store.Record{K: store.KindHello, T: now, ID: id, X: store.F(r2(m.x)), Y: store.F(r2(m.y)),
+				Acc: m.acc, Out: m.outside, UA: m.ua})
 			if m.synced {
 				w.Write(store.Record{K: store.KindSync, T: now, ID: id, RTT: m.rtt, Offset: m.offset})
 			}
