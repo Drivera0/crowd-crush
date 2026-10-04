@@ -93,9 +93,9 @@ export const STEPS: StepDef[] = [
     state: (f, st) => (st === 'todo' && f.hwTotal > 0 ? `${f.hwOnline} of ${f.hwTotal} online — fix` : st === 'done' ? `${f.hwTotal} online` : null),
   },
   {
-    id: 'drill', title: 'Run a drill', sub: 'Fire a test alert through briefing, voice and signs.', page: 'recordings', optional: false,
-    focus: '#testBtn',
-    hint: () => 'Press “Run test alert” to fire the whole alert chain once. Everyone sees it marked DRILL.',
+    id: 'drill', title: 'Run a drill', sub: 'Send a test alert through briefing, voice, signs and lights.', page: 'drill', optional: false,
+    focus: '#drillSend',
+    hint: () => 'Choose where and what to test, then press “Send drill”. Everyone sees it marked DRILL.',
     done: (f) => f.drill,
     state: (_f, st) => (st === 'done' ? 'Drill sent' : null),
   },
@@ -111,7 +111,7 @@ export const STEPS: StepDef[] = [
   },
 ];
 
-const SETUP_PAGES: Page[] = ['venue', 'areas', 'hardware', 'recordings', 'live'];
+const SETUP_PAGES: Page[] = ['venue', 'areas', 'hardware', 'drill', 'live'];
 const SKIP_KEY = 'pulse.setup.skipped';
 const EXIT_KEY = 'pulse.setup.exited';
 
@@ -232,6 +232,22 @@ export class Setup {
     this.sig = '';
     this.render();
     window.setTimeout(() => this.enter(id), 220);
+  }
+
+  /**
+   * Start the guided setup again from step 1: skips and the paused state are forgotten (main.ts clears the
+   * flags the steps read). Steps that are still true (areas exist, boards online) are done again, without fanfare.
+   */
+  reset() {
+    this.skipped.clear();
+    store(SKIP_KEY, null);
+    this.exited = false;
+    store(EXIT_KEY, null);
+    this.cursor = null;
+    this.baseline = null;
+    this.finishedNow = false;
+    this.sig = '';
+    this.refresh();
   }
 
   /** From Home: jump to any step (a skipped one becomes "to do" again). */
@@ -518,5 +534,5 @@ export class Setup {
 }
 
 function pageName(p: Page) {
-  return { home: 'Home', live: 'Live', venue: 'Venue', areas: 'Areas & alerts', hardware: 'Hardware', sim: 'Simulation', recordings: 'Replays & drills', settings: 'Settings' }[p];
+  return { home: 'Home', live: 'Live', venue: 'Venue', areas: 'Areas & alerts', hardware: 'Hardware', sim: 'Simulation', drill: 'Alert drill', settings: 'Settings' }[p];
 }

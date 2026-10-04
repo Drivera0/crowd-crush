@@ -153,12 +153,14 @@ type pipeline struct {
 	clusters []crowd.Cluster
 	hist     map[string][]histPoint
 	lastHist int64
-	rules    map[string]*ruleState // area rule machines, by area id (rules.go)
-	pts      []crowd.Point         // phones that count (clusters, guidance) in the latest step
-	guide    *crowd.Guide          // personal guidance state (guide.go)
-	moves    map[string]crowd.Move // guidance for the phones in danger, latest step
-	stepDur  []stepTime            // detector step durations, last ~5 s
-	loc      *locState             // position estimator; nil = off (locate.go)
+	rules    map[string]*ruleState   // area rule machines, by area id (rules.go)
+	pts      []crowd.Point           // phones that count (clusters, guidance) in the latest step
+	guide    *crowd.Guide            // personal guidance state (guide.go)
+	moves    map[string]crowd.Move   // guidance for the phones in danger, latest step
+	stepDur  []stepTime              // detector step durations, last ~5 s
+	loc      *locState               // position estimator; nil = off (locate.go)
+	pack     *crowd.PackedTracker    // how packed in each phone is (packed.go)
+	packed   map[string]crowd.Packed // … in the latest step
 }
 
 // stepTime is one pipeline step's duration.
@@ -172,7 +174,7 @@ const statWindowMs = 5000
 
 func newPipeline(cfg detect.Config) *pipeline {
 	return &pipeline{det: detect.New(cfg), crowd: crowd.NewTracker(crowd.ConfigFrom(cfg)),
-		meta: map[string]*nodeMeta{}, hist: map[string][]histPoint{}, guide: crowd.NewGuide()}
+		meta: map[string]*nodeMeta{}, hist: map[string][]histPoint{}, guide: crowd.NewGuide(), pack: crowd.NewPackedTracker()}
 }
 
 // detectMs is the mean step duration over the last statWindowMs (ms, 2 decimals).
@@ -247,6 +249,7 @@ type replayState struct {
 	wallStart int64
 	speed     float64
 	p         *pipeline
+	ownVenue  bool // plays in today's venue (same size), so today's areas apply
 }
 
 func (r *replayState) now(wall int64) int64 {
@@ -280,6 +283,7 @@ type App struct {
 	signHold  int64                     // test alert keeps the sign red until this time
 	hw        []protocol.Hardware       // latest board status, see hardware.go
 	hwPos     map[string]protocol.Point // where staff placed each board, by key (hardware.go)
+	drills    []protocol.DrillRecord    // the last drills and what each output did (drill.go)
 	plan      *floorplan                // stored floor-plan image, see venue.go
 	alertSeq  int
 	incidents map[string]*incident // by alert id, see alerts.go
@@ -823,6 +827,7 @@ func (a *App) snapshotLocked(now int64) protocol.Snapshot {
 			n.Zone = p.det.ZoneOf(m.x, m.y)
 		}
 		locNode(m, &n)
+		packNode(p, id, &n)
 		pr, ok := status[id]
 		switch {
 		case !m.connected:

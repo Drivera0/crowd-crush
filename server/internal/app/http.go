@@ -33,7 +33,8 @@ func (a *App) Routes(mux *http.ServeMux) {
 		d, geo, demo := a.liveConfig(), a.venue.Geo, a.demo.On
 		a.mu.Unlock()
 		writeJSON(w, protocol.Config{VenueW: d.VenueW, VenueH: d.VenueH, Geo: geo,
-			Yellow: d.YellowScore, Red: d.RedScore, NeighbourRadius: d.NeighbourRadius, Demo: demo})
+			Yellow: d.YellowScore, Red: d.RedScore, NeighbourRadius: d.NeighbourRadius, Demo: demo,
+			DefaultW: a.opt.Detect.VenueW, DefaultH: a.opt.Detect.VenueH})
 	})
 	mux.HandleFunc("GET /api/areas", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, a.Areas())
@@ -239,8 +240,7 @@ func (a *App) Routes(mux *http.ServeMux) {
 		writeJSON(w, ex)
 	})
 	mux.HandleFunc("GET /api/recordings", func(w http.ResponseWriter, r *http.Request) {
-		files, _ := store.ListJSONL(a.opt.RecordingsDir)
-		out := map[string]any{"files": files, "runs": []store.Run{}}
+		out := map[string]any{"files": a.Recordings(), "runs": []store.Run{}}
 		if a.opt.Tiger != nil {
 			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 			defer cancel()
@@ -398,8 +398,32 @@ func (a *App) Routes(mux *http.ServeMux) {
 			writeJSON(w, res)
 		}
 	})
+	// The alert drill (drill.go). An empty body is the old one-button test
+	// alert; the response keeps its "zone" and adds the drill's record.
 	mux.HandleFunc("POST /api/test-alert", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, map[string]string{"zone": a.TestAlert()})
+		var req protocol.DrillRequest
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<14)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			httpError(w, errors.New(`want an empty body or {zone, level: "yellow"|"red", kind: "wave"|"density"|"rule", outputs: {briefing, voice, sign, lights: ["A"]}}`), http.StatusBadRequest)
+			return
+		}
+		d, err := a.Drill(req)
+		if err != nil {
+			httpError(w, err, http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, d)
+	})
+	mux.HandleFunc("GET /api/drill", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, a.DrillStatus())
+	})
+	// Take every board off the map (Home → Start over).
+	mux.HandleFunc("DELETE /api/hardware/pos", func(w http.ResponseWriter, r *http.Request) {
+		hw, err := a.ClearHardwarePos()
+		if err != nil {
+			httpError(w, err, http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, hw)
 	})
 	mux.HandleFunc("POST /api/ask", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {

@@ -119,9 +119,13 @@ type briefJob struct {
 // a projection right away; the red that may follow still gets its own.
 // Caller holds mu.
 func (a *App) raiseLocked(source, kind, zone, from, to string, score float64, now int64, replay, early bool, info func() brief.Info) (protocol.Alert, *briefJob) {
+	alertSource := "" // live alerts carry no source
+	if source != "live" {
+		alertSource = source
+	}
 	if to == protocol.LevelCalm {
 		return a.newAlertLocked("", protocol.Alert{T: now, Kind: kind, Zone: zone, Level: to, Score: score,
-			Status: protocol.StatusResolved, ResolvedAt: now}, now), nil
+			Status: protocol.StatusResolved, ResolvedAt: now, Source: alertSource}, now), nil
 	}
 	key := source + "|" + zone + "|" + kind
 	var al protocol.Alert
@@ -149,7 +153,7 @@ func (a *App) raiseLocked(source, kind, zone, from, to string, score float64, no
 	}
 	if !ok {
 		al = a.newAlertLocked(key, protocol.Alert{T: now, Kind: kind, Zone: zone, Level: to, Score: score,
-			Early: early && to == protocol.LevelYellow}, now)
+			Early: early && to == protocol.LevelYellow, Source: alertSource}, now)
 	}
 	inc := a.incidents[al.ID]
 	earlyJob := early && to == protocol.LevelYellow && !inc.briefing && now-a.lastBrief[zone] >= BriefCooldown
@@ -171,28 +175,34 @@ func (a *App) detectTick(now int64) {
 	a.mu.Lock()
 	res, cch := a.live.step(now)
 	rch := a.stepRules(a.live, now)
+	a.packedLocked(a.live, now, false)
 	a.guideLocked(a.live, now, false)
 	forget(a.live, now)
 	active, pnow, isReplay, src, source := a.live, now, false, "", "live"
 	changes := res.Changes
+	var dropped *protocol.Alerts
+	ended := false
 	if r := a.replay; r != nil {
 		pnow = r.now(now)
 		a.feedReplay(r, pnow)
 		var rres detect.Result
 		rres, cch = r.p.step(pnow)
 		rch = a.stepRules(r.p, pnow)
+		a.packedLocked(r.p, pnow, false)
 		a.guideLocked(r.p, pnow, false)
 		changes = rres.Changes
 		active, isReplay, src, source = r.p, true, " [replay]", "replay"
 		if pnow > r.recEnd+3000 {
 			log.Printf("replay %s finished, back to live", r.name)
 			a.replay = nil
+			ended, dropped = true, a.dropSourceLocked("replay")
 		}
 	}
 	if s := a.sim; s != nil {
 		var sres detect.Result
 		sres, cch = s.p.step(now)
 		rch = a.stepRules(s.p, now)
+		a.packedLocked(s.p, now, true)
 		a.guideLocked(s.p, now, true)
 		changes = sres.Changes
 		active, isReplay, src, source = s.p, true, " [sim]", "sim"
@@ -211,6 +221,13 @@ func (a *App) detectTick(now int64) {
 		if red && s.alertAt < 0 {
 			s.alertAt = s.seconds(now)
 		}
+	}
+	if ended {
+		// The replay just ended: its alerts leave with it, and this last
+		// tick's changes are not raised (they would outlive the replay).
+		a.mu.Unlock()
+		a.broadcastDropped(dropped)
+		return
 	}
 	type out struct {
 		al    protocol.Alert
@@ -335,10 +352,16 @@ func (a *App) briefAndSpeak(j *briefJob) {
 	if err != nil && !errors.Is(err, brief.ErrNoKey) {
 		log.Printf("brief: %v (using template)", err)
 	}
+	briefErr := err
+	if j.test {
+		bf.Headline = drillPrefix + bf.Headline // the voice says so too
+	}
 	text := bf.Text()
 	url := ""
+	var voiceErr error
 	if j.notify.voice {
 		url, err = a.opt.Voice.Speak(ctx, text)
+		voiceErr = err
 		if err != nil {
 			if !errors.Is(err, voice.ErrNoKey) {
 				log.Printf("voice: %v", err)
@@ -359,6 +382,9 @@ func (a *App) briefAndSpeak(j *briefJob) {
 		}
 		al.Brief, al.Headline, al.Action, al.AudioURL = text, bf.Headline, bf.Action, url
 	})
+	if j.test {
+		a.drillBriefedLocked(j.id, text, url, briefErr, voiceErr, j.notify.voice)
+	}
 	a.mu.Unlock()
 	if !ok || stale {
 		return // dropped from the log meanwhile, or overtaken
@@ -367,47 +393,6 @@ func (a *App) briefAndSpeak(j *briefJob) {
 	if !j.test && !j.replay {
 		a.opt.Sink.Alert(store.AlertRow{Time: time.UnixMilli(hub.Now()), Zone: al.Zone, Level: al.Level, Score: al.Score, Brief: text})
 	}
-}
-
-// TestAlert runs the whole alert chain (briefing, voice, sign) for the zone
-// with the highest score, without touching detector state. It is a new
-// incident (test:true) that can be acknowledged and resolved like a real
-// one, but never escalates and stays out of the history given to Gemini.
-func (a *App) TestAlert() string {
-	now := hub.Now()
-	a.mu.Lock()
-	p := a.active()
-	// The zone that looks worst, else B (the fallback clip's zone), else the first.
-	zone, best := "", 0.1
-	for _, z := range p.last.Zones {
-		if z.Score > best {
-			zone, best = z.ID, z.Score
-		}
-	}
-	if zone == "" {
-		if _, ok := p.last.Zone("B"); ok || len(p.last.Zones) == 0 {
-			zone = "B"
-		} else {
-			zone = p.last.Zones[0].ID
-		}
-	}
-	info := a.waveInfoLocked(p, zone, protocol.LevelRed, a.pnowLocked(now))
-	if info.Direction == "" {
-		info.Direction, info.LagMs = "+x", 250
-	}
-	info.Message = a.messageFor(zone)
-	a.signHold = now + signHoldMs
-	al := a.newAlertLocked("", protocol.Alert{T: now, Kind: protocol.KindWave, Zone: zone, Level: protocol.LevelRed,
-		Score: lastScore(info), Test: true}, now)
-	inc := a.incidents[al.ID]
-	inc.briefing = true
-	n := inc.notify
-	a.mu.Unlock()
-
-	a.Hub.BroadcastJSON(al)
-	a.opt.Sign.ForceAlert(protocol.LevelRed, zone, n.sign, n.light)
-	go a.briefAndSpeak(&briefJob{id: al.ID, info: info, test: true, notify: n})
-	return zone
 }
 
 // ErrNoAlert: no alert with that ID (or it has dropped out of the log).
@@ -483,6 +468,41 @@ func (a *App) ResolveAlert(id, by, note string) (protocol.Alert, error) {
 	}
 	a.Hub.BroadcastJSON(al)
 	return al, nil
+}
+
+// dropSourceLocked removes every alert raised from the given data source
+// ("sim" or "replay") from the log: a simulation or replay that is over must
+// not leave cards behind that read as real. It returns the new log to
+// broadcast, nil if nothing was removed. Caller holds mu.
+func (a *App) dropSourceLocked(source string) *protocol.Alerts {
+	keep := []protocol.Alert{}
+	for _, al := range a.alerts {
+		if al.Source == source {
+			if inc := a.incidents[al.ID]; inc != nil && inc.key != "" && a.openInc[inc.key] == al.ID {
+				delete(a.openInc, inc.key)
+			}
+			delete(a.incidents, al.ID)
+			continue
+		}
+		keep = append(keep, al)
+	}
+	for key := range a.openInc {
+		if strings.HasPrefix(key, source+"|") {
+			delete(a.openInc, key)
+		}
+	}
+	if len(keep) == len(a.alerts) {
+		return nil
+	}
+	a.alerts = keep
+	return &protocol.Alerts{Type: protocol.TypeAlerts, Alerts: append([]protocol.Alert{}, keep...)}
+}
+
+// broadcastDropped sends the log returned by dropSourceLocked, if any.
+func (a *App) broadcastDropped(out *protocol.Alerts) {
+	if out != nil {
+		a.Hub.BroadcastJSON(*out)
+	}
 }
 
 // ClearAlerts tidies the timeline: resolved alerts (calm notices included)

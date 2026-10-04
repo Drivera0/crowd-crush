@@ -1,9 +1,9 @@
 // App shell: sidebar navigation between pages, and the one crowd map that
 // moves into whichever page is showing (Live, Venue, Areas, Hardware,
-// Simulation, Replays). Imported first by main.ts so the map exists in the
+// Simulation). Imported first by main.ts so the map exists in the
 // DOM before anything looks it up.
 
-export type Page = 'home' | 'live' | 'venue' | 'areas' | 'hardware' | 'sim' | 'recordings' | 'settings';
+export type Page = 'home' | 'live' | 'venue' | 'areas' | 'hardware' | 'sim' | 'drill' | 'settings';
 
 const PAGES: Record<Page, { title: string; sub: string; map?: { title: string; sub: string; draw?: boolean } }> = {
   home: { title: 'Home', sub: 'Set up your event, then go live.' },
@@ -12,7 +12,7 @@ const PAGES: Record<Page, { title: string; sub: string; map?: { title: string; s
     sub: 'What the crowd is doing right now.',
     map: {
       title: 'Live crowd map',
-      sub: "Each dot is an attendee's phone at its real spot. Lines join phones close enough to compare readings; shaded circles are crowds packing together.",
+      sub: "Each dot is an attendee's phone at its real spot, coloured by how packed in that person is; the ring shows its motion. Lines join phones close enough to compare readings.",
     },
   },
   venue: {
@@ -36,14 +36,10 @@ const PAGES: Record<Page, { title: string; sub: string; map?: { title: string; s
   },
   sim: {
     title: 'Simulation',
-    sub: 'A virtual crowd you can steer into a crush.',
-    map: { title: 'Simulated crowd', sub: 'Grey dots are people without the app; coloured dots carry Pulse. Red glow = crush pressure.' },
+    sub: 'A virtual crowd you can steer into a crush, and saved runs to play back.',
+    map: { title: 'Simulated crowd', sub: 'Small dots are people without the app, ringed dots carry Pulse. Colour is how crushed each person is: pale = free, amber = tight, red = dangerous, deep red = crushed.' },
   },
-  recordings: {
-    title: 'Replays & drills',
-    sub: 'Rehearse with saved runs and test the alert chain.',
-    map: { title: 'Crowd map', sub: 'Replays play through the same detector as live phones.' },
-  },
+  drill: { title: 'Alert drill', sub: 'Send a test alert and see what each output did.' },
   settings: { title: 'Settings', sub: 'Privacy, and technical details for your technician.' },
 };
 
@@ -85,8 +81,16 @@ function show(p: Page) {
 }
 
 function fromHash(): Page {
-  const h = location.hash.replace('#', '') as Page;
-  return h in PAGES ? h : 'home';
+  const h = location.hash.replace('#', '');
+  // Old links: replays now live on the Simulation page ("Saved runs"), drills on their own page.
+  if (h === 'recordings' || h === 'replay' || h === 'replays') {
+    const saved = document.getElementById('savedRuns') as HTMLDetailsElement | null;
+    if (saved) saved.open = true;
+    window.setTimeout(() => saved?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }), 100);
+    return 'sim';
+  }
+  if (h === 'drills') return 'drill';
+  return h in PAGES ? (h as Page) : 'home';
 }
 
 window.addEventListener('hashchange', () => show(fromHash()));

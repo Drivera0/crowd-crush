@@ -175,6 +175,22 @@ func (a *App) SetHardwarePos(key string, x, y float64) ([]protocol.Hardware, err
 	return a.Hardware(), nil
 }
 
+// ClearHardwarePos takes every board (and the laptop) off the venue map:
+// data/hardware.json becomes empty. The boards themselves and SIGN_URL are
+// untouched.
+func (a *App) ClearHardwarePos() ([]protocol.Hardware, error) {
+	a.mu.Lock()
+	err := a.save(hardwareFile, map[string]protocol.Point{})
+	if err == nil {
+		a.hwPos = map[string]protocol.Point{}
+	}
+	a.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return a.Hardware(), nil
+}
+
 // loadHardwarePos reads data/hardware.json (never nil).
 func (a *App) loadHardwarePos() map[string]protocol.Point {
 	pos := map[string]protocol.Point{}

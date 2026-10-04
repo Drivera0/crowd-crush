@@ -122,7 +122,8 @@ func (a *App) hybridMotionLocked(id string, mo protocol.Motion, recv int64, rot 
 // harder (crowdsim.Press), swelling and easing like a crowd pushing in
 // waves, so a crush forms where the judges' dots are. Nothing is faked
 // downstream: the detector, alerts, briefing, voice and sign react to it
-// as they would to any simulation. It ends after surgeForS, or as soon as
+// as they would to any simulation. It holds for as long as the crowd is left
+// to it (a real crush does not let go by itself) and ends as soon as
 // staff give the simulated crowd another behaviour (calm, disperse, …).
 
 const (
@@ -133,7 +134,6 @@ const (
 	surgePressR     = 6.0  // m around the phones
 	surgeSwell      = 0.15 // the press swells and eases by this fraction…
 	surgeSwellS     = 2.5  // …every this many seconds
-	surgeForS       = 75.0 // the director lets go after this long
 )
 
 type surgeDirector struct {
@@ -207,7 +207,7 @@ func (a *App) surgeStepLocked(s *simRun, now int64) (press *crowdsim.Press, end 
 		return nil, false
 	}
 	t := float64(now-d.start) / 1000
-	if d.s != s || t > surgeForS {
+	if d.s != s {
 		a.surge = nil
 		return nil, d.s == s
 	}
@@ -276,6 +276,11 @@ func (a *App) statesFrom(p *pipeline, sim bool, out map[string]protocol.PhoneSta
 			// Standing in a packed cluster is danger too, whatever the
 			// zone as a whole says.
 			if l := inCluster[pr.ID]; levelRank[l] > levelRank[level] {
+				level = l
+			}
+			// … and so is being packed in oneself (packed.go): someone
+			// standing still in the crushed core is never shown calm.
+			if l := p.packed[pr.ID].Level; levelRank[l] > levelRank[level] {
 				level = l
 			}
 		}

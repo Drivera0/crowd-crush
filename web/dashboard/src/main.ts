@@ -1,12 +1,12 @@
 import './style.css';
-import { onPage } from './shell';
-import type { Alert, AlertRules, Cluster, Config, EdgeExplain, EvalReport, FloorplanSuggestion, Hardware, Level, Node, NodeDetail, SimAction, SimState, Snapshot, ToDash, Venue } from '../../shared/protocol';
+import { onPage, page } from './shell';
+import type { Alert, AlertRules, Cluster, Config, DrillReady, DrillRecord, DrillStatus, DrillZone, EdgeExplain, EvalReport, FloorplanSuggestion, Hardware, Level, Node, NodeDetail, SimAction, SimState, Snapshot, ToDash, Venue } from '../../shared/protocol';
 import { wsURL } from '../../shared/protocol';
 import { animate } from 'motion';
 import { Areas, inPoly, type Tool } from './areas';
 import { initDemo } from './demo';
 import { initMeshNet } from './meshnet';
-import { Mesh } from './mesh';
+import { Mesh, crushRGB } from './mesh';
 import { Setup } from './setup';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -29,6 +29,8 @@ interface LogItem {
   test?: boolean;
   /** The alert this entry belongs to (for "Clear"). */
   id?: string;
+  /** Raised by a simulation or a saved run, not the live crowd. */
+  src?: 'sim' | 'replay';
 }
 let timeline: LogItem[] = [];
 let soundOn = false;
@@ -419,6 +421,7 @@ function renderTooltip() {
   }
   tip.innerHTML =
     `<div class="tt-head">${n.name ? whoHTML(n.id) : `<b>${esc(n.id.slice(0, 8))}</b>`}<span class="st ${n.status}">${statusText[n.status]}</span></div>` +
+    (n.press ? `<div class="tt-packed"><span class="st packed-${n.press}">${packedText(n)}</span></div>` : '') +
     `<div class="tt-ua">${esc(deviceName(n.ua))} · ${where(n)}${n.real ? ' · real phone in the simulated crowd' : ''}</div>` +
     (meshNet.tip(n.id) ? `<div class="tt-ua tt-mesh">${esc(meshNet.tip(n.id))}</div>` : '') +
     `<div class="tt-foot">${n.name && lastMode !== 'replay' ? 'Click for live telemetry · drag to move' : 'Click for live telemetry'}</div>`;
@@ -428,8 +431,23 @@ function renderTooltip() {
   tip.style.top = `${Math.max(8, p.y - 20)}px`;
 }
 
+/** "Packed in: about 5 people per m²" for a phone at or past the watch density, else "". */
+function packedText(n?: Node): string {
+  if (!n?.press || n.dens == null) return '';
+  return `${n.press === 'red' ? 'Dangerously packed' : 'Getting tight'}: about ${n.dens.toFixed(n.dens < 10 ? 1 : 0)} people per m²`;
+}
+
+/** The dot's fill as a CSS colour: where this phone is on the crush ramp. */
+function crushCss(n?: Node): string {
+  const theme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
+  const c = crushRGB(n?.crush ?? 0, theme);
+  return `rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})`;
+}
+
+// Motion status. "ok" is a phone that is streaming and not moving much: "Still", not "Calm":
+// a still phone can be in the middle of a crush (see packedText).
 const statusText: Record<Node['status'], string> = {
-  ok: 'Calm',
+  ok: 'Still',
   handling: 'In hand',
   swaying: 'Swaying',
   wave: 'In a push',
@@ -507,8 +525,17 @@ async function refreshDrawer() {
   }
   if (drawerId !== id) return;
   const color = getComputedStyle(document.documentElement).getPropertyValue(`--${n?.status ?? 'stale'}`).trim();
-  $('dAvatar').style.background = color;
-  $('dAvatar').style.boxShadow = n?.color ? `0 0 0 3px ${n.color}` : '';
+  // Like its dot on the map: the fill is how packed in it is, the ring its motion status.
+  $('dAvatar').style.background = n && n.status !== 'stale' ? crushCss(n) : color;
+  $('dAvatar').style.boxShadow = `0 0 0 3px ${n?.color ?? color}`;
+  const dens = n?.dens;
+  const crush = n?.crush ?? 0;
+  $('dCrushBar').style.width = `${Math.round(crush * 100)}%`;
+  $('dCrushBar').style.background = crushCss(n);
+  $('dCrush').textContent =
+    dens == null
+      ? 'not counted (offline, outside or not located)'
+      : `Packed in: about ${dens.toFixed(1)} people per m² · ${n?.press === 'red' ? 'dangerous' : n?.press === 'yellow' ? 'tight' : 'room to move'}`;
   $('dName').textContent = n?.name ?? 'Attendee';
   $('dId').textContent = id.slice(0, 8);
   $('dDevice').textContent = deviceName(d?.ua ?? n?.ua);
@@ -538,6 +565,14 @@ async function refreshDrawer() {
 }
 
 function explain(n?: Node): string {
+  const packed = n?.press
+    ? `${packedText(n)} around this phone${n.press === 'red' ? ', past the danger level' : ''}. `
+    : '';
+  if (packed && n?.status === 'ok') return `${packed}It is hardly moving: in a packed crowd that is not a good sign, people may have no room to move.`;
+  return packed + explainMotion(n);
+}
+
+function explainMotion(n?: Node): string {
   switch (n?.status) {
     case 'ok': return 'Streaming normally. Movement is within everyday levels.';
     case 'handling': return 'The phone is being handled (turned or picked up), so its readings are ignored until it settles.';
@@ -810,7 +845,7 @@ function renderLog(fresh = false) {
         if (fresh && i === 0) li.classList.add('new');
         li.innerHTML =
           `<time>${fmtTime(e.t)}</time><span class="lv ${e.level}">${levelText[e.level]}</span>` +
-          `<span class="txt">${e.test ? '<span class="tag">DRILL</span>' : ''}${e.area ? '<span class="tag area">AREA</span>' : ''}${esc(e.text)}</span>`;
+          `<span class="txt">${e.test ? '<span class="tag">DRILL</span>' : ''}${e.src ? `<span class="tag src">${e.src === 'sim' ? 'SIMULATION' : 'SAVED RUN'}</span>` : ''}${e.area ? '<span class="tag area">AREA</span>' : ''}${esc(e.text)}</span>`;
         return li;
       }),
   );
@@ -988,14 +1023,24 @@ function onSnapshot(s: Snapshot) {
   const replay = s.mode === 'replay';
   const simulating = s.mode === 'sim';
   const badge = $('mode');
-  badge.textContent = replay ? 'REPLAY' : simulating ? 'SIMULATION' : 'LIVE';
+  badge.textContent = replay ? 'SAVED RUN' : simulating ? 'SIMULATION' : 'LIVE';
   badge.className = `badge ${replay ? 'replay' : simulating ? 'sim' : 'live'}`;
   $('replayBanner').hidden = !replay && !simulating;
   $('replayBanner').classList.toggle('sim', simulating);
+  // A recording made in another venue plays in that venue: today's floor plan, layout and areas don't belong on it.
+  const foreign = replay && !!s.venue && (s.venue.w !== venue.w || s.venue.h !== venue.h);
+  if (foreign !== foreignVenue) {
+    foreignVenue = foreign;
+    areas.hidden = foreign;
+    mesh.setLayout(foreign ? null : (venue.layout ?? null));
+    mesh.setFloorplan(foreign ? null : planImg);
+  }
   if (replay) {
-    $('rbTag').textContent = 'REPLAY';
+    $('rbTag').textContent = 'SAVED RUN';
     $('replayInfo').textContent = `${s.replay ?? ''} · ${Math.round((s.progress ?? 0) * 100)}%`;
-    $('rbNote').textContent = 'Not live: a saved run is playing through the detector.';
+    $('rbNote').textContent = foreign
+      ? `Not live: recorded in a ${s.venue.w} × ${s.venue.h} m room, shown in that room without today's areas.`
+      : 'Not live: a saved run is playing through the detector.';
   } else if (simulating) {
     $('rbTag').textContent = 'SIMULATION';
     $('replayInfo').textContent = `${simState?.people ?? s.sim?.bodies.length ?? 0} people · ${actionText[s.sim?.action ?? ''] ?? s.sim?.action ?? ''}`;
@@ -1004,13 +1049,17 @@ function onSnapshot(s: Snapshot) {
   mesh.setSim(simulating ? (s.sim ?? null) : null, simulating ? simState : null);
   const mode = s.mode;
   if (mode !== lastMode) {
+    const was = lastMode;
     lastMode = mode;
-    $('liveBtn').classList.toggle('on', mode === 'live');
-    $('replayBtn').classList.toggle('on', mode === 'replay');
-    $('simBtn').classList.toggle('on', mode === 'sim');
-    $('replayOpts').hidden = mode !== 'replay';
     renderSimRunning(mode === 'sim');
+    renderReplayRunning(mode === 'replay');
+    if (mode !== 'sim') {
+      if (was === 'sim') simEnded();
+      areas.cancelPick();
+    }
+    renderAlertCards();
   }
+  renderSimStatus(s);
 
   $('recBadge').hidden = !s.recording;
   const recBtn = $('recBtn');
@@ -1034,7 +1083,9 @@ function onAlert(a: Alert, fresh: boolean) {
   if (a.id && alertsById.has(a.id)) {
     // An update to an alert we already have (briefing arrived, acknowledged, resolved, escalated).
     const prev = alertsById.get(a.id)!;
-    const next = { ...prev, ...a };
+    // The server always sends the whole alert, and leaves out what is false or empty: take it as it
+    // is (merging would keep "early warning" on an incident that has since gone red).
+    const next = { ...a };
     alertsById.set(a.id, next);
     // The audit trail goes into the timeline too.
     if (a.status === 'ack' && prev.status !== 'ack') {
@@ -1048,7 +1099,6 @@ function onAlert(a: Alert, fresh: boolean) {
       toast(`Escalated: ${placeName(a.zone)} still unacknowledged`, 'danger');
       if (a.brief) playBrief(a);
     }
-    if (fresh && next.test && a.brief && !prev.brief) noteDrillOutput('briefing', true);
     if (fresh && a.brief && !prev.brief) {
       showBrief(a, fresh);
       playBrief(a);
@@ -1063,8 +1113,7 @@ function onAlert(a: Alert, fresh: boolean) {
   const fallback = a.test
     ? `Drill at ${where}: not a real incident.`
     : a.kind === 'density' ? `${where}: crowd too dense.` : a.kind === 'rule' ? `${where}: alert rule crossed.` : `${where}: crowd push detected.`;
-  if (fresh && a.test && a.brief) noteDrillOutput('briefing', true);
-  logEntry({ id: a.id, t: a.t, level: a.level, text: a.brief ?? fallback, test: a.test, area: a.kind === 'density' ? 'DENSITY' : undefined }, fresh);
+  logEntry({ id: a.id, t: a.t, level: a.level, text: a.brief ?? fallback, test: a.test, src: a.source, area: a.kind === 'density' ? 'DENSITY' : undefined }, fresh);
   // History from the server: its acknowledgement and resolution too.
   if (a.ackAt && (a.status === 'ack' || a.status === 'resolved')) {
     logEntry({ id: a.id, t: a.ackAt, level: 'calm', test: a.test, text: `${where}: acknowledged${a.ackBy ? ` by ${a.ackBy}` : ''}.` }, false);
@@ -1116,79 +1165,129 @@ function connect() {
 // controls
 // ---------------------------------------------------------------------------
 
+/** A short status message for an action the operator just took. */
 function msg(text: string, isErr = false) {
-  const el = $('ctlMsg');
-  el.textContent = text;
-  el.style.color = isErr ? 'var(--wave)' : '';
   toast(text, isErr ? 'error' : 'info');
-  window.clearTimeout((msg as unknown as { t?: number }).t);
-  (msg as unknown as { t?: number }).t = window.setTimeout(() => (el.textContent = ''), 5000);
 }
 
-async function post<T = Record<string, unknown>>(path: string, body?: unknown): Promise<T> {
+/** An HTTP error with its status code (409 = already running, and so on). */
+class HttpError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
+}
+
+async function send<T = Record<string, unknown>>(method: 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown): Promise<T> {
   const r = await fetch(path, {
-    method: 'POST',
+    method,
     headers: { 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const j = (await r.json().catch(() => ({}))) as T & { error?: string };
-  if (!r.ok) throw new Error(j.error ?? r.statusText);
+  if (!r.ok) throw new HttpError(j.error ?? r.statusText, r.status);
   return j;
+}
+const post = <T = Record<string, unknown>>(path: string, body?: unknown) => send<T>('POST', path, body);
+
+// ---- saved runs: play a recording through the detector, record a new one ----
+
+/** One saved run as GET /api/recordings describes it (older servers send only the name). */
+interface RecFile { name: string; label?: string; seconds?: number; phones?: number; w?: number; h?: number; legacy?: boolean }
+let recFiles = new Map<string, RecFile>();
+/** A recording made in another venue is on screen: today's floor plan, layout and areas are hidden. */
+let foreignVenue = false;
+
+function fmtDur(sec: number) {
+  const s = Math.round(sec);
+  return s < 90 ? `${s} s` : `${Math.floor(s / 60)} min ${s % 60 ? `${s % 60} s` : ''}`.trim();
+}
+
+/** What the selected run is, in one line, so nobody plays it blind. */
+function renderRecInfo() {
+  const name = ($('recSelect') as HTMLSelectElement).value;
+  const f = recFiles.get(name);
+  const el = $('recInfo');
+  if (!name) {
+    el.textContent = 'No saved runs yet. Record one below, or run the simulator.';
+    return;
+  }
+  if (!f || f.seconds == null) {
+    el.textContent = name.startsWith('db:') ? 'Stored in the database.' : '';
+    return;
+  }
+  const expect = /wave|push/.test(name) ? 'should reach Danger' : /shove/.test(name) ? 'may reach Warning, never Danger' : /calm|walk|dance|jump|handle/.test(name) ? 'should stay calm' : '';
+  const auto = name.startsWith('auto/') ? 'kept automatically while the database was unreachable · ' : '';
+  const where = f.legacy
+    ? `an early demo: ${f.phones} phones in a row, recorded before phones had map positions. It plays in the ${f.w} × ${f.h} m room it was made in, without today's areas`
+    : f.w && (f.w !== venue.w || f.h !== venue.h)
+      ? `recorded in a ${f.w} × ${f.h} m venue: it plays in that venue, without today's areas`
+      : 'recorded in this venue';
+  el.textContent = `${auto}${fmtDur(f.seconds)} · ${f.phones} phone${f.phones === 1 ? '' : 's'}${expect ? ` · ${expect}` : ''} · ${where}.`;
 }
 
 async function loadRecordings(select?: string) {
   try {
     const r = await fetch('/api/recordings');
-    const j = (await r.json()) as { files: { name: string }[]; runs: { label: string }[] };
+    const j = (await r.json()) as { files: RecFile[]; runs: { label: string }[] };
     const sel = $('recSelect') as HTMLSelectElement;
     const prev = select ?? sel.value;
     sel.replaceChildren();
+    recFiles = new Map(j.files.map((f) => [f.name, f]));
     const opts = [...j.files.map((f) => f.name), ...j.runs.map((r) => `db:${r.label}`)];
     if (!opts.length) {
-      const o = new Option('no recordings yet', '');
+      const o = new Option('no saved runs yet', '');
       o.disabled = true;
       sel.append(o);
     }
-    for (const name of opts) sel.append(new Option(name, name));
-    const pick = opts.includes(prev) ? prev : (opts.find((o) => /wave/.test(o) && !o.startsWith('auto/')) ?? opts[0]);
+    // Labelled runs first; the automatic fallback recordings after them.
+    const named = opts.filter((o) => !o.startsWith('auto/'));
+    const auto = opts.filter((o) => o.startsWith('auto/'));
+    for (const name of named) sel.append(new Option(name.replace(/\.jsonl$/, ''), name));
+    if (auto.length) {
+      const g = document.createElement('optgroup');
+      g.label = 'Kept automatically';
+      for (const name of auto) g.append(new Option(name.replace(/^auto\//, '').replace(/\.jsonl$/, ''), name));
+      sel.append(g);
+    }
+    const pick = opts.includes(prev) ? prev : (named.find((o) => /wave/.test(o)) ?? named[0] ?? opts[0]);
     if (pick) sel.value = pick;
+    ($('replayPlayBtn') as HTMLButtonElement).disabled = !opts.length;
+    $('savedRunsMeta').textContent = opts.length ? `${named.length} saved${auto.length ? ` · ${auto.length} automatic` : ''}` : 'none yet';
+    renderRecInfo();
   } catch {
     /* server restarting */
   }
 }
+$('recSelect').addEventListener('change', renderRecInfo);
 
 let lastMode: Snapshot['mode'] | '' = '';
 
+/** Back to the live phones: stops a saved run or a simulation, whichever is on screen. */
 async function goLive() {
   try {
     await post('/api/live');
-    if (lastMode === 'sim') await fetch('/api/sim/stop', { method: 'POST' }).catch(() => {});
-    $('replayOpts').hidden = true;
-    $('liveBtn').classList.add('on');
-    $('replayBtn').classList.remove('on');
-    $('simBtn').classList.remove('on');
+    await fetch('/api/sim/stop', { method: 'POST' }).catch(() => {}); // 409 when none runs: fine
     msg('Showing live phones');
   } catch (e) {
     msg((e as Error).message, true);
   }
 }
-$('liveBtn').addEventListener('click', () => void goLive());
 $('backLiveBtn').addEventListener('click', () => void goLive());
-// Choosing Replay only opens the picker; nothing changes until Play.
-$('replayBtn').addEventListener('click', () => {
-  $('replayOpts').hidden = false;
-  $('liveBtn').classList.remove('on');
-  $('simBtn').classList.remove('on');
-  $('replayBtn').classList.add('on');
-  animate($('replayOpts'), { opacity: [0, 1], y: [-6, 0] }, { duration: 0.25 });
-});
+$('replayStopBtn').addEventListener('click', () => void goLive());
+
+function renderReplayRunning(running: boolean) {
+  $('replayStopBtn').hidden = !running;
+  $('replayPlayBtn').textContent = running ? '↻ Play from the start' : '▶ Play';
+  if (running) ($('savedRuns') as HTMLDetailsElement).open = true;
+}
+
 $('replayPlayBtn').addEventListener('click', async () => {
   const name = ($('recSelect') as HTMLSelectElement).value;
-  if (!name) return msg('Pick a recording first', true);
+  if (!name) return msg('Pick a saved run first', true);
   const speed = Number(($('speedSelect') as HTMLSelectElement).value);
   try {
     await post('/api/replay', { name, speed });
-    msg(`Replaying ${name}`);
+    msg(lastMode === 'sim' ? `The simulation was stopped to play ${name}` : `Playing ${name}`);
   } catch (e) {
     msg((e as Error).message, true);
   }
@@ -1200,6 +1299,7 @@ $('recBtn').addEventListener('click', async () => {
       msg(`Saved ${r.name} (${r.records} records)`);
       await loadRecordings(r.name);
     } else {
+      if (lastMode === 'replay') return msg('A saved run is playing: go back to live (or start a simulation) before recording.', true);
       const label = ($('recLabel') as HTMLInputElement).value.trim() || 'run';
       await post('/api/record/start', { label });
       msg(`Recording "${label}"`);
@@ -1208,76 +1308,260 @@ $('recBtn').addEventListener('click', async () => {
     msg((e as Error).message, true);
   }
 });
-// ---- drill: fire the chain, then report what each output did ----
-type DrillOut = { label: string; state: 'ok' | 'bad' | 'off' | 'wait'; note?: string };
-let drillOuts: Record<string, DrillOut> = {};
-let drillTimer = 0;
 
-function renderDrillResult(where: string) {
-  const box = $('drillResult');
-  box.hidden = false;
-  const icon = { ok: '✓', bad: '✗', off: '–', wait: '…' };
-  box.innerHTML =
-    `<b>Drill sent · ${esc(where)}</b><ul>` +
-    Object.values(drillOuts)
-      .map((o) => `<li class="${o.state}"><span>${icon[o.state]}</span>${esc(o.label)}${o.note ? ` <span class="muted">(${esc(o.note)})</span>` : ''}</li>`)
-      .join('') +
-    `</ul>`;
-}
+// ---- alert drill: choose where, how bad, what kind and which outputs; send; see what each output did ----
 
-/** An output reported back (e.g. the briefing arrived for the drill). */
-function noteDrillOutput(key: string, ok: boolean) {
-  const o = drillOuts[key];
-  if (!o || o.state !== 'wait') return;
-  o.state = ok ? 'ok' : 'bad';
-  if (key === 'briefing' && ok && drillOuts.voice?.state === 'wait') {
-    const latest = [...alertsById.values()].filter((a) => a.test && a.brief).sort((x, y) => y.t - x.t)[0];
-    drillOuts.voice.state = latest?.audioUrl || soundOn ? 'ok' : 'off';
-    drillOuts.voice.note = latest?.audioUrl ? undefined : soundOn ? 'browser voice' : 'spoken alerts are off on this console';
+let drillStatus: DrillStatus | null = null;
+/** The server has no GET /api/drill (it is older than this console). */
+let drillLegacy = false;
+let drillLevel: 'yellow' | 'red' = 'red';
+let drillKind: 'wave' | 'density' | 'rule' = 'wave';
+/** Outputs the operator switched off by hand (by key); everything else follows readiness and the area's rules. */
+const drillOff = new Set<string>();
+const drillOn = new Set<string>();
+/** The drill whose result is on screen. */
+let drillShown: string | null = null;
+let drillPoll = 0;
+
+const kindLabel = { wave: 'Crowd push', density: 'Crowding', rule: 'Over capacity' } as const;
+const readyText = { ready: 'Ready', fallback: 'Fallback', offline: 'Offline', none: 'Not connected' } as const;
+
+function segPick(id: string, attr: string, value: string) {
+  for (const b of $(id).querySelectorAll<HTMLButtonElement>('button')) {
+    const on = b.dataset[attr] === value;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-checked', String(on));
   }
-  renderDrillResult($('drillResult').dataset.where ?? '');
+}
+for (const b of $('drillLevel').querySelectorAll<HTMLButtonElement>('button')) {
+  b.addEventListener('click', () => {
+    drillLevel = b.dataset.level as 'yellow' | 'red';
+    renderDrillForm();
+  });
+}
+for (const b of $('drillKind').querySelectorAll<HTMLButtonElement>('button')) {
+  b.addEventListener('click', () => {
+    drillKind = b.dataset.kind as typeof drillKind;
+    renderDrillForm();
+  });
+}
+$('drillZone').addEventListener('change', () => {
+  // A different place: back to that area's own choices.
+  drillOff.clear();
+  drillOn.clear();
+  renderDrillForm();
+});
+
+/** Is this output going to be exercised, given readiness, the area's rules and the operator's toggles? */
+function drillWants(key: string, zone: DrillZone | undefined, ready: DrillReady): boolean {
+  if (drillOff.has(key)) return false;
+  if (drillOn.has(key)) return true;
+  if (ready.state === 'none') return false;
+  if (key === 'voice') return zone?.voice !== false;
+  if (key === 'sign') return zone?.sign !== false;
+  if (key.startsWith('light:')) return zone?.light === key.slice(6);
+  return true;
 }
 
-$('testBtn').addEventListener('click', async () => {
+function renderDrillForm() {
+  const st = drillStatus;
+  segPick('drillLevel', 'level', drillLevel);
+  segPick('drillKind', 'kind', drillKind);
+  const sel = $('drillZone') as HTMLSelectElement;
+  const btn = $('drillSend') as HTMLButtonElement;
+  if (!st) {
+    // A server from before the drill page: the one-button test alert still works.
+    btn.disabled = !drillLegacy;
+    btn.textContent = 'Send drill';
+    $('drillSendNote').textContent = drillLegacy
+      ? 'This Pulse server is older than the console: restart it to choose the place, level and outputs. Until then this sends its standard test alert.'
+      : 'Waiting for the server…';
+    return;
+  }
+  const want = st.zones.map((z) => `${z.id}=${z.name}`).join('|');
+  if (sel.dataset.zones !== want) {
+    const prev = sel.value;
+    sel.dataset.zones = want;
+    sel.replaceChildren(...st.zones.map((z) => new Option(z.custom ? z.name : `${z.name} (whole ${z.id === 'rest' ? 'rest of the venue' : 'zone'})`, z.id)));
+    sel.value = st.zones.some((z) => z.id === prev) ? prev : (st.zones[0]?.id ?? '');
+  }
+  const zone = st.zones.find((z) => z.id === sel.value);
+  const ul = $('drillOutputs');
+  ul.replaceChildren(
+    ...st.outputs.map((o) => {
+      const li = document.createElement('li');
+      const wants = drillWants(o.key, zone, o);
+      const needsBrief = o.key === 'voice' && !drillWants('briefing', zone, st.outputs[0]);
+      li.className = `drill-out ${o.state}${wants ? ' on' : ''}`;
+      const areasNote = o.areas?.length ? `shows ${o.areas.join(', ')}` : o.key.startsWith('light:') ? 'no area assigned to it' : '';
+      const ruleNote =
+        (o.key === 'voice' && zone?.voice === false) || (o.key === 'sign' && zone?.sign === false)
+          ? 'switched off for this area in its alert rules'
+          : '';
+      li.innerHTML =
+        `<label><input type="checkbox" ${wants ? 'checked' : ''} ${o.state === 'none' ? 'disabled' : ''} /><b></b></label>` +
+        `<span class="ready ${o.state}"></span><span class="do-note"></span>`;
+      li.querySelector('b')!.textContent = o.label;
+      li.querySelector('.ready')!.textContent = readyText[o.state];
+      li.querySelector('.do-note')!.textContent = [needsBrief ? 'needs the briefing: there is nothing to read out without it' : o.note, areasNote, ruleNote].filter(Boolean).join(' · ');
+      li.querySelector('input')!.addEventListener('change', (e) => {
+        const on = (e.target as HTMLInputElement).checked;
+        drillOff.delete(o.key);
+        drillOn.delete(o.key);
+        (on ? drillOn : drillOff).add(o.key);
+        renderDrillForm();
+      });
+      return li;
+    }),
+  );
+  const chosen = st.outputs.filter((o) => drillWants(o.key, zone, o));
+  const offline = chosen.filter((o) => o.state === 'offline');
+  $('drillOutputsHint').textContent = offline.length
+    ? `${offline.map((o) => o.label).join(', ')} ${offline.length === 1 ? 'is' : 'are'} offline: the drill will still be sent, and will report ${offline.length === 1 ? 'it' : 'them'} as failed.`
+    : 'Ticked outputs are exercised. “Fallback” still works: the text comes from a template, the voice from this browser.';
+  btn.disabled = !zone;
+  btn.textContent = `Send drill: ${drillLevel === 'red' ? 'Danger' : 'Warning'} · ${kindLabel[drillKind]}${zone ? ` · ${zone.name}` : ''}`;
+  $('drillSendNote').textContent = zone ? '' : 'No area or zone to send it to yet.';
+}
+
+const drillIcon = { ok: '✓', failed: '✗', skipped: '–', pending: '…' } as const;
+
+function drillOutputsHTML(d: DrillRecord, compact = false) {
+  return d.outputs
+    .map(
+      (o) =>
+        `<li class="${o.state}"><span class="ic">${drillIcon[o.state]}</span><span class="lb">${esc(o.label)}</span>` +
+        (compact || !o.note ? '' : `<span class="nt">${esc(o.note)}</span>`) +
+        `</li>`,
+    )
+    .join('');
+}
+
+function renderDrillResult() {
+  const st = drillStatus;
+  const d = st?.history.find((h) => h.id === drillShown) ?? st?.history[0];
+  const box = $('drillResult');
+  if (!d) {
+    box.innerHTML = '<p class="muted small">Nothing sent yet. After you send a drill, each output reports here what it did.</p>';
+    $('drillResultMeta').textContent = '';
+  } else {
+    const al = alertsById.get(d.id);
+    const open = al && al.status !== 'resolved';
+    $('drillResultMeta').textContent = `${fmtTime(d.t)} · ${d.level === 'red' ? 'Danger' : 'Warning'} · ${kindLabel[d.kind as keyof typeof kindLabel] ?? d.kind}`;
+    box.innerHTML =
+      `<p class="dr-where"><span class="tag">DRILL</span> ${esc(d.where)}</p>` +
+      `<ul class="dr-outs">${drillOutputsHTML(d)}</ul>` +
+      (d.brief ? `<p class="dr-brief">${esc(d.brief)}</p>` : '') +
+      `<div class="row">` +
+      (d.brief ? `<button class="sm" data-play>▶ Play voice</button>` : '') +
+      (open ? `<button class="sm ghost" data-end>End drill</button>` : al ? '<span class="muted small">Drill ended.</span>' : '') +
+      `</div>` +
+      (d.brief && !d.audioUrl ? '<p class="muted small">No clip was made: “Play voice” uses this browser’s voice.</p>' : '');
+    box.querySelector('[data-play]')?.addEventListener('click', () => playBrief({ ...(al ?? ({} as Alert)), brief: d.brief, audioUrl: d.audioUrl, zone: d.zone } as Alert, true));
+    box.querySelector('[data-end]')?.addEventListener('click', () => al && void alertAction(al, 'resolve', 'Drill ended'));
+  }
+  const hist = st?.history ?? [];
+  $('drillHistoryEmpty').hidden = hist.length > 0;
+  $('drillHistory').replaceChildren(
+    ...hist.map((h) => {
+      const li = document.createElement('li');
+      li.className = h.id === d?.id ? 'sel' : '';
+      li.innerHTML =
+        `<button class="dh-row"><time>${fmtTime(h.t).slice(0, 5)}</time><span class="lv ${h.level}">${h.level === 'red' ? 'Danger' : 'Warning'}</span>` +
+        `<span class="dh-what">${esc(kindLabel[h.kind as keyof typeof kindLabel] ?? h.kind)} · ${esc(h.where)}</span></button>` +
+        `<ul class="dr-outs compact">${drillOutputsHTML(h, true)}</ul>`;
+      li.querySelector('button')!.addEventListener('click', () => {
+        drillShown = h.id;
+        renderDrillResult();
+      });
+      return li;
+    }),
+  );
+}
+
+async function loadDrill() {
   try {
-    const r = await post<{ zone: string }>('/api/test-alert');
-    const where = placeName(r.zone);
-    msg(`Drill sent to ${where}`);
+    const r = await fetch('/api/drill');
+    drillLegacy = r.status === 404;
+    if (!r.ok) throw new Error(String(r.status));
+    drillStatus = (await r.json()) as DrillStatus;
+  } catch {
+    if (drillLegacy) renderDrillForm();
+    return; // server restarting, or older than this console
+  }
+  renderDrillForm();
+  renderDrillResult();
+}
+
+$('drillSend').addEventListener('click', async () => {
+  const st = drillStatus;
+  if (!st && drillLegacy) {
+    try {
+      const r = await post<{ zone: string }>('/api/test-alert');
+      toast(`Drill sent to ${placeName(r.zone)}`, 'ok');
+      setFlag('pulse.drill');
+      refreshSetup();
+    } catch (e) {
+      toast(`Couldn't send the drill: ${(e as Error).message}`, 'error');
+    }
+    return;
+  }
+  const zoneId = ($('drillZone') as HTMLSelectElement).value;
+  const zone = st?.zones.find((z) => z.id === zoneId);
+  if (!st || !zone) return;
+  const wants = (key: string) => {
+    const o = st.outputs.find((x) => x.key === key);
+    return !!o && drillWants(key, zone, o);
+  };
+  const touched = (key: string) => drillOn.has(key) || drillOff.has(key);
+  const btn = $('drillSend') as HTMLButtonElement;
+  btn.disabled = true;
+  try {
+    const d = await post<DrillRecord>('/api/test-alert', {
+      zone: zoneId,
+      level: drillLevel,
+      kind: drillKind,
+      // Only what the operator switched by hand is sent as a choice; the rest follows the area's own
+      // alert rules on the server, which then says so in the result ("switched off for this area").
+      outputs: {
+        briefing: touched('briefing') ? wants('briefing') : undefined,
+        voice: touched('voice') ? wants('voice') : undefined,
+        sign: touched('sign') ? wants('sign') : undefined,
+        lights: st.outputs.some((o) => o.key.startsWith('light:') && touched(o.key))
+          ? st.outputs.filter((o) => o.key.startsWith('light:') && wants(o.key)).map((o) => o.key.slice(6))
+          : undefined,
+      },
+    });
+    drillShown = d.id;
+    st.history = [d, ...st.history.filter((h) => h.id !== d.id)];
+    renderDrillResult();
+    toast(`Drill sent to ${d.where}`, 'ok');
     setFlag('pulse.drill');
     refreshSetup();
-    // What should have fired, from the area's rules and the boards' last known state.
-    const area = areas.get(r.zone);
-    const notify = area?.rules?.notify ?? {};
-    drillOuts = {
-      briefing: { label: 'Briefing', state: 'wait' },
-      voice: notify.voice === false ? { label: 'Voice', state: 'off', note: 'off for this area' } : { label: 'Voice', state: 'wait' },
-    };
-    const signs = hwList.filter((h) => !h.zone);
-    if (notify.sign === false) drillOuts.sign = { label: 'Sign', state: 'off', note: 'off for this area' };
-    else if (!signs.length) drillOuts.sign = { label: 'Sign', state: 'off', note: 'none connected' };
-    else signs.forEach((h, i) => (drillOuts[`sign${i}`] = { label: signs.length > 1 ? h.name : 'Sign', state: h.online ? 'ok' : 'bad', note: h.online ? undefined : 'offline' }));
-    const letter = area?.light;
-    if (letter) {
-      const l = hwList.find((h) => h.zone === letter);
-      drillOuts.light = notify.light === false
-        ? { label: `Light ${letter}`, state: 'off', note: 'off for this area' }
-        : { label: `Light ${letter}`, state: l?.online ? 'ok' : 'bad', note: l?.online ? undefined : 'offline' };
-    }
-    $('drillResult').dataset.where = where;
-    renderDrillResult(where);
-    // No briefing within 20 s: say so instead of waiting forever.
-    window.clearTimeout(drillTimer);
-    drillTimer = window.setTimeout(() => {
-      if (drillOuts.briefing?.state === 'wait') {
-        drillOuts.briefing = { label: 'Briefing', state: 'bad', note: 'none arrived; check Settings → services' };
-        if (drillOuts.voice?.state === 'wait') drillOuts.voice = { label: 'Voice', state: 'bad', note: 'nothing to read out' };
-        renderDrillResult(where);
-      }
-    }, 20000);
+    // The briefing and the voice report back within a few seconds.
+    window.clearInterval(drillPoll);
+    let n = 0;
+    drillPoll = window.setInterval(async () => {
+      await loadDrill();
+      const cur = drillStatus?.history.find((h) => h.id === d.id);
+      if (++n > 30 || (cur && !cur.outputs.some((o) => o.state === 'pending'))) window.clearInterval(drillPoll);
+    }, 1000);
   } catch (e) {
-    msg((e as Error).message, true);
+    toast(`Couldn't send the drill: ${(e as Error).message}`, 'error');
   }
+  btn.disabled = false;
+  renderDrillForm();
 });
+$('drillBannerResolve').addEventListener('click', () => {
+  for (const a of alertsById.values()) if (a.test && a.status !== 'resolved') void alertAction(a, 'resolve', 'Drill ended');
+});
+onPage((p) => {
+  if (p === 'drill') void loadDrill();
+});
+setInterval(() => {
+  if (page() === 'drill') void loadDrill();
+}, 4000);
+
 $('askForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const q = ($('askInput') as HTMLInputElement).value.trim();
@@ -1440,6 +1724,7 @@ async function init() {
   try {
     const cfg = (await (await fetch('/api/config')).json()) as Config;
     if (cfg.yellow && cfg.red) thresholds = { yellow: cfg.yellow, red: cfg.red };
+    if (cfg.defaultW && cfg.defaultH) defaultVenue = { w: cfg.defaultW, h: cfg.defaultH };
     setThresholdLines();
   } catch {
     /* defaults */
@@ -1614,7 +1899,7 @@ async function loadHardware() {
   lightKeys = list.filter((h) => h.zone).map((h) => h.zone!);
   // The laptop is a tower (a check-in point), not a board to keep online.
   const boards = list.filter((h) => h.kind !== 'laptop');
-  hwList = boards;
+  hwPlaced = list.filter((h) => h.x != null).length;
   hwOnline = boards.filter((h) => h.online).length;
   hwTotal = boards.length;
   hwLoaded = true;
@@ -1701,6 +1986,11 @@ const actionText: Record<string, string> = {
   intermission: 'intermission',
 };
 
+/** The operator moved a slider since the running crowd was started (so the sliders are a wish, not a mirror). */
+let simSlidersTouched = false;
+/** A start, stop or restart request is in flight. */
+let simBusy = false;
+
 for (const [id, out, fmt] of [
   ['simPeople', 'simPeopleV', (v: string) => v],
   ['simPart', 'simPartV', (v: string) => `${v}%`],
@@ -1710,51 +2000,125 @@ for (const [id, out, fmt] of [
     $(out).textContent = fmt(input.value);
     renderSimApply();
   };
-  input.addEventListener('input', show);
+  input.addEventListener('input', () => {
+    simSlidersTouched = true;
+    show();
+  });
   show();
 }
 
-/** The running simulation's real numbers vs the sliders: "Restart to apply" when they differ. */
+function setSimSliders(people: number, partPct: number) {
+  const p = $('simPeople') as HTMLInputElement, q = $('simPart') as HTMLInputElement;
+  p.value = String(people);
+  q.value = String(partPct);
+  $('simPeopleV').textContent = p.value;
+  $('simPartV').textContent = `${q.value}%`;
+}
+
+/** The running simulation's real numbers vs the sliders: "Restart to apply" when the operator asked for something else. */
 function renderSimApply() {
   const st = simState;
   const running = !!st?.running && lastMode === 'sim';
   const now = $('simNow');
   now.hidden = !running;
+  const restart = $('simRestart') as HTMLButtonElement;
   if (!running || !st) {
-    $('simRestart').hidden = true;
+    restart.hidden = true;
     return;
   }
+  // People walk in and out during a show, so the head count drifts from what was asked for.
   const people = st.people ?? 0;
   const part = Math.round((st.participation ?? 0) * 100);
-  now.textContent = `Running now: ${people} people · ${part}% carry Pulse (${st.phones ?? Math.round(people * part / 100)} phones)`;
+  now.textContent = `Running now: ${people} people · ${part}% carry Pulse (${st.phones ?? Math.round((people * part) / 100)} phones)`;
   const wantPeople = Number(($('simPeople') as HTMLInputElement).value);
   const wantPart = Number(($('simPart') as HTMLInputElement).value);
-  $('simRestart').hidden = wantPeople === people && Math.abs(wantPart - part) < 1;
+  const started = simStarted ?? { people, part };
+  // A crowd started elsewhere (surge around the phones, another console): the sliders follow it until touched.
+  if (!simSlidersTouched && (wantPeople !== started.people || wantPart !== started.part)) {
+    const slider = $('simPeople') as HTMLInputElement;
+    setSimSliders(Math.min(Number(slider.max), Math.max(Number(slider.min), started.people)), started.part);
+  }
+  restart.hidden = !simSlidersTouched || (wantPeople === started.people && Math.abs(wantPart - started.part) < 1);
+  restart.disabled = simBusy;
+  if (!restart.hidden) restart.dataset.tip = `Stop this crowd and start a new one with ${wantPeople} people, ${wantPart}% with the app`;
 }
+/** What the running crowd was started with (people drift as they arrive and leave). */
+let simStarted: { people: number; part: number } | null = null;
 
 function renderSimRunning(running: boolean) {
   $('simStart').hidden = running;
   $('simStop').hidden = !running;
   $('simControls').hidden = !running;
+  ($('simStart') as HTMLButtonElement).disabled = simBusy;
+  ($('simStop') as HTMLButtonElement).disabled = simBusy;
+  for (const b of document.querySelectorAll<HTMLButtonElement>('#simControls button')) b.disabled = simBusy;
+  if (running && !simState?.running) void pollSim();
   renderSimApply();
 }
 
-$('simRestart').addEventListener('click', () => $('simStart').click());
+/** The simulation ended (stopped, replaced by a saved run): nothing of it may linger as if current. */
+function simEnded() {
+  simState = null;
+  simStarted = null;
+  simSlidersTouched = false;
+  exitsSig = '';
+  $('simExits').replaceChildren();
+  $('simTruth').innerHTML = '<p class="muted small">Start a simulation to compare what really happens in the crowd with what Pulse detects.</p>';
+  $('simClock').textContent = '';
+}
 
-$('simStart').addEventListener('click', async () => {
+/** Start a crowd with the sliders' values; with `restart`, stop the running one first. */
+async function startSim(restart: boolean) {
+  if (simBusy) return;
   const people = Number(($('simPeople') as HTMLInputElement).value);
   const participation = Number(($('simPart') as HTMLInputElement).value) / 100;
+  simBusy = true;
+  renderSimRunning(lastMode === 'sim');
   try {
-    await post('/api/sim/start', { people, participation, scenario: 'concert' });
-    msg(`Simulating ${people} people`);
-    renderSimRunning(true);
-    void pollSim();
+    for (let attempt = 0; ; attempt++) {
+      if (restart || attempt > 0) {
+        // 409 here only means it had already stopped.
+        await send('POST', '/api/sim/stop').catch((e) => {
+          if (!(e instanceof HttpError) || e.status !== 409) throw e;
+        });
+      }
+      try {
+        await post('/api/sim/start', { people, participation, scenario: 'concert' });
+        break;
+      } catch (e) {
+        // Already running (started from another console, or by "surge around the phones" a moment ago).
+        if (e instanceof HttpError && e.status === 409 && attempt === 0) {
+          if (!restart) {
+            msg('A simulation is already running: showing it. Use “Restart to apply” for a new crowd.');
+            break;
+          }
+          continue;
+        }
+        throw e;
+      }
+    }
+    // A fresh run: nothing from the previous one stays on screen.
+    simEnded();
+    simStarted = { people, part: Math.round(participation * 100) };
+    msg(restart ? `Restarted with ${people} people, ${Math.round(participation * 100)}% with the app` : `Simulating ${people} people`);
+    await pollSim();
   } catch (e) {
     msg((e as Error).message, true);
   }
-});
+  simBusy = false;
+  renderSimRunning(lastMode === 'sim' || !!simState?.running);
+}
 
-$('simStop').addEventListener('click', () => void goLive());
+$('simRestart').addEventListener('click', () => void startSim(true));
+$('simStart').addEventListener('click', () => void startSim(false));
+$('simStop').addEventListener('click', async () => {
+  if (simBusy) return;
+  simBusy = true;
+  renderSimRunning(true);
+  await goLive();
+  simBusy = false;
+  renderSimRunning(lastMode === 'sim');
+});
 
 async function simAction(a: SimAction) {
   try {
@@ -1782,6 +2146,7 @@ for (const b of document.querySelectorAll<HTMLButtonElement>('[data-sim]')) {
   b.addEventListener('click', () => {
     const type = b.dataset.sim!;
     const strength = Number(($('simStrength') as HTMLInputElement).value) / 100;
+    areas.cancelPick(); // a new choice replaces a pick still waiting for a click
     switch (type) {
       case 'calm':
       case 'stage':
@@ -1803,53 +2168,75 @@ for (const b of document.querySelectorAll<HTMLButtonElement>('[data-sim]')) {
         pickOnMap('Drag on the map: where the push starts, and which way', true, (p) => {
           const len = Math.hypot(p.dx, p.dy);
           if (len < 0.3) return msg('Drag a little further to give the push a direction', true);
-          void simAction({ type: 'shove', x: p.x, y: p.y, dx: p.dx / len, dy: p.dy / len });
+          void simAction({ type: 'shove', x: p.x, y: p.y, dx: p.dx / len, dy: p.dy / len, strength });
         });
         break;
     }
   });
 }
+// The strength slider applies to a surge that is already running, too.
+$('simStrength').addEventListener('change', () => {
+  if (lastMode === 'sim' && simState?.action === 'surge') void simAction({ type: 'surge', strength: Number(($('simStrength') as HTMLInputElement).value) / 100 });
+});
+
+const mmss = (sec: number) => `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}`;
+let exitsSig = '';
 
 function renderSimState(st: SimState) {
-  $('simExits').replaceChildren(
-    ...(st.exits ?? []).map((e) => {
-      const btn = document.createElement('button');
-      btn.className = `sm exit ${e.open ? 'open' : 'closed'}`;
-      btn.textContent = `${e.open ? '🟢' : '🔴'} ${e.name}`;
-      btn.dataset.tip = e.open ? 'Close this exit' : 'Open this exit';
-      btn.addEventListener('click', () => void simAction({ type: 'exit', id: e.id, open: !e.open }));
-      return btn;
-    }),
-  );
-  const t = st.truth;
-  if (!t) {
-    $('simTruth').textContent = '';
-    return;
+  // Exits: rebuilt only when one changes, so a click is never lost to the 1 s refresh.
+  const sig = (st.exits ?? []).map((e) => `${e.id}:${e.open}:${e.name}`).join('|');
+  if (sig !== exitsSig) {
+    exitsSig = sig;
+    $('simExits').replaceChildren(
+      ...(st.exits ?? []).map((e) => {
+        const btn = document.createElement('button');
+        btn.className = `sm exit ${e.open ? 'open' : 'closed'}`;
+        btn.textContent = `${e.open ? '🟢' : '🔴'} ${e.name}`;
+        btn.dataset.tip = e.open ? 'Open. Click to close this exit' : 'Closed. Click to open this exit';
+        btn.addEventListener('click', () => void simAction({ type: 'exit', id: e.id, open: !e.open }));
+        return btn;
+      }),
+    );
   }
-  let verdict = '';
+  $('simClock').textContent = st.running && st.t != null ? `running ${mmss(st.t)}` : '';
+  const t = st.truth;
+  if (!st.running || !t) return;
+  // When it became dangerous vs when Pulse alerted, and the lead time between them.
+  const danger = t.dangerAt != null ? `at ${mmss(t.dangerAt)}` : 'not yet';
+  const alerted = t.alertAt != null ? `at ${mmss(t.alertAt)}` : 'not yet';
+  let verdict = '<div class="lead idle">Nothing dangerous has happened in this run, and Pulse has raised no red alert.</div>';
   if (t.leadSeconds != null) {
     verdict =
       t.leadSeconds >= 0
         ? `<div class="lead good">Pulse warned <b>${t.leadSeconds.toFixed(0)} s before</b> the crowd became dangerous.</div>`
         : `<div class="lead bad">Pulse warned <b>${(-t.leadSeconds).toFixed(0)} s after</b> the crowd became dangerous.</div>`;
   } else if (t.alertAt != null) {
-    verdict = `<div class="lead good">Pulse raised the alarm at ${t.alertAt.toFixed(0)} s; the crowd hasn't reached crush levels.</div>`;
+    verdict = `<div class="lead good">Pulse raised a red alert at ${mmss(t.alertAt)}; the crowd has not reached crush levels.</div>`;
   } else if (t.dangerAt != null) {
-    verdict = `<div class="lead bad">The crowd became dangerous at ${t.dangerAt.toFixed(0)} s and Pulse hasn't alerted.</div>`;
+    verdict = `<div class="lead bad">The crowd became dangerous at ${mmss(t.dangerAt)} and Pulse has not raised a red alert yet.</div>`;
   }
   $('simTruth').innerHTML =
     `<h4>Ground truth (only the simulator knows this)</h4>` +
     `<div class="truth-grid"><div><b>${t.maxDensity.toFixed(1)}</b><span>people/m² at the densest spot</span></div>` +
     `<div><b>${Math.round(t.maxPressure)}</b><span>peak crush pressure (N/m)</span></div>` +
-    `<div><b>${t.crushing}</b><span>people at crush level</span></div></div>${verdict}`;
+    `<div><b>${t.crushing}</b><span>people at crush level</span></div></div>` +
+    `<dl class="truth-times"><dt>Crowd became dangerous</dt><dd>${danger}</dd><dt>Pulse’s first red alert</dt><dd>${alerted}</dd>` +
+    `<dt>Lead time</dt><dd>${t.leadSeconds != null ? `${t.leadSeconds >= 0 ? '+' : '−'}${Math.abs(t.leadSeconds).toFixed(0)} s` : '–'}</dd></dl>${verdict}`;
 }
 
 async function pollSim() {
   try {
     const r = await fetch('/api/sim');
     if (!r.ok) return;
-    simState = (await r.json()) as SimState;
-    renderSimState(simState);
+    const st = (await r.json()) as SimState;
+    if (!st.running) {
+      // Not running (any more): keep nothing of the last run.
+      if (simState) simEnded();
+      return;
+    }
+    simState = st;
+    simStarted ??= { people: st.people ?? 0, part: Math.round((st.participation ?? 0) * 100) };
+    renderSimState(st);
     renderSimApply();
   } catch {
     /* server busy */
@@ -1858,6 +2245,19 @@ async function pollSim() {
 setInterval(() => {
   if (lastMode === 'sim') void pollSim();
 }, 1000);
+
+/** The Simulation page's status line: the same sentence as the sidebar, marked as simulated. */
+function renderSimStatus(s: Snapshot) {
+  const sourced = s.mode === 'sim' || s.mode === 'replay';
+  const el = $('simStatus');
+  const cls = sourced ? situation.cls : 'calm';
+  if (!el.classList.contains(cls)) el.className = `status sim-status ${cls}`;
+  $('simStatusText').textContent = !sourced ? 'Not running' : s.mode === 'sim' ? `Simulated crowd: ${situation.text}` : `Saved run: ${situation.text}`;
+  const tag = $('simAlertsTag');
+  tag.hidden = !sourced;
+  tag.textContent = s.mode === 'replay' ? 'SAVED RUN' : 'SIMULATION';
+  tag.className = `src-tag ${s.mode === 'replay' ? 'replay' : 'sim'}`;
+}
 
 // ---------------------------------------------------------------------------
 // alert cards: what / where / what to do, acknowledge and resolve
@@ -1886,6 +2286,9 @@ function stillAlerting(a: Alert) {
   return (z && z.level !== 'calm') || areas.get(a.zone)?.level === 'danger' || (snap?.status?.zone === a.zone && snap.status.level !== 'calm');
 }
 
+/** "SIMULATION" / "SAVED RUN" for an alert that did not come from the live crowd. */
+const sourceTag = (a: Alert) => (a.source === 'sim' ? 'SIMULATION' : a.source === 'replay' ? 'SAVED RUN' : '');
+
 function renderAlertCards() {
   const all = [...alertsById.values()].filter((a) => a.status !== 'resolved' && a.level !== 'calm');
   const open = all.sort((x, y) => y.t - x.t).slice(0, 4);
@@ -1897,19 +2300,44 @@ function renderAlertCards() {
   const drill = all.find((a) => a.test);
   $('drillBanner').hidden = !drill;
   if (drill) $('drillWhere').textContent = placeName(drill.zone);
-  $('alertCards').replaceChildren(
-    ...open.map((a) => {
+  // Live shows everything that is open; the Simulation page shows what the simulation (or saved run) raised.
+  const sourced = all.filter((a) => a.source === 'sim' || a.source === 'replay').slice(0, 4);
+  for (const [box, list] of [['alertCards', open], ['simAlertCards', sourced]] as const) {
+    $(box).replaceChildren(...list.map((a) => alertCardEl(a, box)));
+  }
+  $('simAlertsEmpty').hidden = sourced.length > 0 || lastMode === 'sim' || lastMode === 'replay';
+  renderSimBrief();
+  renderAlertSummary();
+  renderBriefAfterChange();
+  if (page() === 'drill') renderDrillResult();
+}
+
+/** The briefing of the latest simulated alert, on the Simulation page. */
+function renderSimBrief() {
+  const a = [...alertsById.values()].filter((x) => (x.source === 'sim' || x.source === 'replay') && x.brief && x.status !== 'resolved').sort((x, y) => y.t - x.t)[0];
+  $('simBriefBox').hidden = !a;
+  if (!a) return;
+  if ($('simBrief').textContent !== a.brief) $('simBrief').textContent = a.brief ?? '';
+  $('simBriefBox').dataset.id = a.id ?? '';
+}
+$('simBriefPlay').addEventListener('click', () => {
+  const a = alertsById.get($('simBriefBox').dataset.id ?? '');
+  if (a) playBrief(a, true);
+});
+
+/** One alert card (what, where, what to do; acknowledge, resolve, why). `box` is the container it goes into. */
+function alertCardEl(a: Alert, box: string): HTMLElement {
       const { head, action } = splitBrief(a);
       const el = document.createElement('div');
-      el.className = `alert-card ${a.level} ${a.status === 'ack' ? 'ack' : ''} ${a.test ? 'drill' : ''}`;
+      el.className = `alert-card ${a.level} ${a.status === 'ack' ? 'ack' : ''} ${a.test ? 'drill' : ''} ${a.source ? 'sourced' : ''}`;
       const where = placeName(a.zone);
       const kind = a.test ? 'Drill' : a.early ? 'Early warning' : a.kind === 'density' ? 'Crowding' : a.kind === 'rule' ? 'Alert rule' : 'Crowd push';
-      const label = a.test ? 'DRILL · not a real incident' : a.level === 'red' ? 'Danger' : 'Watch';
+      const label = a.test ? 'DRILL · not a real incident' : `${sourceTag(a) ? `${sourceTag(a)} · ` : ''}${a.level === 'red' ? 'Danger' : 'Watch'}`;
       const acked = a.status === 'ack'
         ? `<span class="muted small">Acknowledged ${a.ackAt ? fmtTime(a.ackAt) : ''}${a.ackBy ? ` by ${esc(a.ackBy)}` : ''}</span>`
         : '<button class="sm primary" data-ack>Acknowledge</button>';
       const form = resolving?.id === a.id;
-      const danger = form && !a.test && stillAlerting(a);
+      const danger = form && !a.test && !a.source && stillAlerting(a);
       el.innerHTML =
         `<div class="ac-top"><b>${label}</b><span>${esc(kind)} · ${esc(where)} · ${fmtTime(a.t)}</span>` +
         `${a.escalated ? '<span class="esc">escalated</span>' : ''}</div>` +
@@ -1932,7 +2360,7 @@ function renderAlertCards() {
       el.querySelector('[data-resolve]')?.addEventListener('click', () => {
         resolving = { id: a.id!, note: '' };
         renderAlertCards();
-        el.isConnected || $('alertCards').querySelector<HTMLInputElement>('.ac-resolve [name=note]')?.focus();
+        el.isConnected || $(box).querySelector<HTMLInputElement>('.ac-resolve [name=note]')?.focus();
       });
       const f = el.querySelector<HTMLFormElement>('.ac-resolve');
       if (f) {
@@ -1953,10 +2381,6 @@ function renderAlertCards() {
         });
       }
       return el;
-    }),
-  );
-  renderAlertSummary();
-  renderBriefAfterChange();
 }
 
 /** After ack/resolve: the briefing paragraph follows what is still open. */
@@ -2249,7 +2673,8 @@ areas.onBoardMoved = async (key, x, y) => {
 
 let hwOnline = 0;
 let hwTotal = 0;
-let hwList: Hardware[] = [];
+/** Boards (and the laptop) staff placed on the map. */
+let hwPlaced = 0;
 let hwLoaded = false;
 // Function declarations (hoisted): updateQR and onSnapshot use these before this point in the file.
 function flag(k: string) {
@@ -2349,10 +2774,161 @@ setInterval(() => {
   refreshSetup();
 }, 5000);
 
+// ---------------------------------------------------------------------------
+// home: start over (reset the setup checklist, or also clear this event's data)
+// ---------------------------------------------------------------------------
+
+/** This console's setup progress (see setup.ts and the flags above). */
+const SETUP_KEYS = ['pulse.setup.skipped', 'pulse.setup.exited', 'pulse.eventNamed', 'pulse.sizeChosen', 'pulse.drill', 'pulse.joined', 'pulse.qrShown'];
+const DEFAULT_EVENT = eventInput.defaultValue || 'Main Floor';
+/** The venue size the server starts with (GET /api/config defaultW / defaultH; 24 × 16 on older servers). */
+let defaultVenue = { w: 24, h: 16 };
+
+function lsDel(k: string) {
+  try {
+    localStorage.removeItem(k);
+  } catch {
+    /* fine */
+  }
+}
+
+function resetChoice(): 'checklist' | 'data' {
+  return (document.querySelector<HTMLInputElement>('#resetForm [name=resetWhat]:checked')?.value ?? 'checklist') as 'checklist' | 'data';
+}
+
+/** Exactly what "also clear this event's data" removes right now. */
+function resetItems(): string[] {
+  const boards = hwPlaced;
+  return [
+    `The event name “${eventInput.value || DEFAULT_EVENT}” (back to “${DEFAULT_EVENT}”)`,
+    areas.list.length ? `${areas.list.length} watch area${areas.list.length === 1 ? '' : 's'} and ${areas.list.length === 1 ? 'its' : 'their'} alert rules: ${areas.list.map((a) => a.name).join(', ')}` : 'Watch areas (none drawn)',
+    `The venue: ${venue.w} × ${venue.h} m${venue.floorplan ? ', its floor plan' : ''}${venue.layout ? ', the stage and exits' : ''}${venue.geo ? ', the GPS anchor' : ''} (back to ${defaultVenue.w} × ${defaultVenue.h} m, nothing else)`,
+    boards ? `Where ${boards} board${boards === 1 ? ' is' : 's are'} placed on the map (the boards stay connected)` : 'Board positions on the map (none placed)',
+    'The demo spot (turned off)',
+    'The incident timeline, drills included (alerts that are still open and real stay until resolved)',
+    'A running simulation or saved run (stopped)',
+  ];
+}
+
+function renderResetDlg() {
+  const data = resetChoice() === 'data';
+  $('resetConfirmRow').hidden = !data;
+  const go = $('resetGo') as HTMLButtonElement;
+  go.textContent = data ? 'Clear this event’s data' : 'Reset checklist';
+  go.className = data ? 'danger-btn' : 'primary';
+  go.disabled = data && ($('resetConfirm') as HTMLInputElement).value.trim().toUpperCase() !== 'CLEAR';
+  $('resetList').replaceChildren(
+    ...resetItems().map((t) => {
+      const li = document.createElement('li');
+      li.textContent = t;
+      return li;
+    }),
+  );
+}
+
+function openResetDlg(open: boolean) {
+  const dlg = $('resetDlg');
+  dlg.hidden = !open;
+  if (!open) return;
+  (document.querySelector<HTMLInputElement>('#resetForm [name=resetWhat][value=checklist]')!).checked = true;
+  ($('resetConfirm') as HTMLInputElement).value = '';
+  $('resetMsg').textContent = '';
+  renderResetDlg();
+  animate(dlg.querySelector('.modal-card')!, { opacity: [0, 1], scale: [0.96, 1] }, { duration: 0.2 });
+  $('resetCancel').focus();
+}
+
+$('startOver').addEventListener('click', () => openResetDlg(true));
+$('resetCancel').addEventListener('click', () => openResetDlg(false));
+$('resetDlg').addEventListener('click', (e) => e.target === $('resetDlg') && openResetDlg(false));
+window.addEventListener('keydown', (e) => e.key === 'Escape' && !$('resetDlg').hidden && openResetDlg(false));
+$('resetForm').addEventListener('change', renderResetDlg);
+$('resetConfirm').addEventListener('input', renderResetDlg);
+
+/** Forget this console's setup progress; the steps are then worked out again from what really exists. */
+function resetChecklist() {
+  for (const k of SETUP_KEYS) lsDel(k);
+  setup?.reset();
+}
+
+/** Clear the event's data on the server, step by step; returns what could not be cleared. */
+async function clearEventData(): Promise<string[]> {
+  const failed: string[] = [];
+  const step = async (what: string, fn: () => Promise<unknown>) => {
+    try {
+      await fn();
+    } catch (e) {
+      failed.push(`${what} (${(e as Error).message})`);
+    }
+  };
+  // A simulation or saved run would block the venue change, and its alerts are not this event's.
+  await step('stopping the simulation', async () => {
+    await send('POST', '/api/live');
+    await send('POST', '/api/sim/stop').catch((e) => {
+      if (!(e instanceof HttpError) || e.status !== 409) throw e;
+    });
+  });
+  await step('watch areas', () => send('PUT', '/api/areas', []));
+  await step('floor plan', async () => {
+    const r = await fetch('/api/venue/floorplan', { method: 'DELETE' });
+    if (!r.ok) throw new Error(r.statusText);
+  });
+  await step('venue', () => send('PUT', '/api/venue', { w: defaultVenue.w, h: defaultVenue.h, geo: false, template: '' }));
+  await step('board positions', () => send('DELETE', '/api/hardware/pos'));
+  await step('demo spot', () => send('PUT', '/api/demo', { ...(mesh.demoSpot ?? { x: defaultVenue.w / 2, y: defaultVenue.h / 2, spacing: 0.6 }), on: false }));
+  await step('timeline', () => send('POST', '/api/alerts/clear'));
+  return failed;
+}
+
+$('resetForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const data = resetChoice() === 'data';
+  const go = $('resetGo') as HTMLButtonElement;
+  if (go.disabled) return;
+  go.disabled = true;
+  let failed: string[] = [];
+  if (data) {
+    $('resetMsg').textContent = 'Clearing…';
+    failed = await clearEventData();
+    // The event name and the timeline cut-off live on this console.
+    eventInput.value = DEFAULT_EVENT;
+    eventNameBefore = DEFAULT_EVENT;
+    lsDel('pulse.event');
+    lsDel('pulse.timelineFrom');
+    timelineFrom = 0;
+    for (const [id, a] of alertsById) if (a.status === 'resolved' || a.test) alertsById.delete(id);
+    timeline = timeline.filter((x) => x.id && alertsById.has(x.id));
+    // Show the server's state as it is now.
+    await areas.load();
+    await loadVenue();
+    await loadHardware();
+    demo.reload();
+    renderAlertCards();
+    renderLog();
+  }
+  resetChecklist();
+  renderGreeting();
+  refreshSetup();
+  if (failed.length) {
+    $('resetMsg').textContent = `Could not clear: ${failed.join('; ')}. Everything else was reset.`;
+    go.disabled = false;
+    toast('Reset finished with problems: see the dialog.', 'error');
+    return;
+  }
+  openResetDlg(false);
+  toast(
+    data
+      ? 'Event cleared: name, watch areas, venue, floor plan, board positions, demo spot and timeline. Setup starts again from step 1.'
+      : 'Setup checklist reset: it starts again from step 1. Venue, areas and hardware were not touched.',
+    'ok',
+  );
+});
+
 // Last: runs immediately, so everything it touches must already exist.
 let lastPage = '';
 onPage((p) => {
   mesh.showBoards = p === 'hardware';
+  areas.cancelPick(); // a "click the map" request does not follow you to another page
   // Each page starts with the whole venue in view (a pan on one page cut off the stage on the next).
   if (p !== lastPage && lastPage) mesh.resetView();
   lastPage = p;

@@ -3,6 +3,7 @@ package crowdsim
 import (
 	"math"
 
+	"github.com/Drivera0/crowd-crush/server/internal/crowd"
 	"github.com/Drivera0/crowd-crush/server/internal/protocol"
 )
 
@@ -134,18 +135,33 @@ func (w *World) AdvanceTo(nowMs int64) {
 	}
 }
 
-// Bodies is everyone as [x, y, pressure, hasPhone] for the dashboard:
-// x, y to the centimetre, pressure in whole N/m.
-func (w *World) Bodies() [][4]float64 {
-	out := make([][4]float64, len(w.agents))
+// Bodies is everyone as [x, y, pressure, hasPhone, density] for the
+// dashboard: x, y to the centimetre, pressure in whole N/m, density =
+// PackedDensity to one decimal.
+func (w *World) Bodies() [][5]float64 {
+	out := make([][5]float64, len(w.agents))
 	for i, a := range w.agents {
 		ph := 0.0
 		if a.phone != nil {
 			ph = 1
 		}
-		out[i] = [4]float64{math.Round(a.X*100) / 100, math.Round(a.Y*100) / 100, math.Round(a.Pressure), ph}
+		out[i] = [5]float64{math.Round(a.X*100) / 100, math.Round(a.Y*100) / 100, math.Round(a.Pressure), ph, round1(w.PackedDensity(a))}
 	}
 	return out
+}
+
+// PackedDensity is how tightly person a is packed in (people/m²): the
+// people within 1 m ÷ the part of that disc people can stand on (inside the
+// venue, off the stage; crowd.OpenFraction). Agent.Density divides by the
+// whole disc and so reads about half for someone against the barrier, where
+// the crush is worst; the ground truth keeps using Agent.Density (a
+// conservative count), this is for showing who is packed in.
+func (w *World) PackedDensity(a *Agent) float64 {
+	g := w.G
+	open := func(x, y float64) bool {
+		return x >= 0 && y >= 0 && x <= g.W && y <= g.H && !g.inStage(x, y)
+	}
+	return a.Density / crowd.OpenFraction(a.X, a.Y, densityRadius, open)
 }
 
 // Status describes the world for GET /api/sim (the app adds the alert time).

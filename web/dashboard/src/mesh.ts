@@ -12,6 +12,14 @@
 // a crisp pulsing hull around each yellow/red cluster with a badge, and push
 // waves that light up only the links and phones they travel through.
 //
+// Each dot's fill says how packed in that person is (the server's per-phone
+// crush level; for simulated people their true pressure and density): pale
+// when standing free, amber as it gets tight, red and then deep red in the
+// crushed core, growing a little and glowing as it goes. A crowd that has
+// stopped moving is the most dangerous state there is, so the fill never
+// depends on motion. Motion is the ring around the dot: green = streaming and
+// still, yellow = swaying, red and pulsing = in a push, blue = phone in hand.
+//
 // Real phones carry a generated name and colour ("Blue Otter"): a ring in
 // that colour, the name next to the dot while there are few of them, and a
 // burst of ripples while the phone is being shaken. Staff can drag one to
@@ -41,6 +49,47 @@ const SOLID = Object.fromEntries(STATUSES.map((s) => [s, `rgb(${COLOR[s].join(',
 // Server thresholds (server/internal/detect/config.go: DensityWatch, DensityDanger), people per m².
 const DENSITY_WATCH = 2;
 const DENSITY_DANGER = 4;
+
+// The crush ramp: 0 (standing free) → 1 (crushed). Lightness falls all the
+// way along it, so it reads without colour vision; the stops sit where the
+// server's Crush01 puts the watch (0.35) and danger (0.7) densities.
+const CRUSH_STEPS = 32;
+const CRUSH_RAMP: Record<'dark' | 'light', [number, RGB][]> = {
+  dark: [[0, [226, 232, 240]], [0.18, [254, 240, 138]], [0.35, [250, 204, 21]], [0.52, [249, 115, 22]], [0.7, [239, 68, 68]], [0.85, [220, 38, 38]], [1, [176, 20, 50]]],
+  light: [[0, [241, 245, 249]], [0.18, [254, 240, 138]], [0.35, [250, 204, 21]], [0.52, [249, 115, 22]], [0.7, [220, 38, 38]], [0.85, [185, 28, 28]], [1, [127, 29, 29]]],
+};
+
+/** Colour of the crush ramp at c (0..1). */
+export function crushRGB(c: number, theme: 'dark' | 'light'): RGB {
+  const stops = CRUSH_RAMP[theme];
+  const v = clamp(c, 0, 1);
+  for (let i = 1; i < stops.length; i++) {
+    if (v <= stops[i][0]) {
+      const [a, ca] = stops[i - 1], [b, cb] = stops[i];
+      return mix(ca, cb, (v - a) / (b - a));
+    }
+  }
+  return stops[stops.length - 1][1];
+}
+
+/** The server's Crush01 (crowd/packed.go) at the default thresholds: density (people/m²) → 0..1. */
+export function crush01(d: number): number {
+  const w = DENSITY_WATCH, g = DENSITY_DANGER;
+  if (d <= w / 2) return 0;
+  if (d <= w) return (0.35 * (d - w / 2)) / (w / 2);
+  if (d <= g) return 0.35 + (0.35 * (d - w)) / (g - w);
+  return Math.min(1, 0.7 + (0.3 * (d - g)) / (0.5 * g));
+}
+
+/**
+ * How crushed a simulated person is, from the truth the simulator knows:
+ * their packed density, raised by the pressure on their body (200 N/m is a
+ * firm squeeze, 1600 N/m is where people get hurt: Helbing et al. 2000).
+ */
+export function bodyCrush(pressure: number, density: number): number {
+  const c = crush01(density);
+  return pressure >= 200 ? Math.max(c, 0.55 + 0.45 * Math.min(1, pressure / 1600)) : c;
+}
 // Density field: kernel density estimate on a coarse grid.
 const FIELD_CELL = 0.5; // m (grown for big venues so the grid stays ≤ FIELD_MAX_DIM cells a side)
 const FIELD_MAX_DIM = 320;
@@ -86,12 +135,16 @@ interface Body {
   x: number; y: number;
   hx: number; hy: number;
   sway: number;
+  /** How packed in, 0..1, eased toward the server's value (or the simulated body's truth). */
+  crush: number;
   status: NodeStatus;
   prevStatus: NodeStatus;
   statusAt: number;
   stale: number; // 1 → 0.45 when offline
   vis: number; // 0..1 fade in/out
   gone: boolean;
+  /** When it left the snapshot (performance.now()). */
+  goneAt: number;
   ripples: Ripple[];
   flash: number;
   nextBeat: number;
@@ -164,6 +217,8 @@ export class Mesh {
   private simCur = new Float32Array(0);
   private simDraw = new Float32Array(0);
   private simPhone = new Uint8Array(0);
+  /** Packed density of each simulated body (people/m², latest frame; not interpolated). */
+  private simDens = new Float32Array(0);
   private simClaim = new Uint8Array(0);
   private simBucket = new Uint8Array(0);
   private simOldP = new Float32Array(0);
@@ -195,7 +250,9 @@ export class Mesh {
   private badges: number[] = [];
   // Cached per-theme sprites and styles.
   private glow: Record<string, HTMLCanvasElement> = {};
-  private pressureStyle: string[] = [];
+  private crushStyle: string[] = [];
+  private bodyStyle: string[] = [];
+  private crushGlow: HTMLCanvasElement | null = null;
   private reduced = false;
   private frameMs = 0;
 
@@ -269,7 +326,8 @@ export class Mesh {
     this.clusterLabels = clusters.map((c) => {
       const arrow = c.trend === 'forming' ? ' ↑' : c.trend === 'dispersing' ? ' ↓' : '';
       const eta = c.eta != null && c.level !== 'red' ? ` · danger in ~${Math.max(1, Math.round(c.eta))} s` : '';
-      return `${c.people ?? c.count} people · ${c.density.toFixed(1)}/m²${arrow}${eta}`;
+      // est = people/m² at the cluster's densest spot (what its level uses); density on older servers.
+      return `${c.people ?? c.count} people · up to ${(c.est ?? c.density).toFixed(1)}/m²${arrow}${eta}`;
     });
     // Participation: the server estimates people = phones ÷ participation per cluster.
     let people = 0, count = 0;
@@ -294,9 +352,9 @@ export class Mesh {
           id: n.id, data: n, seed,
           rx, ry, tx: rx, ty: ry, px: rx, py: ry, vx: 0, vy: 0,
           tw0: -1, twx: 0, twy: 0, movedAt: now, interval: 1000,
-          x: 0, y: 0, hx: 0, hy: 0, sway: Math.min(2, n.sway),
+          x: 0, y: 0, hx: 0, hy: 0, sway: Math.min(2, n.sway), crush: n.crush ?? 0,
           status: n.status, prevStatus: n.status, statusAt: now - COLOR_FADE_MS,
-          stale: n.status === 'stale' ? 0.45 : 1, vis: 0, gone: false,
+          stale: n.status === 'stale' ? 0.45 : 1, vis: 0, gone: false, goneAt: 0,
           ripples: [], flash: 0, nextBeat: now + 400 + seed * 900, simIdx: -1, nbrs: [], shakeAt: 0,
         };
         this.bodies.set(n.id, b);
@@ -332,7 +390,17 @@ export class Mesh {
       }
     }
     this.named = named;
-    for (const b of this.bodies.values()) if (!seen.has(b.id) && !b.gone) b.gone = true;
+    for (const b of this.bodies.values()) {
+      if (seen.has(b.id)) continue;
+      if (!b.gone) {
+        b.gone = true;
+        b.goneAt = now;
+      } else if (now - b.goneAt > 1500) {
+        // Frames may not be running (a background tab): don't keep ghosts until they do.
+        this.bodies.delete(b.id);
+        this.listDirty = true;
+      }
+    }
     this.waves = waves;
     this.waveKeys.clear();
     this.waveNodes.clear();
@@ -391,6 +459,7 @@ export class Mesh {
       this.simCur = grow(this.simCur);
       this.simDraw = grow(this.simDraw);
       this.simPhone = new Uint8Array(cap);
+      this.simDens = new Float32Array(cap);
       this.simClaim = new Uint8Array(cap);
       this.simBucket = new Uint8Array(cap);
     }
@@ -416,6 +485,7 @@ export class Mesh {
     let ptr = 0;
     for (let i = 0; i < n; i++) {
       const [x, y, p, ph] = list[i];
+      this.simDens[i] = list[i][4] ?? 0;
       const j = i * 3;
       let o = -1;
       if (!shifted) o = i < old ? i : -1;
@@ -580,15 +650,27 @@ export class Mesh {
       g.fillRect(0, 0, 64, 64);
       this.glow[s] = c;
     }
-    // Simulated bodies: grey when free, amber → red as the squeeze builds (8 steps).
+    // The crush ramp, for phone dots (opaque) and simulated people (grey and
+    // see-through when free, the same ramp as they get packed in).
     const grey: RGB = light ? [100, 116, 139] : [148, 163, 184];
-    this.pressureStyle = [];
-    for (let i = 0; i < 8; i++) {
-      const k = i / 7;
-      const c = k < 0.5 ? mix(grey, AMBER, k * 2) : mix(AMBER, RED, (k - 0.5) * 2);
-      const a = i === 0 ? (light ? 0.55 : 0.45) : 0.6 + 0.35 * k;
-      this.pressureStyle.push(rgba(c, a));
+    this.crushStyle = [];
+    this.bodyStyle = [];
+    for (let i = 0; i <= CRUSH_STEPS; i++) {
+      const k = i / CRUSH_STEPS;
+      const c = crushRGB(k, this.theme);
+      this.crushStyle.push(`rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})`);
+      this.bodyStyle.push(k < 0.12 ? rgba(mix(grey, c, k / 0.12), light ? 0.55 : 0.45) : rgba(c, Math.min(1, 0.7 + 0.5 * k)));
     }
+    const gc = document.createElement('canvas');
+    gc.width = gc.height = 64;
+    const gg = gc.getContext('2d')!;
+    const gr = gg.createRadialGradient(32, 32, 0, 32, 32, 32);
+    gr.addColorStop(0, rgba(RED, light ? 0.5 : 0.75));
+    gr.addColorStop(0.4, rgba(RED, light ? 0.2 : 0.3));
+    gr.addColorStop(1, rgba(RED, 0));
+    gg.fillStyle = gr;
+    gg.fillRect(0, 0, 64, 64);
+    this.crushGlow = gc;
     const bytes = new Uint8ClampedArray(this.fieldLut.buffer);
     for (let i = 0; i < 256; i++) {
       const [r, g, b, a] = fieldColor((i / 255) * FIELD_LUT_MAX, light);
@@ -737,6 +819,7 @@ export class Mesh {
     const D = this.simDraw;
     const kSway = 1 - Math.exp(-dt / 0.6);
     const kStale = 1 - Math.exp(-dt / 0.25);
+    const kCrush = 1 - Math.exp(-dt / 0.35);
     let removed = false;
 
     for (const b of this.list) {
@@ -767,6 +850,10 @@ export class Mesh {
         this.follow(b, clamp(b.interval * 0.00035, 0.1, 0.35), dt);
       }
       b.sway = lerp(b.sway, Math.min(2, b.data.sway), kSway);
+      // How packed in: Pulse's estimate for this phone; on a simulated body, at least the body's truth.
+      let crush = b.status === 'stale' ? 0 : (b.data.crush ?? 0);
+      if (b.simIdx >= 0 && b.simIdx < this.simN) crush = Math.max(crush, bodyCrush(D[b.simIdx * 3 + 2], this.simDens[b.simIdx]));
+      b.crush = lerp(b.crush, crush, kCrush);
       b.stale = lerp(b.stale, b.status === 'stale' ? 0.45 : 1, kStale);
       b.vis = clamp(b.vis + (b.gone ? -dt * 1000 / FADE_OUT_MS : dt * 1000 / FADE_IN_MS), 0, 1);
       if (b.gone && b.vis <= 0) {
@@ -1218,7 +1305,10 @@ export class Mesh {
       const ve = easeOut(b.vis);
       const a = ve * b.stale;
       const fade = Math.min(1, (now - b.statusAt) / COLOR_FADE_MS);
-      let r = this.reduced ? NODE_R : NODE_R * (0.5 + 0.5 * ve);
+      const crush = b.crush;
+      const packed = crush >= 0.33; // at or past the watch density
+      // A packed-in dot is bigger: the crushed core reads from across a table.
+      let r = (this.reduced ? NODE_R : NODE_R * (0.5 + 0.5 * ve)) * (1 + 0.3 * crush);
       if (st === 'wave' && !this.reduced) r *= 1 + 0.07 * Math.sin(now / 320 + b.seed * 10);
       const onWave = this.waveNodes.has(b.id);
 
@@ -1233,15 +1323,23 @@ export class Mesh {
         g.stroke();
       }
 
-      // Glow (pre-rendered sprite), cross-faded with the colour. Calm phones barely glow in light theme.
-      const glowR = r * (st === 'wave' ? 4.2 : 3) * (1 + b.flash * 0.3);
-      const glowA = (light && st !== 'wave' ? 0.4 : 1) * a;
-      if (fade < 1) {
-        g.globalAlpha = glowA * (1 - fade);
-        g.drawImage(this.glow[b.prevStatus], b.x - glowR, b.y - glowR, glowR * 2, glowR * 2);
+      // Glow (pre-rendered sprites). Packed in: a red glow that grows with the crush, whatever the
+      // phone's motion. Otherwise the motion status's glow; a calm, free phone barely glows.
+      if (crush > 0.3 && this.crushGlow && st !== 'stale') {
+        const gR = r * (2.6 + 1.6 * crush);
+        g.globalAlpha = Math.min(1, (crush - 0.3) / 0.5) * (light ? 0.75 : 0.9) * a;
+        g.drawImage(this.crushGlow, b.x - gR, b.y - gR, gR * 2, gR * 2);
       }
-      g.globalAlpha = glowA * fade;
-      g.drawImage(this.glow[st], b.x - glowR, b.y - glowR, glowR * 2, glowR * 2);
+      if (st === 'wave' || !packed) {
+        const glowR = r * (st === 'wave' ? 4.2 : 3) * (1 + b.flash * 0.3);
+        const glowA = (st === 'wave' ? 1 : st === 'ok' ? (light ? 0.2 : 0.45) : light ? 0.4 : 1) * a;
+        if (fade < 1) {
+          g.globalAlpha = glowA * (1 - fade);
+          g.drawImage(this.glow[b.prevStatus], b.x - glowR, b.y - glowR, glowR * 2, glowR * 2);
+        }
+        g.globalAlpha = glowA * fade;
+        g.drawImage(this.glow[st], b.x - glowR, b.y - glowR, glowR * 2, glowR * 2);
+      }
 
       // Sway ring: subtle, only when the phone is actually swaying.
       if (b.sway > 0.15) {
@@ -1249,7 +1347,7 @@ export class Mesh {
         g.strokeStyle = SOLID[st];
         g.lineWidth = 1.2;
         g.beginPath();
-        g.arc(b.x, b.y, r + 3 + b.sway * 2, 0, TAU);
+        g.arc(b.x, b.y, r + 5.5 + b.sway * 2, 0, TAU);
         g.stroke();
       }
       // Phones on a push: a red ring, gently pulsing.
@@ -1258,7 +1356,7 @@ export class Mesh {
         g.strokeStyle = SOLID.wave;
         g.lineWidth = 2;
         g.beginPath();
-        g.arc(b.x, b.y, r + 4.5 + pulse * 1.5, 0, TAU);
+        g.arc(b.x, b.y, r + 6 + pulse * 1.5, 0, TAU);
         g.stroke();
       }
 
@@ -1275,20 +1373,29 @@ export class Mesh {
         g.stroke();
         g.restore();
       } else {
-        // Core: previous colour underneath, new colour on top → a 200 ms cross-fade.
+        // Motion status: a ring round the dot, cross-fading over 200 ms. "ok" (green) only shows on
+        // a phone that is not packed in: a still phone in a crush must never look safe.
+        const ring = (s: NodeStatus, alpha: number) => {
+          if (alpha <= 0.01 || s === 'stale' || s === 'connecting' || (s === 'ok' && packed)) return;
+          g.globalAlpha = alpha * (s === 'ok' ? 0.85 : 1);
+          g.strokeStyle = SOLID[s];
+          g.lineWidth = s === 'ok' ? 1.6 : 2.4;
+          g.beginPath();
+          g.arc(b.x, b.y, r + (s === 'ok' ? 2.4 : 3), 0, TAU);
+          g.stroke();
+        };
+        if (fade < 1) ring(b.prevStatus, a * (1 - fade));
+        ring(st, a * fade);
+        // Core: how packed in this person is, on the crush ramp (pale when free); offline is dim grey.
         g.beginPath();
         g.arc(b.x, b.y, r, 0, TAU);
-        if (fade < 1) {
-          g.globalAlpha = a;
-          g.fillStyle = SOLID[b.prevStatus];
-          g.fill();
-        }
-        g.globalAlpha = a * fade;
-        g.fillStyle = SOLID[st];
+        g.globalAlpha = a;
+        g.fillStyle = st === 'stale' ? SOLID.stale : this.crushStyle[Math.round(clamp(crush, 0, 1) * CRUSH_STEPS)];
         g.fill();
+        // A thin edge keeps a pale dot visible on a light map and a deep red one on a dark map.
         g.globalAlpha = (light ? 0.9 : 0.8) * a;
-        g.strokeStyle = outline;
-        g.lineWidth = 2;
+        g.strokeStyle = light ? (packed ? '#ffffff' : 'rgba(71,85,105,0.9)') : crush > 0.6 ? 'rgba(254,202,202,0.8)' : outline;
+        g.lineWidth = light && !packed ? 1.2 : crush > 0.6 && !light ? 1.1 : 2;
         g.stroke();
         if (b.flash > 0.05) {
           g.globalAlpha = b.flash * 0.5 * a;
@@ -1307,14 +1414,14 @@ export class Mesh {
           g.strokeStyle = outline;
           g.lineWidth = 6;
           g.beginPath();
-          g.arc(b.x, b.y, r + 5, 0, TAU);
+          g.arc(b.x, b.y, r + 7.5, 0, TAU);
           g.stroke();
         }
         g.globalAlpha = a;
         g.strokeStyle = b.data.color;
         g.lineWidth = real ? 3.5 : 2.5;
         g.beginPath();
-        g.arc(b.x, b.y, r + (real ? 5 : 3.5), 0, TAU);
+        g.arc(b.x, b.y, r + (real ? 7.5 : 6), 0, TAU);
         g.stroke();
       }
 
@@ -1628,23 +1735,25 @@ export class Mesh {
     // Body-sized when zoomed out, capped near the phone dots' size in small venues.
     const r = Math.max(3, Math.min(8, 0.22 * s)) * 0.8;
     const D = this.simDraw, B = this.simBucket, ph = this.simPhone;
+    const Q = 16; // tint steps
+    const dens = this.simDens;
     let maxB = 0;
     for (let i = 0; i < n; i++) {
-      // 0 → grey; ~1500 N/m and up → red (crowd-crush pressure).
-      const k = Math.min(1, D[i * 3 + 2] / 1500);
-      const q = k < 0.08 ? 0 : 1 + Math.min(6, Math.floor(k * 7));
+      // The truth: packed density and body pressure → the crush ramp (grey when free).
+      const q = Math.round(bodyCrush(D[i * 3 + 2], dens[i]) * Q);
       B[i] = q;
       if (q > maxB) maxB = q;
     }
-    // A small halo only around bodies under real pressure (≥ ~50 %).
-    if (maxB >= 4) {
-      g.fillStyle = rgba(RED, this.theme === 'light' ? 0.16 : 0.2);
+    // A halo around the people who are really being crushed (danger density and up, or squeezed hard).
+    const hot = Math.ceil(0.72 * Q);
+    if (maxB >= hot) {
+      g.fillStyle = rgba(RED, this.theme === 'light' ? 0.18 : 0.24);
       g.beginPath();
       for (let i = 0; i < n; i++) {
-        if (B[i] < 4) continue;
+        if (B[i] < hot) continue;
         const x = ox + D[i * 3] * s, y = oy + D[i * 3 + 1] * s;
-        g.moveTo(x + r * 1.7, y);
-        g.arc(x, y, r * 1.7, 0, Math.PI * 2);
+        g.moveTo(x + r * 1.9, y);
+        g.arc(x, y, r * 1.9, 0, Math.PI * 2);
       }
       g.fill();
     }
@@ -1655,13 +1764,13 @@ export class Mesh {
       for (let i = 0; i < n; i++) {
         if (B[i] !== q || ph[i]) continue; // phone carriers are drawn as nodes
         const x = ox + D[i * 3] * s, y = oy + D[i * 3 + 1] * s;
-        const rr = q ? r * 1.1 : r;
+        const rr = r * (1 + (0.25 * q) / Q);
         g.moveTo(x + rr, y);
         g.arc(x, y, rr, 0, Math.PI * 2);
         any = true;
       }
       if (!any) continue;
-      g.fillStyle = this.pressureStyle[q];
+      g.fillStyle = this.bodyStyle[Math.round((q / Q) * CRUSH_STEPS)];
       g.fill();
     }
   }

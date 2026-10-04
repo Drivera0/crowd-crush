@@ -34,9 +34,16 @@ func (a *App) LoadRecording(ctx context.Context, name string) ([]store.Record, e
 
 // ReplayConfig sizes the venue for a recording: the size its meta record
 // gives, else base's, grown if needed so every recorded position (or
-// legacy grid cell) fits.
+// legacy grid cell) fits. A recording from before free positions (a row of
+// phones on a grid, no venue size: legacyRecording) is replayed in the venue
+// it was made in, the default one, whatever the venue is today: its phones
+// were placed for that room, and in a festival field they would be a speck.
 func ReplayConfig(base detect.Config, recs []store.Record) detect.Config {
 	cfg := base
+	if legacyRecording(recs) {
+		def := detect.DefaultConfig()
+		cfg.VenueW, cfg.VenueH = def.VenueW, def.VenueH
+	}
 	for _, r := range recs {
 		if r.K == store.KindMeta && r.W >= 1 && r.H >= 1 {
 			cfg.VenueW, cfg.VenueH = r.W, r.H
@@ -105,24 +112,47 @@ func (a *App) StartReplay(ctx context.Context, name string, speed float64) error
 		speed:     speed,
 	}
 	a.mu.Lock()
-	rs.p = newPipeline(ReplayConfig(a.liveConfig(), recs))
-	a.applyZones(rs.p)
+	live := a.liveConfig()
+	cfg := ReplayConfig(live, recs)
+	rs.p = newPipeline(cfg)
+	// Today's watch areas only make sense in today's venue: a recording
+	// made in another one plays with the default zones.
+	rs.ownVenue = cfg.VenueW == live.VenueW && cfg.VenueH == live.VenueH
+	a.applyReplayZones(rs)
 	a.mu.Unlock()
 	// Feed the metadata (hellos, syncs) that precedes the first reading.
 	rs.recStart = first - 1
 	a.mu.Lock()
 	a.sim = nil // a replay replaces a running simulation
 	a.replay = rs
+	// … and whatever the simulation or an earlier replay raised goes with it.
+	dropped := a.dropSourceLocked("sim")
+	if d := a.dropSourceLocked("replay"); d != nil {
+		dropped = d
+	}
 	a.mu.Unlock()
+	a.broadcastDropped(dropped)
 	log.Printf("replaying %s: %d readings, %s", name, n, time.Duration(last-first)*time.Millisecond)
 	return nil
+}
+
+// applyReplayZones gives a replay its zones: the current areas when it plays
+// in today's venue, else the default split. Caller holds mu.
+func (a *App) applyReplayZones(rs *replayState) {
+	if rs.ownVenue {
+		a.applyZones(rs.p)
+		return
+	}
+	rs.p.det.SetZones(detect.DefaultZones(rs.p.cfg()))
 }
 
 // StopReplay returns to live data.
 func (a *App) StopReplay() {
 	a.mu.Lock()
 	a.replay = nil
+	dropped := a.dropSourceLocked("replay")
 	a.mu.Unlock()
+	a.broadcastDropped(dropped)
 }
 
 // feedReplay pushes every record up to pnow into the replay pipeline.
