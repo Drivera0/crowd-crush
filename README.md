@@ -131,16 +131,44 @@ Read it honestly. A sudden surge into a loose crowd is caught ~2 s after the cro
 
 **What the simulator says about wave detection.** In this model the travelling-wave detector almost never fires. Bodies in a packed crowd are stiff (k = 1.2·10⁵ kg/s²), so a push crosses neighbours in tens of milliseconds, under the detector's 120 ms per-hop floor, and reads as moving together. In a loose crowd a push dies out within ~2 m. Either real crowds transmit pushes more slowly than stiff discs do (people are compliant and step), or the wave detector needs a lower lag floor for packed crowds. Recordings of real pushes would settle it.
 
+### Alerts, rules, floor plans and boards
+
+**Alerts are incidents with a stable `id`.** A zone leaving calm opens one (`status: open`) per data source, zone and kind (`wave`, `density`, `rule`). Until staff resolve it, later changes of that zone and kind update the same alert: yellow → red raises its level, and it keeps the worst level it reached (and the time it got there) when the zone calms down. The briefing (`headline` + `action`, with `brief` = both, for voice and timeline), acknowledge, resolve and escalation arrive as updates with the same `id`; the dashboard upserts by `id`. A zone returning to calm is also sent as a separate short notice (new `id`, `level: calm`, `status: resolved`) for the timeline. Resolving only closes the card; the next level change opens a new incident. A red alert nobody acknowledged `-escalate-after` (60 s) after it went red is re-broadcast with `escalated: true`, spoken again ("Still unacknowledged. …") and the sign and its light are forced red; once per alert.
+
+**Area rules** (per drawn area, `rules` in `PUT /api/areas`): `density` (people/m², the clusters' estimate: max(phones ÷ area, peak local density) ÷ participation) held for `densityHoldS` (0 = 5 s) is red, 75 % of it yellow, each clearing 10 % lower; `maxPhones`: more phones inside than this for over 3 s is red, clearing at once when back under; `push: false` turns travelling-wave detection off for that area. These raise `kind: "rule"` alerts and merge into the area's zone level (worst of detector and rules). `message` (≤ 140 chars) replaces the briefing's action, word for word (Gemini is told to use it verbatim, and the server enforces it). `notify.sign`, `notify.light`, `notify.voice` (default on) keep the area off the worst-zone sign, off its light, or skip generating voice audio.
+
+**Floor plans.** Upload a PNG/JPEG/WebP (≤ 8 MB, type sniffed from the bytes) and it becomes the map background. **Gemini reads it**: a vision request with structured JSON output returns the venue size, stage outline, exits and walls in venue metres (origin = the image's top-left), with notes on how it judged the scale (labels, scale bars, ~0.9 m doors, typical stage sizes) and a confidence. Nothing is saved until staff apply it with `PUT /api/venue`. A venue layout with walls or exits replaces the simulator's default walls and exits when a simulation starts.
+
+**Boards.** Staff drag signs and zone lights onto the map (`data/hardware.json`). Zone lights report the other Pulse boards they hear over Bluetooth (`peers`: beacon name, RSSI, estimated distance); when two placed boards hear each other, each peer also gets `mapDist`, the distance on the map, so a bad estimate is visible.
+
+### HTTP API
+
+| Endpoint | |
+|---|---|
+| `GET /api/config` | venue size, geo flag, zone thresholds, neighbour radius |
+| `GET/PUT /api/venue` | `{w, h, lat, lon, bearing, geo, template, floorplan, layout: {stage, exits, walls}}`; layout points clamped to the venue, ≤ 64 stage points, ≤ 32 exits, ≤ 128 walls, names ≤ 40 chars; `floorplan` is read-only |
+| `POST /api/venue/floorplan` | raw image body (PNG/JPEG/WebP, ≤ 8 MB) → venue; 415 for anything else, 413 if too big |
+| `GET/DELETE /api/venue/floorplan` | the image (`Cache-Control: no-store`) / remove it → venue |
+| `POST /api/venue/floorplan/analyze` | Gemini's reading `{w, h, layout, notes, confidence}`; 503 without `GEMINI_API_KEY`, 404 without a plan, 502 if Gemini fails; saves nothing |
+| `GET/PUT /api/areas` | watch areas `{id, name, sens, poly, light, rules}` (`data/areas.json`) |
+| `POST /api/alerts/{id}/ack`, `/resolve` | → the updated alert (also broadcast to dashboards); 404 for an unknown id |
+| `GET /api/hardware` | signs and zone lights: online, Wi-Fi, BLE counts, `x, y`, `beacon`, `peers` |
+| `PUT /api/hardware/{key}/pos` | `{x, y}` (key `sign` or a light letter) → hardware list; 404 for an unknown board |
+| `GET /api/node/{id}` | one phone's details and last 30 s of readings |
+| `GET /api/sim`, `POST /api/sim/start`, `/stop`, `/action` | crowd simulation (docs/REFERENCE.md) |
+| `GET /api/recordings`, `POST /api/record/start`, `/record/stop`, `/replay`, `/live` | recordings and replay |
+| `POST /api/test-alert`, `POST /api/ask`, `GET /api/status`, `GET /api/qr.png`, `GET /api/phone-url` | drill, questions to Gemini, service status, join QR |
+
 ## Layout
 
 ```
-server/cmd/pulse      the server (flags: -venue-w -venue-h -venue-lat -venue-lon -venue-bearing -zone-cols -zone-rows -config -data -addr …)
+server/cmd/pulse      the server (flags: -venue-w -venue-h -venue-lat -venue-lon -venue-bearing -zone-cols -zone-rows -config -data -escalate-after -addr …)
 server/cmd/sim        fake phones: -scenario wave [-layout crowd|line] [-n 24] [-move=false] [-rows -cols for the line]
                       [-out file.jsonl for offline recordings, with hello x/y and pos records]
 server/cmd/dashtail   dashboard snapshots in a terminal
 server/internal/      hub, clocksync, detect, crowd (clusters), geo (GPS → metres), store, brief, voice, sign, protocol, app, sim,
                       crowdsim (Social Force Model crowd, in-process: POST /api/sim/start)
-data/                 saved venue anchor and staff-drawn areas (git-ignored)
+data/                 saved venue (size, anchor, layout, floor plan), staff-drawn areas, board positions (git-ignored)
 web/phone             phone page (Vite + TS)       web/dashboard   dashboard (Vite + TS, SVG)
 web/shared            protocol.ts — mirror of server/internal/protocol
 arduino/sign          Uno R4 WiFi sign sketch

@@ -69,12 +69,13 @@ func (a *App) startSimAt(req SimStart, now int64) error {
 	a.mu.Lock()
 	running := a.sim != nil
 	cfg := a.liveConfig()
+	layout := a.venue.Layout
 	a.mu.Unlock()
 	if running {
 		return errSimRunning
 	}
 	w, err := crowdsim.New(crowdsim.Config{W: cfg.VenueW, H: cfg.VenueH, People: req.People,
-		Participation: req.Participation, Scenario: req.Scenario, Seed: req.Seed, StartMs: now})
+		Participation: req.Participation, Scenario: req.Scenario, Seed: req.Seed, StartMs: now, Layout: layout})
 	if err != nil {
 		return err
 	}
@@ -126,10 +127,11 @@ func (a *App) SimStatus() protocol.SimStatus {
 	a.mu.Lock()
 	s := a.sim
 	cfg := a.liveConfig()
+	layout := a.venue.Layout
 	a.mu.Unlock()
 	if s == nil {
 		st := protocol.SimStatus{}
-		st.Exits, st.Walls = crowdsim.GeometryJSON(crowdsim.NewGeometry(cfg.VenueW, cfg.VenueH))
+		st.Exits, st.Walls = crowdsim.GeometryJSON(crowdsim.LayoutGeometry(cfg.VenueW, cfg.VenueH, layout))
 		return st
 	}
 	s.mu.Lock()

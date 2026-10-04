@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -62,16 +63,18 @@ func (r *simRunner) act(ac crowdsim.Action) {
 	}
 }
 
-// reds lists the red alerts raised by the detector so far (not briefings).
+// reds lists the incidents that reached red so far (not tests), in the
+// order they went red (an alert's T is when it reached its level).
 func (r *simRunner) reds() []protocol.Alert {
 	r.a.mu.Lock()
 	defer r.a.mu.Unlock()
 	var out []protocol.Alert
 	for _, al := range r.a.alerts {
-		if al.Level == protocol.LevelRed && al.Brief == "" {
+		if al.Level == protocol.LevelRed && !al.Test {
 			out = append(out, al)
 		}
 	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].T < out[j].T })
 	return out
 }
 

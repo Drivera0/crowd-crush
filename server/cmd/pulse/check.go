@@ -49,9 +49,9 @@ func runCheck(audioDir string) int {
 	if !b.Enabled() {
 		report("Gemini", "GEMINI_API_KEY", errUnset, "")
 	} else {
-		text, err := b.Brief(ctx, brief.Info{Zone: "B", Level: "red", Direction: "+x", LagMs: 250,
+		bf, err := b.Brief(ctx, brief.Info{Zone: "B", Level: "red", Direction: "+x", LagMs: 250,
 			SecondsHigh: 12, Scores: []float64{0.35, 0.5, 0.66}, Phones: 4, Swaying: 4})
-		report("Gemini", "", err, fmt.Sprintf("%q", text))
+		report("Gemini", "", err, fmt.Sprintf("%q", bf.Text()))
 	}
 
 	// ElevenLabs

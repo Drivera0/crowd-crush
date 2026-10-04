@@ -51,6 +51,14 @@ func PeekType(b []byte) (string, error) {
 const (
 	KindWave    = "wave"
 	KindDensity = "density"
+	KindRule    = "rule" // a staff-set area rule (density or capacity)
+)
+
+// Alert statuses.
+const (
+	StatusOpen     = "open"
+	StatusAck      = "ack"
+	StatusResolved = "resolved"
 )
 
 // Position sources.
@@ -167,7 +175,31 @@ type Area struct {
 	Poly []Point `json:"poly"`
 	// Light is the zone light that shows this area's level: the letter it has
 	// in SIGN_URL ("A" for A=http://…). Empty = no light.
-	Light string `json:"light,omitempty"`
+	Light string      `json:"light,omitempty"`
+	Rules *AlertRules `json:"rules,omitempty"`
+}
+
+// AlertRules are per-area alert rules on top of the detector's push and
+// density alerts.
+type AlertRules struct {
+	// Density: alert when the estimated people/m² inside the area stays
+	// above this for DensityHoldS (red; yellow at 75 %). 0 = off.
+	Density      float64 `json:"density,omitempty"`
+	DensityHoldS int     `json:"densityHoldS,omitempty"` // 0 = 5 s
+	// Push: travelling-wave detection for this area. nil = on.
+	Push *bool `json:"push,omitempty"`
+	// MaxPhones: red when more phones than this are inside for over 3 s. 0 = off.
+	MaxPhones int `json:"maxPhones,omitempty"`
+	// Message replaces the generic briefing's action (≤ 140 chars).
+	Message string  `json:"message,omitempty"`
+	Notify  *Notify `json:"notify,omitempty"`
+}
+
+// Notify says where an area's alerts go. nil fields = on.
+type Notify struct {
+	Sign  *bool `json:"sign,omitempty"`
+	Light *bool `json:"light,omitempty"`
+	Voice *bool `json:"voice,omitempty"`
 }
 
 // Hardware is GET /api/hardware: one entry per sign or zone light in SIGN_URL,
@@ -186,6 +218,22 @@ type Hardware struct {
 	Level    string   `json:"level,omitempty"`  // what the board is showing
 	BLE      *BLEScan `json:"ble,omitempty"`    // Bluetooth crowd counter, if the board has one
 	Areas    []string `json:"areas,omitempty"`  // names of the areas this light shows
+	// Where staff placed the board on the venue map (m); PUT /api/hardware/{key}/pos.
+	X      *float64 `json:"x,omitempty"`
+	Y      *float64 `json:"y,omitempty"`
+	Beacon string   `json:"beacon,omitempty"` // Bluetooth beacon name, e.g. PULSE-A
+	Peers  []Peer   `json:"peers,omitempty"`  // other Pulse boards this one hears
+}
+
+// Peer is another Pulse board a board hears over Bluetooth.
+type Peer struct {
+	Name string  `json:"name"`
+	RSSI int     `json:"rssi"`
+	Dist float64 `json:"dist"` // m, estimated from the signal (log-distance path loss)
+	Age  int64   `json:"age"`  // s since last heard
+	// MapDist is the distance between the two boards as placed on the map
+	// (m), when both are placed and hear each other: a check on Dist.
+	MapDist *float64 `json:"mapDist,omitempty"`
 }
 
 // BLEScan is a zone light's latest Bluetooth count (counts only, no addresses).
@@ -219,6 +267,38 @@ type Venue struct {
 	Lon     float64 `json:"lon"`
 	Bearing float64 `json:"bearing"`
 	Geo     bool    `json:"geo"`
+	// Template is the preset the size came from (club, theatre, …) or "custom".
+	Template string `json:"template,omitempty"`
+	// Floorplan: a floor-plan image is stored (GET /api/venue/floorplan).
+	Floorplan bool         `json:"floorplan"`
+	Layout    *VenueLayout `json:"layout,omitempty"`
+}
+
+// VenueLayout is the venue's fixed features, in venue metres.
+type VenueLayout struct {
+	Stage []Point      `json:"stage,omitempty"` // stage outline
+	Exits []LayoutExit `json:"exits,omitempty"`
+	Walls [][4]float64 `json:"walls,omitempty"` // [x0, y0, x1, y1]
+}
+
+// LayoutExit is an exit or door: the segment (x0, y0)–(x1, y1).
+type LayoutExit struct {
+	ID   string  `json:"id"`
+	Name string  `json:"name"`
+	X0   float64 `json:"x0"`
+	Y0   float64 `json:"y0"`
+	X1   float64 `json:"x1"`
+	Y1   float64 `json:"y1"`
+}
+
+// FloorplanSuggestion is POST /api/venue/floorplan/analyze: Gemini's reading
+// of the stored plan. Nothing is saved until staff PUT /api/venue.
+type FloorplanSuggestion struct {
+	W          float64     `json:"w"`
+	H          float64     `json:"h"`
+	Layout     VenueLayout `json:"layout"`
+	Notes      string      `json:"notes"`
+	Confidence string      `json:"confidence"` // low | medium | high
 }
 
 // VenueSize is the snapshot's venue field.
@@ -258,16 +338,27 @@ type Snapshot struct {
 	Sim       *SimFrame   `json:"sim,omitempty"` // mode "sim" only
 }
 
+// Alert is one incident. Later messages with the same ID update it (level
+// rising, briefing arriving, ack, resolve, escalation); the dashboard
+// upserts by ID.
 type Alert struct {
 	Type     string  `json:"type"`
-	T        int64   `json:"t"`
-	Kind     string  `json:"kind,omitempty"` // wave (default) | density
+	ID       string  `json:"id"`
+	T        int64   `json:"t"`              // when the incident opened (server ms)
+	Kind     string  `json:"kind,omitempty"` // wave (default) | density | rule
 	Zone     string  `json:"zone"`
-	Level    string  `json:"level"`
+	Level    string  `json:"level"` // the worst level the incident reached
 	Score    float64 `json:"score"`
-	Brief    string  `json:"brief,omitempty"`
+	Brief    string  `json:"brief,omitempty"`    // headline + " " + action, for voice and timeline
+	Headline string  `json:"headline,omitempty"` // what is happening and where
+	Action   string  `json:"action,omitempty"`   // the one thing staff should do
 	AudioURL string  `json:"audioUrl,omitempty"`
 	Test     bool    `json:"test,omitempty"`
+	Status   string  `json:"status"` // open | ack | resolved
+	AckAt    int64   `json:"ackAt,omitempty"`
+	// ResolvedAt is when staff closed it (server ms).
+	ResolvedAt int64 `json:"resolvedAt,omitempty"`
+	Escalated  bool  `json:"escalated,omitempty"` // red and unacknowledged past the escalation delay
 }
 
 // Alerts is sent to a dashboard when it connects: the recent alert log.

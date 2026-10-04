@@ -11,7 +11,6 @@ package app
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"log"
 	"math"
 	"sort"
@@ -55,6 +54,9 @@ type Options struct {
 	Brief *brief.Client
 	Voice *voice.Client
 	Sign  *sign.Client
+	// EscalateAfter: a red alert still unacknowledged this long after it
+	// went red is re-announced. 0 = DefaultEscalateAfter; < 0 = never.
+	EscalateAfter time.Duration
 }
 
 type nodeMeta struct {
@@ -116,6 +118,7 @@ type pipeline struct {
 	clusters []crowd.Cluster
 	hist     map[string][]histPoint
 	lastHist int64
+	rules    map[string]*ruleState // area rule machines, by area id (rules.go)
 }
 
 func newPipeline(cfg detect.Config) *pipeline {
@@ -196,8 +199,13 @@ type App struct {
 	msgRate   float64
 	sentState map[string]protocol.PhoneState
 	sentAt    map[string]int64
-	signHold  int64               // test alert keeps the sign red until this time
-	hw        []protocol.Hardware // latest board status, see hardware.go
+	signHold  int64                     // test alert keeps the sign red until this time
+	hw        []protocol.Hardware       // latest board status, see hardware.go
+	hwPos     map[string]protocol.Point // where staff placed each board, by key (hardware.go)
+	plan      *floorplan                // stored floor-plan image, see venue.go
+	alertSeq  int
+	incidents map[string]*incident // by alert id, see alerts.go
+	openInc   map[string]string    // incident key → id of its unresolved alert
 }
 
 // New creates the app and its hub, loading saved areas and venue from
@@ -220,7 +228,14 @@ func New(opt Options) *App {
 		lastBrief: map[string]int64{},
 		sentState: map[string]protocol.PhoneState{},
 		sentAt:    map[string]int64{},
+		incidents: map[string]*incident{},
+		openInc:   map[string]string{},
 	}
+	if a.opt.EscalateAfter == 0 {
+		a.opt.EscalateAfter = DefaultEscalateAfter
+	}
+	a.loadFloorplan()
+	a.hwPos = a.loadHardwarePos()
 	v := opt.Venue
 	if v.W <= 0 || v.H <= 0 {
 		v.W, v.H = opt.Detect.VenueW, opt.Detect.VenueH
@@ -232,6 +247,7 @@ func New(opt Options) *App {
 		log.Printf("venue: %v; using %gx%g m without a geo-anchor", err, opt.Detect.VenueW, opt.Detect.VenueH)
 		v = protocol.Venue{W: opt.Detect.VenueW, H: opt.Detect.VenueH}
 	}
+	v.Floorplan = a.plan != nil
 	a.venue = v
 	a.areas = a.loadAreas()
 	a.live = newPipeline(a.liveConfig())
@@ -267,7 +283,7 @@ func zoneDefs(cfg detect.Config, areas []protocol.Area) []detect.ZoneDef {
 			x, y := cfg.Clamp(pt[0], pt[1])
 			poly[i] = [2]float64{x, y}
 		}
-		out = append(out, detect.ZoneDef{ID: ar.ID, Name: ar.Name, Poly: poly, Custom: true, Sens: ar.Sens})
+		out = append(out, detect.ZoneDef{ID: ar.ID, Name: ar.Name, Poly: poly, Custom: true, Sens: ar.Sens, NoPush: pushOff(ar.Rules)})
 	}
 	return append(out, detect.ZoneDef{ID: detect.RestZone, Name: "Rest of venue", Sens: detect.SensNormal,
 		Poly: detect.Rect(0, 0, cfg.VenueW, cfg.VenueH), Rest: true})
@@ -507,208 +523,6 @@ func (a *App) Run(ctx context.Context) {
 	}
 }
 
-type pendingAlert struct {
-	al     protocol.Alert
-	info   brief.Info
-	brief  bool
-	replay bool
-}
-
-func (a *App) detectTick(now int64) {
-	a.mu.Lock()
-	res, cch := a.live.step(now)
-	forget(a.live, now)
-	active, pnow, isReplay, src := a.live, now, false, ""
-	changes := res.Changes
-	if r := a.replay; r != nil {
-		pnow = r.now(now)
-		a.feedReplay(r, pnow)
-		var rres detect.Result
-		rres, cch = r.p.step(pnow)
-		changes = rres.Changes
-		active, isReplay, src = r.p, true, " [replay]"
-		if pnow > r.recEnd+3000 {
-			log.Printf("replay %s finished, back to live", r.name)
-			a.replay = nil
-		}
-	}
-	if s := a.sim; s != nil {
-		var sres detect.Result
-		sres, cch = s.p.step(now)
-		changes = sres.Changes
-		active, isReplay, src = s.p, true, " [sim]"
-		forget(s.p, now)
-		// Pulse's first red alert of the run (wave or density), for the lead time.
-		for _, ch := range changes {
-			if ch.To == protocol.LevelRed && s.alertAt < 0 {
-				s.alertAt = s.seconds(now)
-			}
-		}
-		for _, ch := range cch {
-			if ch.To == protocol.LevelRed && s.alertAt < 0 {
-				s.alertAt = s.seconds(now)
-			}
-		}
-	}
-	var pend []pendingAlert
-	for _, ch := range changes {
-		pa := pendingAlert{replay: isReplay, al: protocol.Alert{Type: protocol.TypeAlert, T: now, Kind: protocol.KindWave,
-			Zone: ch.Zone, Level: ch.To, Score: round2(ch.Score)}}
-		if ch.To == protocol.LevelRed && ch.From == protocol.LevelYellow && now-a.lastBrief[ch.Zone] >= BriefCooldown {
-			a.lastBrief[ch.Zone] = now
-			pa.brief = true
-			pa.info = briefInfo(active, ch.Zone, protocol.LevelRed, pnow)
-		}
-		pend = append(pend, pa)
-	}
-	for _, ch := range cch {
-		c := ch.Cluster
-		zone := active.det.ZoneOf(c.X, c.Y)
-		pa := pendingAlert{replay: isReplay, al: protocol.Alert{Type: protocol.TypeAlert, T: now, Kind: protocol.KindDensity,
-			Zone: zone, Level: ch.To, Score: round2(c.Est)}}
-		if ch.To == protocol.LevelRed && ch.From == protocol.LevelYellow && now-a.lastBrief[zone] >= BriefCooldown {
-			a.lastBrief[zone] = now
-			pa.brief = true
-			pa.info = densityInfo(active, c, zone)
-		}
-		pend = append(pend, pa)
-	}
-	zoneLevels, signLevel, signZone := alertLevels(active)
-	a.lightLevels(zoneLevels, a.opt.Sign.Zones())
-	hold := now < a.signHold
-	a.mu.Unlock()
-
-	for _, pa := range pend {
-		log.Printf("%s %s: %s (score %.2f)%s", pa.al.Kind, pa.al.Zone, pa.al.Level, pa.al.Score, src)
-		a.pushAlert(pa.al)
-		if !pa.replay {
-			a.opt.Sink.Alert(store.AlertRow{Time: time.UnixMilli(now), Zone: pa.al.Zone, Level: pa.al.Level, Score: pa.al.Score})
-		}
-		if pa.brief {
-			go a.briefAndSpeak(pa.info, false, pa.replay)
-		}
-	}
-	if !hold {
-		a.opt.Sign.Update(zoneLevels, signLevel, signZone)
-	}
-}
-
-// alertLevels merges zone levels with the density levels of the clusters
-// in them (a red cluster makes its zone red on the sign), and picks the
-// worst zone.
-func alertLevels(p *pipeline) (zoneLevels map[string]string, level, zone string) {
-	zoneLevels = map[string]string{}
-	score := map[string]float64{}
-	for _, z := range p.last.Zones {
-		zoneLevels[z.ID], score[z.ID] = z.Level, z.Score
-	}
-	for _, c := range p.clusters {
-		id := p.det.ZoneOf(c.X, c.Y)
-		if id != "" && levelRank[c.Level] > levelRank[zoneLevels[id]] {
-			zoneLevels[id] = c.Level
-		}
-	}
-	level = protocol.LevelCalm
-	best := -1.0
-	ids := make([]string, 0, len(zoneLevels))
-	for id := range zoneLevels {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	for _, id := range ids {
-		l := zoneLevels[id]
-		if levelRank[l] > levelRank[level] || (l == level && score[id] > best) {
-			level, zone, best = l, id, score[id]
-		}
-	}
-	if level == protocol.LevelCalm {
-		zone = ""
-	}
-	return zoneLevels, level, zone
-}
-
-func (a *App) pushAlert(al protocol.Alert) {
-	a.mu.Lock()
-	a.alerts = append(a.alerts, al)
-	if len(a.alerts) > alertLogKeep {
-		a.alerts = a.alerts[len(a.alerts)-alertLogKeep:]
-	}
-	a.mu.Unlock()
-	a.Hub.BroadcastJSON(al)
-}
-
-// briefAndSpeak runs Gemini then ElevenLabs and broadcasts the result. Both
-// fail soft: template text, then fallback clip or the browser's own voice.
-func (a *App) briefAndSpeak(info brief.Info, test, replay bool) {
-	ctx := context.Background()
-	text, err := a.opt.Brief.Brief(ctx, info)
-	if err != nil && !errors.Is(err, brief.ErrNoKey) {
-		log.Printf("brief: %v (using template)", err)
-	}
-	url, err := a.opt.Voice.Speak(ctx, text)
-	if err != nil {
-		if !errors.Is(err, voice.ErrNoKey) {
-			log.Printf("voice: %v", err)
-		}
-		url = ""
-		if info.Zone == "B" && info.Kind != protocol.KindDensity {
-			url = a.opt.Voice.FallbackURL() // "Zone B, crowd waves building."
-		}
-	}
-	kind := info.Kind
-	if kind == "" {
-		kind = protocol.KindWave
-	}
-	score := lastScore(info)
-	if kind == protocol.KindDensity {
-		score = round2(info.Density)
-	}
-	al := protocol.Alert{Type: protocol.TypeAlert, T: hub.Now(), Kind: kind, Zone: info.Zone, Level: info.Level,
-		Score: score, Brief: text, AudioURL: url, Test: test}
-	log.Printf("brief zone %s: %s", info.Zone, text)
-	a.pushAlert(al)
-	if !test && !replay {
-		a.opt.Sink.Alert(store.AlertRow{Time: time.UnixMilli(al.T), Zone: al.Zone, Level: al.Level, Score: al.Score, Brief: text})
-	}
-}
-
-// TestAlert runs the whole alert chain (briefing, voice, sign) for the zone
-// with the highest score, without touching detector state.
-func (a *App) TestAlert() string {
-	now := hub.Now()
-	a.mu.Lock()
-	p := a.active()
-	// The zone that looks worst, else B (the fallback clip's zone), else the first.
-	zone, best := "", 0.1
-	for _, z := range p.last.Zones {
-		if z.Score > best {
-			zone, best = z.ID, z.Score
-		}
-	}
-	if zone == "" {
-		if _, ok := p.last.Zone("B"); ok || len(p.last.Zones) == 0 {
-			zone = "B"
-		} else {
-			zone = p.last.Zones[0].ID
-		}
-	}
-	info := briefInfo(p, zone, protocol.LevelRed, a.pnowLocked(now))
-	if info.Direction == "" {
-		info.Direction, info.LagMs = "+x", 250
-	}
-	a.signHold = now + 8000
-	light := a.lightFor(zone)
-	a.mu.Unlock()
-
-	a.pushAlert(protocol.Alert{Type: protocol.TypeAlert, T: now, Kind: protocol.KindWave, Zone: zone, Level: protocol.LevelRed, Score: lastScore(info), Test: true})
-	a.opt.Sign.Force(protocol.LevelRed, zone)
-	if light != "" {
-		a.opt.Sign.Force(protocol.LevelRed, light)
-	}
-	go a.briefAndSpeak(info, true, false)
-	return zone
-}
-
 func (a *App) active() *pipeline {
 	if a.sim != nil {
 		return a.sim.p
@@ -871,7 +685,7 @@ func (a *App) snapshotLocked(now int64) protocol.Snapshot {
 		for i, pt := range z.Poly {
 			poly[i] = protocol.Point{r2(pt[0]), r2(pt[1])}
 		}
-		s.Zones = append(s.Zones, protocol.Zone{ID: z.ID, Name: z.Name, Level: z.Level, Score: round2(z.Score),
+		s.Zones = append(s.Zones, protocol.Zone{ID: z.ID, Name: z.Name, Level: p.zoneLevel(z), Score: round2(z.Score),
 			Poly: poly, Custom: z.Custom, Sens: z.Sens})
 	}
 	for _, e := range p.last.Edges {
@@ -903,7 +717,7 @@ func (a *App) phoneStates(now int64) {
 	a.mu.Lock()
 	zoneLevel := map[string]string{}
 	for _, z := range a.live.last.Zones {
-		zoneLevel[z.ID] = z.Level
+		zoneLevel[z.ID] = a.live.zoneLevel(z)
 	}
 	for _, pr := range a.live.last.Phones {
 		m := a.live.meta[pr.ID]

@@ -105,6 +105,11 @@ func validAreas(in []protocol.Area, cfg detect.Config) ([]protocol.Area, error) 
 			poly[j] = protocol.Point{r2(x), r2(y)}
 		}
 		ar.Poly = poly
+		rules, err := validRules(ar.ID, ar.Rules)
+		if err != nil {
+			return nil, err
+		}
+		ar.Rules = rules
 		out = append(out, ar)
 	}
 	return out, nil
@@ -114,6 +119,7 @@ func cloneAreas(in []protocol.Area) []protocol.Area {
 	out := make([]protocol.Area, len(in))
 	for i, ar := range in {
 		ar.Poly = append([]protocol.Point(nil), ar.Poly...)
+		ar.Rules = cloneRules(ar.Rules)
 		out[i] = ar
 	}
 	return out
@@ -145,6 +151,10 @@ func (a *App) lightLevels(levels map[string]string, lights []string) {
 			continue
 		}
 		lv, ok := levels[ar.ID]
+		if ar.Rules != nil && ar.Rules.Notify != nil && !on(ar.Rules.Notify.Light) {
+			// Staff turned this area's light off: it counts as calm there.
+			lv, ok = protocol.LevelCalm, true
+		}
 		if !ok {
 			continue
 		}
@@ -187,6 +197,7 @@ func (a *App) SetVenue(v protocol.Venue) (protocol.Venue, error) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	v.Floorplan = a.plan != nil // the server owns this flag: upload or delete the image to change it
 	if err := a.save(venueFile, v); err != nil {
 		return protocol.Venue{}, err
 	}
@@ -210,6 +221,15 @@ func validVenue(v *protocol.Venue) error {
 	if !(v.W >= 1 && v.H >= 1 && v.W <= maxVenueMetres && v.H <= maxVenueMetres) {
 		return fmt.Errorf("venue w and h must be between 1 and %d m", maxVenueMetres)
 	}
+	v.Template = strings.TrimSpace(v.Template)
+	if utf8.RuneCountInString(v.Template) > MaxTemplate {
+		return fmt.Errorf("template longer than %d characters", MaxTemplate)
+	}
+	l, err := validLayout(v.Layout, v.W, v.H)
+	if err != nil {
+		return err
+	}
+	v.Layout = l
 	if !v.Geo {
 		v.Lat, v.Lon, v.Bearing = 0, 0, 0
 		return nil

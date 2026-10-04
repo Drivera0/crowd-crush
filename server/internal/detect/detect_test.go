@@ -337,3 +337,46 @@ func lineZones(cfg Config, cols int) []ZoneDef {
 	}
 	return out
 }
+
+// TestNoPushZone: a zone with push detection off stays calm with score 0
+// while the same wave turns the zone next to it red.
+func TestNoPushZone(t *testing.T) {
+	cfg := DefaultConfig()
+	const n = 8
+	sc, err := sim.NewLayout("wave", n, 42, sim.LineLayout(1, n))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := New(cfg)
+	zones := lineZones(cfg, n)
+	zones[0].NoPush = true
+	d.SetZones(zones)
+	for i := 0; i < n; i++ {
+		x, y := sc.Pos(i)
+		d.SetPhone(fmt.Sprint(i), x, y)
+	}
+	const t0 = 1_700_000_000_000
+	evs := sc.Generate(t0, 45)
+	j, waves := 0, 0
+	var last Result
+	for now := int64(t0); now <= t0+45_000; now += 250 {
+		for j < len(evs) && evs[j].T <= now {
+			e := evs[j]
+			d.Add(fmt.Sprint(e.Phone), Sample{T: e.T, AX: e.AX, AY: e.AY, AZ: e.AZ, Rot: e.Rot})
+			j++
+		}
+		last = d.Step(now)
+		waves += len(last.Waves())
+		for _, ch := range last.Changes {
+			if ch.Zone == zones[0].ID {
+				t.Fatalf("no-push zone changed level: %+v", ch)
+			}
+		}
+		if z, _ := last.Zone(zones[0].ID); z.Score != 0 || z.Level != protocol.LevelCalm {
+			t.Fatalf("no-push zone %+v", z)
+		}
+	}
+	if b, _ := last.Zone(zones[1].ID); waves == 0 || b.Level != protocol.LevelRed {
+		t.Fatalf("control zone %s should go red on the wave (waves %d)", b.Level, waves)
+	}
+}

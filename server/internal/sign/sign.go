@@ -96,6 +96,22 @@ func (c *Client) Zones() []string {
 	return out
 }
 
+// Keys lists every board's key: "sign" for the worst-zone signs (once),
+// then the zone-light keys.
+func (c *Client) Keys() []string {
+	if !c.Enabled() {
+		return nil
+	}
+	var out []string
+	for _, t := range c.targets {
+		if t.zone == "" {
+			out = append(out, "sign")
+			break
+		}
+	}
+	return append(out, c.Zones()...)
+}
+
 // Status is what a board said when probed.
 type Status struct {
 	URL    string
@@ -119,6 +135,19 @@ type Pulse struct {
 		Scans   int64 `json:"scans"`
 		Age     int64 `json:"age"`
 	} `json:"ble"`
+	// Name is the board's Bluetooth beacon name (PULSE-A); MAC the short
+	// address suffix it reports.
+	Name  string `json:"name"`
+	MAC   string `json:"mac"`
+	Peers []Peer `json:"peers"`
+}
+
+// Peer is another Pulse board's beacon as this board hears it.
+type Peer struct {
+	Name string  `json:"name"`
+	RSSI int     `json:"rssi"`
+	Dist float64 `json:"dist"` // m, the board's log-distance estimate
+	Age  int64   `json:"age"`  // s since last heard
 }
 
 // probeClient has no timeout of its own; Probe's context bounds it.
@@ -160,7 +189,7 @@ func (t *target) probe(ctx context.Context) Status {
 	st.Online = true // any HTTP answer means the board is up
 	if resp.StatusCode == http.StatusOK {
 		var p Pulse
-		if json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&p) == nil && p.Kind != "" {
+		if json.NewDecoder(io.LimitReader(resp.Body, 16<<10)).Decode(&p) == nil && p.Kind != "" {
 			st.Pulse = &p
 		}
 	}
@@ -195,6 +224,23 @@ func (c *Client) Force(level, zone string) {
 	for _, t := range c.targets {
 		if t.zone == "" || t.zone == zone {
 			t.set(state{level, zone}, true)
+		}
+	}
+}
+
+// ForceAlert re-sends an alert's level even if it matches the last one:
+// to the worst-zone signs (labelled with zone) when toSign, and to the
+// zone light keyed light when light is not "".
+func (c *Client) ForceAlert(level, zone string, toSign bool, light string) {
+	if !c.Enabled() {
+		return
+	}
+	for _, t := range c.targets {
+		switch {
+		case t.zone == "" && toSign:
+			t.set(state{level, zone}, true)
+		case t.zone != "" && t.zone == light:
+			t.set(state{level, light}, true)
 		}
 	}
 }

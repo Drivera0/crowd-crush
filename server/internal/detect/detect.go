@@ -528,11 +528,16 @@ func (d *Detector) Step(now int64) Result {
 	for i, z := range d.zones {
 		t := tallies[i]
 		raw := 0.0
-		if net := math.Hypot(t.vx, t.vy); net > 0 {
+		if z.def.NoPush {
+			t = tally{}
+		} else if net := math.Hypot(t.vx, t.vy); net > 0 {
 			raw = net / float64(d.waveCapable(edges, t.edges, t.vx/net, t.vy/net, median(t.speeds)))
 		}
 		z.raw = raw
 		z.score += alpha * (raw - z.score)
+		if z.def.NoPush {
+			z.score = 0
+		}
 		if t.waves > 0 {
 			z.direction = dirName(t.vx, t.vy)
 			z.lagMs = t.lagSum / int64(t.waves)
