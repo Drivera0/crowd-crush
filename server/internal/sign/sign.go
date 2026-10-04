@@ -121,6 +121,9 @@ type Pulse struct {
 	} `json:"ble"`
 }
 
+// probeClient has no timeout of its own; Probe's context bounds it.
+var probeClient = &http.Client{}
+
 // Probe asks every board for GET /pulse, concurrently, within ctx.
 func (c *Client) Probe(ctx context.Context) []Status {
 	if !c.Enabled() {
@@ -146,7 +149,9 @@ func (t *target) probe(ctx context.Context) Status {
 		st.Err = err.Error()
 		return st
 	}
-	resp, err := t.http.Do(req)
+	// Status checks use the caller's deadline, not the 1 s alert-send timeout:
+	// the Uno R4 sign sometimes takes over a second to answer.
+	resp, err := probeClient.Do(req)
 	if err != nil {
 		st.Err = "not reachable"
 		return st
