@@ -215,7 +215,7 @@ func (a *App) simPreview(scenario string) (protocol.SimStatus, error) {
 		return protocol.SimStatus{}, err
 	}
 	st := w.Status()
-	st.Running, st.T, st.People, st.Phones, st.Participation, st.Action, st.Truth = false, 0, 0, 0, 0, "", nil
+	st.Running, st.T, st.People, st.Phones, st.Participation, st.Action, st.Truth, st.Gather = false, 0, 0, 0, 0, "", nil, nil
 	st.Scenarios = crowdsim.ScenarioInfos()
 	return st, nil
 }
