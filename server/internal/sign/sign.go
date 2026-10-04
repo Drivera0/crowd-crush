@@ -5,6 +5,10 @@
 // Arduino matrix sign); "A=http://…" shows only zone A (an ESP32 zone light):
 //
 //	SIGN_URL=http://192.168.4.20,A=http://192.168.4.21,B=http://192.168.4.22
+//
+// A board plugged into this computer by USB needs no Wi-Fi: "serial:auto",
+// "serial:/dev/cu.usbmodem1101" or "serial:COM7" (optionally "A=serial:…")
+// writes "L <level> <zone>" lines down the cable instead (serial.go).
 package sign
 
 import (
@@ -27,8 +31,9 @@ var retryDelay = 300 * time.Millisecond
 
 type target struct {
 	zone string // "" = follow the worst zone
-	base string
+	base string // HTTP base URL, or "serial:<port|auto>"
 	http *http.Client
+	ser  *serialLink // nil for HTTP targets
 
 	mu      sync.Mutex
 	last    string
@@ -53,6 +58,17 @@ func New(spec string) *Client {
 		if z, u, ok := strings.Cut(part, "="); ok && !strings.Contains(z, "/") {
 			t.zone, part = strings.ToUpper(strings.TrimSpace(z)), strings.TrimSpace(u)
 		}
+		if port, ok := cutPrefixFold(part, "serial:"); ok {
+			port = strings.TrimSpace(port)
+			if port == "" {
+				port = "auto"
+			}
+			t.base = "serial:" + port
+			t.ser = newSerialLink(port)
+			c.targets = append(c.targets, t)
+			go t.loop()
+			continue
+		}
 		if !strings.Contains(part, "://") {
 			part = "http://" + part
 		}
@@ -61,6 +77,13 @@ func New(spec string) *Client {
 		go t.loop()
 	}
 	return c
+}
+
+func cutPrefixFold(s, prefix string) (string, bool) {
+	if len(s) >= len(prefix) && strings.EqualFold(s[:len(prefix)], prefix) {
+		return s[len(prefix):], true
+	}
+	return s, false
 }
 
 // Enabled reports whether any sign is configured.
@@ -77,7 +100,11 @@ func (c *Client) Describe() string {
 		if t.zone != "" {
 			who = "zone " + t.zone
 		}
-		parts = append(parts, fmt.Sprintf("%s (%s)", t.base, who))
+		name := t.base
+		if t.ser != nil {
+			name = t.ser.describe()
+		}
+		parts = append(parts, fmt.Sprintf("%s (%s)", name, who))
 	}
 	return strings.Join(parts, ", ")
 }
@@ -118,7 +145,10 @@ type Status struct {
 	Zone   string // "" = follows the worst zone
 	Online bool
 	Err    string
-	// From GET /pulse, when the firmware has it (older sign firmware only
+	// Port is the serial port in use (serial targets only, e.g. serial:auto
+	// → /dev/cu.usbmodem1101).
+	Port string
+	// From GET /pulse (or the "S" reply over serial), when the firmware has it (older sign firmware only
 	// answers /level, which still counts as online).
 	Pulse *Pulse
 }
@@ -173,6 +203,10 @@ func (c *Client) Probe(ctx context.Context) []Status {
 
 func (t *target) probe(ctx context.Context) Status {
 	st := Status{URL: t.base, Zone: t.zone}
+	if t.ser != nil {
+		t.ser.probe(ctx, &st)
+		return st
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.base+"/pulse", nil)
 	if err != nil {
 		st.Err = err.Error()
@@ -248,6 +282,9 @@ func (c *Client) ForceAlert(level, zone string, toSign bool, light string) {
 // Check calls every sign once and reports the first failure.
 func (c *Client) Check(ctx context.Context) error {
 	for _, t := range c.targets {
+		if t.ser != nil {
+			t.ser.waitOpen(ctx) // the port opens in the background
+		}
 		if err := t.send(ctx, state{"calm", t.zone}); err != nil {
 			return fmt.Errorf("%s: %w", t.base, err)
 		}
@@ -308,6 +345,9 @@ func (t *target) loop() {
 }
 
 func (t *target) send(ctx context.Context, s state) error {
+	if t.ser != nil {
+		return t.ser.send(s)
+	}
 	u := fmt.Sprintf("%s/level?v=%s&zone=%s", t.base, url.QueryEscape(s.level), url.QueryEscape(s.zone))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {

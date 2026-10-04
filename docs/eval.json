@@ -1,0 +1,387 @@
+{
+  "generated": "2026-10-04T03:06:06Z",
+  "seeds": 20,
+  "rows": [
+    {
+      "scenario": "calm",
+      "layout": "line",
+      "expect": "calm",
+      "runs": 20,
+      "red": 0,
+      "yellow": 0,
+      "calm": 20
+    },
+    {
+      "scenario": "calm",
+      "layout": "crowd",
+      "expect": "calm",
+      "runs": 20,
+      "red": 0,
+      "yellow": 9,
+      "calm": 11,
+      "note": "density yellow in 9"
+    },
+    {
+      "scenario": "walk",
+      "layout": "line",
+      "expect": "calm",
+      "runs": 20,
+      "red": 0,
+      "yellow": 0,
+      "calm": 20
+    },
+    {
+      "scenario": "walk",
+      "layout": "crowd",
+      "expect": "calm",
+      "runs": 20,
+      "red": 0,
+      "yellow": 9,
+      "calm": 11,
+      "note": "density yellow in 9"
+    },
+    {
+      "scenario": "dance",
+      "layout": "line",
+      "expect": "calm",
+      "runs": 20,
+      "red": 0,
+      "yellow": 0,
+      "calm": 20
+    },
+    {
+      "scenario": "dance",
+      "layout": "crowd",
+      "expect": "calm",
+      "runs": 20,
+      "red": 0,
+      "yellow": 9,
+      "calm": 11,
+      "note": "density yellow in 9"
+    },
+    {
+      "scenario": "handle",
+      "layout": "line",
+      "expect": "calm",
+      "runs": 20,
+      "red": 0,
+      "yellow": 0,
+      "calm": 20
+    },
+    {
+      "scenario": "handle",
+      "layout": "crowd",
+      "expect": "calm",
+      "runs": 20,
+      "red": 0,
+      "yellow": 9,
+      "calm": 11,
+      "note": "density yellow in 9"
+    },
+    {
+      "scenario": "shove",
+      "layout": "line",
+      "expect": "yellow-ok",
+      "runs": 20,
+      "red": 0,
+      "yellow": 20,
+      "calm": 0
+    },
+    {
+      "scenario": "shove",
+      "layout": "crowd",
+      "expect": "yellow-ok",
+      "runs": 20,
+      "red": 0,
+      "yellow": 13,
+      "calm": 7,
+      "note": "density yellow in 9"
+    },
+    {
+      "scenario": "wave",
+      "layout": "line",
+      "expect": "red",
+      "runs": 20,
+      "red": 20,
+      "yellow": 0,
+      "calm": 0,
+      "medianRedS": 24.3
+    },
+    {
+      "scenario": "wave",
+      "layout": "crowd",
+      "expect": "red",
+      "runs": 20,
+      "red": 17,
+      "yellow": 3,
+      "calm": 0,
+      "medianRedS": 34.5,
+      "note": "missed 3/20; density yellow in 9"
+    },
+    {
+      "scenario": "sway",
+      "layout": "line",
+      "expect": "calm",
+      "runs": 20,
+      "red": 0,
+      "yellow": 0,
+      "calm": 20
+    },
+    {
+      "scenario": "sway",
+      "layout": "crowd",
+      "expect": "calm",
+      "runs": 20,
+      "red": 0,
+      "yellow": 9,
+      "calm": 11,
+      "note": "density yellow in 9"
+    },
+    {
+      "scenario": "sway-slow",
+      "layout": "line",
+      "expect": "calm",
+      "runs": 20,
+      "red": 0,
+      "yellow": 0,
+      "calm": 20
+    },
+    {
+      "scenario": "sway-slow",
+      "layout": "crowd",
+      "expect": "calm",
+      "runs": 20,
+      "red": 0,
+      "yellow": 9,
+      "calm": 11,
+      "note": "density yellow in 9"
+    },
+    {
+      "scenario": "mexican",
+      "layout": "line",
+      "expect": "calm",
+      "runs": 20,
+      "red": 0,
+      "yellow": 0,
+      "calm": 20
+    },
+    {
+      "scenario": "mexican",
+      "layout": "crowd",
+      "expect": "calm",
+      "runs": 20,
+      "red": 0,
+      "yellow": 9,
+      "calm": 11,
+      "note": "density yellow in 9"
+    },
+    {
+      "scenario": "walkpast",
+      "layout": "line",
+      "expect": "yellow-ok",
+      "runs": 20,
+      "red": 0,
+      "yellow": 20,
+      "calm": 0
+    },
+    {
+      "scenario": "walkpast",
+      "layout": "crowd",
+      "expect": "yellow-ok",
+      "runs": 20,
+      "red": 0,
+      "yellow": 10,
+      "calm": 10,
+      "note": "density yellow in 9"
+    },
+    {
+      "scenario": "procession",
+      "layout": "line",
+      "expect": "yellow-ok",
+      "runs": 20,
+      "red": 0,
+      "yellow": 0,
+      "calm": 20
+    },
+    {
+      "scenario": "procession",
+      "layout": "crowd",
+      "expect": "yellow-ok",
+      "runs": 20,
+      "red": 0,
+      "yellow": 9,
+      "calm": 11,
+      "note": "density yellow in 9"
+    },
+    {
+      "scenario": "march",
+      "layout": "line",
+      "expect": "calm",
+      "runs": 20,
+      "red": 0,
+      "yellow": 0,
+      "calm": 20
+    },
+    {
+      "scenario": "march",
+      "layout": "crowd",
+      "expect": "calm",
+      "runs": 20,
+      "red": 0,
+      "yellow": 9,
+      "calm": 11,
+      "note": "density yellow in 9"
+    },
+    {
+      "scenario": "pocket",
+      "layout": "line",
+      "expect": "calm",
+      "runs": 20,
+      "red": 0,
+      "yellow": 0,
+      "calm": 20
+    },
+    {
+      "scenario": "pocket",
+      "layout": "crowd",
+      "expect": "calm",
+      "runs": 20,
+      "red": 0,
+      "yellow": 9,
+      "calm": 11,
+      "note": "density yellow in 9"
+    },
+    {
+      "scenario": "bump",
+      "layout": "line",
+      "expect": "calm",
+      "runs": 20,
+      "red": 0,
+      "yellow": 0,
+      "calm": 20
+    },
+    {
+      "scenario": "bump",
+      "layout": "crowd",
+      "expect": "calm",
+      "runs": 20,
+      "red": 0,
+      "yellow": 9,
+      "calm": 11,
+      "note": "density yellow in 9"
+    },
+    {
+      "scenario": "jump-stagger",
+      "layout": "line",
+      "expect": "calm",
+      "runs": 20,
+      "red": 0,
+      "yellow": 0,
+      "calm": 20
+    },
+    {
+      "scenario": "jump-stagger",
+      "layout": "crowd",
+      "expect": "calm",
+      "runs": 20,
+      "red": 0,
+      "yellow": 9,
+      "calm": 11,
+      "note": "density yellow in 9"
+    },
+    {
+      "scenario": "wave-jump",
+      "layout": "line",
+      "expect": "red",
+      "runs": 20,
+      "red": 20,
+      "yellow": 0,
+      "calm": 0,
+      "medianRedS": 50.1
+    },
+    {
+      "scenario": "wave-jump",
+      "layout": "crowd",
+      "expect": "red",
+      "runs": 20,
+      "red": 1,
+      "yellow": 19,
+      "calm": 0,
+      "medianRedS": 66.8,
+      "note": "missed 19/20; density yellow in 9"
+    },
+    {
+      "scenario": "gather",
+      "layout": "crowd",
+      "expect": "red",
+      "runs": 20,
+      "red": 20,
+      "yellow": 0,
+      "calm": 0,
+      "medianRedS": 31.5,
+      "note": "red from crowd density, not waves; 40 phones"
+    },
+    {
+      "scenario": "calm",
+      "layout": "sim",
+      "expect": "calm",
+      "runs": 20,
+      "red": 0,
+      "yellow": 4,
+      "calm": 16,
+      "note": "truth never dangerous in 20/20; median peak 2.2/m², 0 N/m"
+    },
+    {
+      "scenario": "attract",
+      "layout": "sim",
+      "expect": "yellow-ok",
+      "runs": 20,
+      "red": 0,
+      "yellow": 20,
+      "calm": 0,
+      "note": "truth never dangerous in 20/20; median peak 2.5/m², 0 N/m"
+    },
+    {
+      "scenario": "calm→surge",
+      "layout": "sim",
+      "expect": "red",
+      "runs": 20,
+      "red": 20,
+      "yellow": 0,
+      "calm": 0,
+      "medianRedS": 34.8,
+      "medianLeadS": -2.3,
+      "note": "red from crowd density, not waves; median peak 6.0/m², 4523 N/m"
+    },
+    {
+      "scenario": "stage→surge",
+      "layout": "sim",
+      "expect": "red",
+      "runs": 20,
+      "red": 20,
+      "yellow": 0,
+      "calm": 0,
+      "medianRedS": 14.3,
+      "medianLeadS": 16,
+      "note": "red from crowd density, not waves; median peak 6.0/m², 4794 N/m"
+    },
+    {
+      "scenario": "stage→surge 0.3",
+      "layout": "sim",
+      "expect": "red",
+      "runs": 20,
+      "red": 20,
+      "yellow": 0,
+      "calm": 0,
+      "medianRedS": 14.3,
+      "medianLeadS": 16.4,
+      "note": "red from crowd density, not waves; median peak 5.4/m², 2364 N/m"
+    }
+  ],
+  "summary": {
+    "falseAlarms": 0,
+    "lookAlikeRuns": 600,
+    "missed": 22,
+    "positiveRuns": 160
+  }
+}
