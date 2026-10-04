@@ -55,13 +55,14 @@
           <a href="#hardware" data-nav="hardware">
             <svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2" /><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4" /></svg>Hardware
           </a>
-          <span class="nav-label">Test</span>
+          <span class="nav-label">Rehearse</span>
           <a href="#sim" data-nav="sim">
             <svg viewBox="0 0 24 24"><circle cx="7" cy="8" r="2" /><circle cx="15" cy="6" r="2" /><circle cx="12" cy="14" r="2" /><circle cx="18" cy="15" r="2" /><circle cx="6" cy="17" r="2" /></svg>Simulation
           </a>
           <a href="#drill" data-nav="drill">
             <svg viewBox="0 0 24 24"><path d="M6 9a6 6 0 0112 0v4l2 3H4l2-3z" /><path d="M10 19a2 2 0 004 0" /></svg>Alert drill
           </a>
+          <span class="nav-label">Console</span>
           <a href="#settings" data-nav="settings">
             <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 00.3 1.8l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.8-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1.1-1.5 1.7 1.7 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.8 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.5-1.1 1.7 1.7 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.8.3H9a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.8V9a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z" /></svg>Settings
           </a>
@@ -249,7 +250,7 @@
 
                 <div class="card brief-panel" id="briefPanel">
                   <div class="card-head">
-                    <h3>AI briefing</h3>
+                    <h3>Alerts &amp; briefing</h3>
                     <span id="briefMeta" class="meta"></span>
                   </div>
                   <div id="alertCards" class="alert-cards"></div>
@@ -262,14 +263,14 @@
                     <h3>Incident timeline</h3>
                     <div class="log-tools">
                       <label class="small muted"><input id="logHideDrills" type="checkbox" /> Hide drills</label>
-                      <button id="logClear" class="sm ghost" data-tip="Start the timeline fresh for this event (nothing is deleted on the server)">Clear</button>
+                      <button id="logClear" class="sm ghost" data-tip="Remove resolved incidents and drills from the timeline, on every console. Open alerts stay.">Clear</button>
                     </div>
                   </div>
                   <ol id="log"></ol>
                   <p id="logEmpty" class="muted small">No incidents for this event yet.</p>
                 </div>
 
-                <div class="card ask-card">
+                <div class="card ask-card" hidden>
                   <div class="card-head"><h3>Ask the AI</h3><span class="meta">about the last 10 minutes</span></div>
                   <form id="askForm" class="row">
                     <input id="askInput" placeholder="What happened in the last 10 minutes?" maxlength="300" />
@@ -279,7 +280,7 @@
                 </div>
 
                 <details class="card demo-card" id="demoCard">
-                  <summary><h3>Demo with a few phones</h3><span class="meta">try it at a table</span></summary>
+                  <summary><h3>Demo &amp; diagnostics</h3><span class="meta">for a table demo</span></summary>
                   <label class="demo-check">
                     <input id="demoOn" type="checkbox" />
                     <span><b>Demo spot</b><small>Phones that join line up in a row 0.6 m apart, in the order they join. No GPS, no tapping.</small></span>
@@ -294,7 +295,7 @@
                     <h4>Phones inside a simulated crowd</h4>
                     <p class="muted small">Starts a virtual crowd and packs it around the real phones. Their own screens turn red and point the way out, marked as a drill.</p>
                     <div class="row">
-                      <button class="primary surge-btn">🌊 Surge around the phones</button>
+                      <a class="sm" href="#sim">🌊 Surge around the phones (on the Simulation page)</a>
                       <button id="surgeStop" class="ghost" hidden>■ Stop simulation</button>
                     </div>
                     <p id="demoMsg" class="muted small" aria-live="polite"></p>
@@ -325,10 +326,7 @@
                     <label>Width <input id="vW" type="number" min="2" max="5000" step="1" /> m</label>
                     <label>Depth <input id="vH" type="number" min="2" max="5000" step="1" /> m</label>
                   </div>
-                  <div class="row venue-row">
-                    <label>Which way is the stage? <input id="vBearing" type="number" min="0" max="359" step="1" /> compass °</label>
-                  </div>
-                  <div class="row"><button id="vSave" class="primary">Save size</button></div>
+                  <div class="row"><button id="vSave" class="primary">Save custom size</button></div>
                 </div>
 
                 <div class="card">
@@ -350,7 +348,11 @@
 
                 <div class="card">
                   <div class="card-head"><h3>GPS</h3></div>
-                  <p class="muted small">Anchor the map to GPS so phones place themselves. Without an anchor, attendees tap their spot on the map.</p>
+                  <p class="muted small">Anchor the map to GPS so phones place themselves. Without an anchor, attendees tap their spot on the map. Indoors GPS is often 5–25 m off, so tapping is usually better.</p>
+                  <div class="row venue-row">
+                    <label>Map top faces <input id="vBearing" type="number" min="0" max="359" step="1" /> ° from north</label>
+                  </div>
+                  <p class="muted small">The compass bearing of the stage side (the top of the map). Used for GPS placement and the “move this way” arrow on phones.</p>
                   <div class="row">
                     <button id="vAnchor">📍 Centre map on this laptop</button>
                     <button id="vClearGeo" class="ghost sm">Turn GPS off</button>
@@ -376,7 +378,7 @@
                     <ul>
                       <li>An area is one spot you want watched on its own: a barrier, a gate, the stage front.</li>
                       <li>Pulse counts the phones inside and raises an alert when a crowd push travels through it, or when it gets more crowded than you allow.</li>
-                      <li><b>Alert early</b> uses lower thresholds, for spots where trouble starts fast. <b>Standard</b> suits open floor.</li>
+                      <li>Priority <b>High risk</b> uses lower thresholds so it alerts sooner, for spots where trouble starts fast. <b>Standard</b> suits open floor.</li>
                       <li>Each area can light its own zone light, show on the signs and give staff its own message.</li>
                     </ul>
                   </details>
@@ -406,7 +408,7 @@
                   </div>
                   <p class="muted small">Drag a board's marker on the map to where it really is. Boards with Bluetooth hear each other and estimate the distance between them.</p>
                   <ul id="hw" class="hw"></ul>
-                  <p id="hwEmpty" class="muted small">No signs or zone lights are connected. They are optional: alerts still show on this console and are read aloud. To add boards, list them in SIGN_URL in the server’s .env file, then restart Pulse.</p>
+                  <p id="hwEmpty" class="muted small">No signs or zone lights are connected. They are optional: alerts still show on this console and are read aloud. To add boards, ask your technician to list them in the server’s SIGN_URL setting and restart Pulse.</p>
                 </div>
               </aside>
             </div>
@@ -423,36 +425,29 @@
                     <p class="muted small">A virtual crowd to rehearse with. Some people carry a phone running Pulse; Pulse only sees those phones, just like on the night.</p>
                     <details class="explainer how-sim">
                       <summary>How the simulation works</summary>
-                      <p class="small">Simulated people walk, keep their distance and push each other like real crowds, using the Social Force Model (Helbing et&nbsp;al.).</p>
+                      <p class="small">Each simulated person walks toward where they want to be and keeps a little personal space. When people are packed in and still push, bodies press on bodies and that pressure builds up: a crush comes out of the physics, nothing paints it on. Pulse only sees the phones, as on the night.</p>
+                      <p class="small muted">The model is the Social Force Model (Helbing &amp; Molnár 1995; Helbing, Farkas &amp; Vicsek 2000), calibrated against measured walking speeds and door flows.</p>
                     </details>
+                    <h4 class="sim-h">Where</h4>
+                    <div id="simScenarios" class="sim-scenarios" role="radiogroup" aria-label="Scenario"></div>
                     <div class="sim-sliders">
-                      <label>People <b id="simPeopleV">250</b><input id="simPeople" type="range" min="40" max="500" step="10" value="250" /></label>
+                      <label>People <b id="simPeopleV">250</b><input id="simPeople" type="range" min="10" max="500" step="5" value="250" /></label>
                       <label>With the app <b id="simPartV">60%</b><input id="simPart" type="range" min="10" max="100" step="5" value="60" /></label>
                     </div>
                     <p id="simNow" class="sim-now" hidden></p>
                     <div class="row">
                       <button id="simStart" class="primary">▶ Start simulation</button>
-                      <button id="simRestart" class="primary" hidden data-tip="The sliders differ from the running crowd">↻ Restart to apply</button>
+                      <button id="simRestart" class="primary" hidden data-tip="The settings differ from the running crowd">↻ Restart to apply</button>
                       <button id="simStop" class="ghost" hidden>■ Stop</button>
-                    </div>
-                    <div class="row">
-                      <button class="surge-btn" data-tip="Real phones stand in the virtual crowd. This packs the crowd around them (starts the simulation if needed)">🌊 Surge around the real phones</button>
                     </div>
                     <div id="simControls" class="sim-controls" hidden>
                       <h4>Steer the crowd</h4>
-                      <div class="sim-actions">
-                        <button data-sim="calm" data-tip="People stand and watch the show">😌 Calm</button>
-                        <button data-sim="dance" data-tip="Everyone dances to the beat: must NOT raise a push alarm">💃 Dance</button>
-                        <button data-sim="intermission" data-tip="Many head for the bar and toilets at once">🍺 Intermission</button>
-                        <button data-sim="stage" data-tip="Everyone presses toward the stage">🎤 To the stage</button>
-                        <button data-sim="surge" data-tip="A surge toward the stage: the classic crush">🌊 Surge</button>
-                        <button data-sim="attract" data-tip="Click the map: a group forms there">📍 Gather here…</button>
-                        <button data-sim="shove" data-tip="Drag on the map: a push in that direction">👉 Shove…</button>
-                        <button data-sim="spawn" data-tip="Click the map: 20 more people arrive">➕ Add people…</button>
-                        <button data-sim="disperse" data-tip="Everyone heads for the open exits">🚪 Evacuate</button>
-                      </div>
-                      <label class="sim-strength">Surge strength <input id="simStrength" type="range" min="10" max="100" step="5" value="70" /></label>
+                      <div id="simActions" class="sim-actions"></div>
+                      <label class="sim-strength"><span id="simStrengthLabel">Strength</span> <input id="simStrength" type="range" min="10" max="100" step="5" value="70" /></label>
                       <div id="simExits" class="sim-exits"></div>
+                    </div>
+                    <div class="row sim-phones-row">
+                      <button class="surge-btn sm ghost" data-tip="Real phones stand in the virtual crowd. This packs the crowd around them (starts a concert simulation if needed)">🌊 Surge around the real phones</button>
                     </div>
                   </div>
                 </div>
@@ -474,7 +469,7 @@
                   <div id="simTruth" class="sim-truth"><p class="muted small">Start a simulation to compare what really happens in the crowd with what Pulse detects.</p></div>
                 </div>
                 <details class="card saved-runs" id="savedRuns">
-                  <summary><h3>Saved runs</h3><span class="meta" id="savedRunsMeta">replay or record</span></summary>
+                  <summary><h3>Saved runs</h3><span class="meta" id="savedRunsMeta">replay or record</span><span class="saved-runs-hint muted small">Play a recorded run through Pulse, or record this one. Open ▾</span></summary>
                   <p class="muted small">A saved run is a recording of phones' readings. Playing one feeds it through the same detector as live phones: a rehearsal, and a fallback for the demo if phones can't connect.</p>
                   <div class="row">
                     <select id="recSelect" title="Saved run to play" aria-label="Saved run to play"></select>
@@ -587,6 +582,24 @@
           <section class="page" data-page="settings">
             <div class="settings">
               <div class="card">
+                <div class="card-head"><h3>This console</h3><span class="meta">saved in this browser only</span></div>
+                <div class="set-grid">
+                  <label class="set-row"><span>Event name<small>Shown on the console and in staff briefings.</small></span><input id="setEvent" maxlength="48" /></label>
+                  <label class="set-row"><span>Your name<small>Written into the incident log when you acknowledge or resolve an alert.</small></span><input id="setOperator" maxlength="40" placeholder="e.g. Maya, safety lead" /></label>
+                  <div class="set-row"><span>Spoken alerts<small>Read each briefing aloud on this computer.</small></span><button id="setSound" class="sm">Turn on</button></div>
+                  <div class="set-row"><span>Theme<small>Light suits a bright room, dark a control room.</small></span><button id="setTheme" class="sm">Switch to dark</button></div>
+                </div>
+                <p id="setSaved" class="small ok-text" aria-live="polite"></p>
+              </div>
+              <div class="card">
+                <div class="card-head"><h3>Escalation</h3><span class="meta">applies to every console</span></div>
+                <div class="set-grid">
+                  <label class="set-row"><span>Re-announce unanswered alerts<small>Turn off for a table demo or rehearsal.</small></span><input id="escOn" type="checkbox" /></label>
+                  <label class="set-row"><span>Wait before re-announcing<small>Seconds a red alert can go unacknowledged (10–3600).</small></span><input id="escAfter" type="number" min="10" max="3600" step="5" style="width:7em" /></label>
+                </div>
+                <p id="escNote" class="small muted" aria-live="polite"></p>
+              </div>
+              <div class="card">
                 <div class="card-head"><h3>Privacy</h3></div>
                 <p class="small">Attendees share a random session ID, their position on the venue map and motion summaries. GPS is converted to venue metres on arrival and never stored. No names, contacts, audio or photos.</p>
               </div>
@@ -635,7 +648,7 @@
           <div id="legend">
             <span id="locating" class="locating" hidden data-tip="Connected, but with no position yet (waiting for a usable GPS fix, or for a tap on the phone's map). Not counted anywhere until placed."></span>
             <span id="meshCount" class="mesh-count" hidden data-tip="Phones that sent a reading in the last 2 seconds, and how many of those reach the server through another phone instead of their own connection."></span>
-            <label id="meshLayerWrap" class="mesh-layer" hidden data-tip="Direct phone-to-phone links (WebRTC). Packets travel along a link while one phone's data is being relayed through another."><input id="meshLayer" type="checkbox" checked /><i class="lg mesh-lg"></i>Mesh</label>
+            <label id="meshLayerWrap" class="mesh-layer" hidden data-tip="Show direct phone-to-phone links. Dots travel along a link while one phone's data is being passed on through another."><input id="meshLayer" type="checkbox" checked /><i class="lg mesh-lg"></i>Phone links</label>
             <span class="lg-crush" data-tip="A dot's fill is how packed in that person is: pale = standing free, amber = getting tight (2 people per m² and up), red = dangerously packed (4 per m² and up), deep red = crushed. It does not depend on movement: a crowd that has stopped moving is the most dangerous."><i class="ramp"></i>Free → tight → crushed</span>
             <span data-tip="The ring round a dot is the phone's motion. Green: streaming, standing still (only shown while it is not packed in)."><i class="lg ring ok"></i>Still</span>
             <span data-tip="Yellow ring: sustained side-to-side sway"><i class="lg ring swaying"></i>Swaying</span>
@@ -694,7 +707,7 @@
             </div>
             <p id="dExplain" class="d-explain"></p>
 
-            <h4>Live telemetry · last 30 s</h4>
+            <h4>Motion · last 30 s</h4>
             <div class="d-charts">
               <div class="d-chart"><div class="dc-head"><span>Side to side</span><b id="vX">–</b></div><canvas id="chX"></canvas></div>
               <div class="d-chart"><div class="dc-head"><span>Forward / back</span><b id="vZ">–</b></div><canvas id="chZ"></canvas></div>
@@ -710,24 +723,29 @@
             <div class="meter"><div id="dSwayBar" class="meter-fill"></div><div class="meter-th" style="left: 25%"></div></div>
             <div class="meter-cap"><span id="dSway">0.00 m/s²</span><span>threshold 0.25</span></div>
 
-            <h4>Connection</h4>
+            <h4>Where and when</h4>
             <dl class="d-grid">
               <dt>Position</dt><dd id="dSpot">–</dd>
               <dt>Located by</dt><dd id="dSrc">–</dd>
-              <dt>Detector zone</dt><dd id="dZone">–</dd>
+              <dt>Zone</dt><dd id="dZone">–</dd>
               <dt>Joined</dt><dd id="dJoined">–</dd>
-              <dt>Readings received</dt><dd id="dMsgs">–</dd>
-              <dt>Round trip</dt><dd id="dRtt">–</dd>
-              <dt>Clock offset</dt><dd id="dOffset">–</dd>
               <dt>Last reading</dt><dd id="dAge">–</dd>
-              <dt>Neighbours</dt><dd id="dNeigh">–</dd>
-              <dt>Mesh</dt><dd id="dMesh">–</dd>
-              <dt>Mesh data</dt><dd id="dMeshData">–</dd>
-              <dt>Mesh position</dt><dd id="dMeshPos">–</dd>
             </dl>
-            <dl class="d-grid d-jam">
-              <dt>Lost-signal demo</dt><dd><button id="dJam" class="sm" hidden>Jam connection</button></dd>
-            </dl>
+            <details class="d-tech">
+              <summary>Technical details</summary>
+              <dl class="d-grid">
+                <dt>Readings received</dt><dd id="dMsgs">–</dd>
+                <dt>Round trip</dt><dd id="dRtt">–</dd>
+                <dt>Clock offset</dt><dd id="dOffset">–</dd>
+                <dt>Neighbours compared</dt><dd id="dNeigh">–</dd>
+                <dt>Phone-to-phone route</dt><dd id="dMesh">–</dd>
+                <dt>Phone-to-phone data</dt><dd id="dMeshData">–</dd>
+                <dt>Position from neighbours</dt><dd id="dMeshPos">–</dd>
+              </dl>
+              <dl class="d-grid d-jam">
+                <dt>Lost-signal demo</dt><dd><button id="dJam" class="sm" hidden>Jam connection</button></dd>
+              </dl>
+            </details>
             <p class="d-privacy">
               <svg viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z" /></svg>
               Collected: a random session ID, the attendee's spot on the venue map, and 10 motion summaries a second. GPS is turned into venue metres and never stored. No name, contacts, audio or photos.

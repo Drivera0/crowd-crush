@@ -167,6 +167,9 @@ type PhoneState struct {
 	// Sim: this state comes from the crowd simulation running around the
 	// phone (a drill), not from the real crowd.
 	Sim bool `json:"sim,omitempty"`
+	// Row: where this phone stands in the demo spot's row (join.go), so the
+	// person can stand in that order at the table.
+	Row *DemoRow `json:"row,omitempty"`
 }
 
 // Move is personal guidance: a unit vector in venue coordinates (x right,
@@ -215,6 +218,9 @@ type Node struct {
 	// GPS fix, not lined up at the demo spot). x, y are 0 and mean nothing;
 	// like an outside phone it counts toward no zone, cluster or neighbour.
 	Unplaced bool `json:"unplaced,omitempty"`
+	// Slot: its place in the demo spot's row (1 = first), while the demo
+	// spot is on and the phone stands where the server lined it up.
+	Slot int `json:"slot,omitempty"`
 	// The position estimator (locate.go). With it on, X, Y are its
 	// estimate and Acc its uncertainty (the 68 % radius in metres; 0 = as
 	// good as placed by hand). Raw: where the phone would be shown without
@@ -315,6 +321,57 @@ type Hardware struct {
 	Y      *float64 `json:"y,omitempty"`
 	Beacon string   `json:"beacon,omitempty"` // Bluetooth beacon name, e.g. PULSE-A
 	Peers  []Peer   `json:"peers,omitempty"`  // other Pulse boards this one hears
+	// Link is how the server reaches the board right now: "usb" (serial
+	// cable) or "wifi" (HTTP); "" while offline. Port is the serial port.
+	Link string `json:"link,omitempty"`
+	Port string `json:"port,omitempty"`
+	// FW is the firmware build id the board reports ("1a2b3c4 2026-10-04",
+	// "dev" for a hand-made build, "" for firmware older than build ids);
+	// FWWant the hash of the sketch in the server's checkout; FWOld = they
+	// differ (reflash with scripts/boards.sh flash).
+	FW     string `json:"fw,omitempty"`
+	FWWant string `json:"fwWant,omitempty"`
+	FWOld  bool   `json:"fwOld,omitempty"`
+	// WiFi: the board has joined a network (nil = it didn't say); SSID the
+	// network it is on or trying; IP its address there.
+	WiFi *bool  `json:"wifi,omitempty"`
+	SSID string `json:"ssid,omitempty"`
+	IP   string `json:"ip,omitempty"`
+}
+
+// BoardTest is one board's result in POST /api/hardware/test: the server
+// showed a level on it for a second and asked it what it shows.
+type BoardTest struct {
+	Key  string `json:"key"`  // "sign" or the zone-light letter
+	Name string `json:"name"` // "Sign", "Zone light A"
+	URL  string `json:"url"`
+	Link string `json:"link,omitempty"` // usb | wifi
+	Port string `json:"port,omitempty"`
+	// Sent: the board took the command. Confirmed: it then reported the
+	// test level back.
+	Sent      bool   `json:"sent"`
+	Confirmed bool   `json:"confirmed"`
+	Level     string `json:"level,omitempty"` // what it reported
+	FW        string `json:"fw,omitempty"`
+	FWOld     bool   `json:"fwOld,omitempty"`
+	Error     string `json:"error,omitempty"`
+	Ms        int64  `json:"ms"`
+}
+
+// TableDemo is POST /api/hardware/table's answer: the boards and this
+// laptop placed in a row, the demo spot beside them, and what each zone
+// light now shows.
+type TableDemo struct {
+	Hardware []Hardware   `json:"hardware"`
+	Demo     DemoSpot     `json:"demo"`
+	Lights   []TableLight `json:"lights"`
+	Notes    []string     `json:"notes,omitempty"`
+}
+
+// TableLight says what a zone light shows after the table-demo setup.
+type TableLight struct {
+	Key   string `json:"key"`
+	Shows string `json:"shows"` // zone or area name; "" = nothing
 }
 
 // Peer is another Pulse board a board hears over Bluetooth.
@@ -421,6 +478,20 @@ type Wave struct {
 	// Motion: the pair was found by motion (GPS-placed phones, positions
 	// only good to metres), not by distance on the map.
 	Motion bool `json:"motion,omitempty"`
+	// Pair (table demo only): a push between two phones with no third in
+	// range, so no chain: yellow at most, its nodes are not "wave".
+	Pair bool `json:"pair,omitempty"`
+}
+
+// Together is a group of phones moving as one (table demo only): matching,
+// irregular horizontal motion at a small steady lag, held for seconds. The
+// signature of people pressed together being moved, or of people rocking
+// together by choice: shown as yellow at most, never an alarm by itself.
+type Together struct {
+	Members []string `json:"members"`
+	LagMs   int64    `json:"lagMs"` // largest neighbour lag in the group
+	Corr    float64  `json:"corr"`  // weakest neighbour match
+	Since   int64    `json:"since"` // when it started (server ms)
 }
 
 type Stats struct {
@@ -479,6 +550,10 @@ type Snapshot struct {
 	// Mesh: the phone-to-phone links and how each phone reaches the server
 	// (mesh.go); absent in a replay.
 	Mesh *MeshFrame `json:"mesh,omitempty"`
+	// Table: the table demo profile is on (the demo spot is on; live
+	// only), and Together its groups of phones moving as one.
+	Table    bool       `json:"table,omitempty"`
+	Together []Together `json:"together,omitempty"`
 }
 
 // Status kinds: what makes the worst place the worst.
@@ -540,6 +615,10 @@ type Alert struct {
 	// leave the log when it stops, restarts or is replaced (the dashboards
 	// get the new log as an alerts message).
 	Source string `json:"source,omitempty"`
+	// Cause (table demo profile only, wave alerts below red): what raised
+	// it, "pair" (a push between two phones) or "together" (moving as
+	// one). Absent for a crowd push.
+	Cause string `json:"cause,omitempty"`
 }
 
 // JoinInfo is GET /api/join: the URL phones should open (the QR code) and
@@ -548,6 +627,21 @@ type Alert struct {
 type JoinInfo struct {
 	URL       string `json:"url"`
 	Reachable string `json:"reachable"` // public | lan | local
+	// The rest is additive (join.go). Secure: https (motion sensors need it).
+	Secure bool `json:"secure"`
+	// Source: where the URL came from: settings (PUT /api/join) | env
+	// (PUBLIC_URL / -public-url) | tunnel (a running Cloudflare quick
+	// tunnel) | request (the address the dashboard was opened on).
+	Source string `json:"source"`
+	// Display: the URL without https:// and the trailing slash, to print
+	// under the QR code.
+	Display string `json:"display"`
+	// Problem: why phones can't use this URL ("" = none known).
+	Problem string `json:"problem,omitempty"`
+	// What each source holds right now, for the settings form.
+	Override string `json:"override,omitempty"`
+	Env      string `json:"env,omitempty"`
+	Tunnel   string `json:"tunnel,omitempty"`
 }
 
 // Alerts is sent to a dashboard when it connects: the recent alert log.
@@ -608,12 +702,14 @@ type NodeDetail struct {
 // ---- Crowd simulation (mode "sim") ----
 
 // SimFrame is the snapshot's sim field while mode is "sim": every simulated
-// person as [x, y, pressure N/m, hasPhone 0|1, density /m²] (x, y to the
-// centimetre, pressure in whole N/m, density = people within 1 m ÷ the open
-// part of that disc, to one decimal), the sim time (s since start) and the
-// last behaviour action.
+// person as [x, y, pressure N/m, hasPhone 0|1, density /m², heading °,
+// state] (x, y to the centimetre, pressure in whole N/m, density = people
+// within 1 m ÷ the open part of that disc, to one decimal, heading = where
+// the body faces in whole degrees, 0 = +x, clockwise since y points down,
+// state 0 standing, 1 walking, 2 seated, 3 queueing, 4 pushing), the sim
+// time (s since start) and the last behaviour action.
 type SimFrame struct {
-	Bodies [][5]float64 `json:"bodies"`
+	Bodies [][7]float64 `json:"bodies"`
 	T      float64      `json:"t"`
 	Action string       `json:"action"`
 	// Loc: how far the positions Pulse uses for the simulated phones are
@@ -621,7 +717,10 @@ type SimFrame struct {
 	Loc *LocError `json:"loc,omitempty"`
 }
 
-// SimExit is an exit gap in the simulated venue's wall.
+// SimExit is an exit gap in the simulated venue's wall. Kind: "" a way out
+// of the venue, "door" a door between two rooms, "turnstile" a gate that
+// lets one person through at a time, "emergency" an exit used only when
+// the alarm sounds.
 type SimExit struct {
 	ID   string  `json:"id"`
 	Name string  `json:"name"`
@@ -630,6 +729,45 @@ type SimExit struct {
 	X1   float64 `json:"x1"`
 	Y1   float64 `json:"y1"`
 	Open bool    `json:"open"`
+	Kind string  `json:"kind,omitempty"`
+}
+
+// SimFurniture is a piece of the simulated venue the dashboard draws: a
+// rectangle in venue metres. Kind: desk, chairs (N seats along it), seats
+// (a row of N fixed seats), stage, board, counter, stairs (a tiered aisle),
+// turnstile, gate, fence (a line: x0,y0 → x1,y1), label (text only).
+type SimFurniture struct {
+	Kind  string  `json:"kind"`
+	Label string  `json:"label,omitempty"`
+	X0    float64 `json:"x0"`
+	Y0    float64 `json:"y0"`
+	X1    float64 `json:"x1"`
+	Y1    float64 `json:"y1"`
+	N     int     `json:"n,omitempty"`
+}
+
+// SimActionSpec is a director action a scenario offers. Kind: behaviour
+// (a button), strength (a button that sends the strength slider), point
+// (click the map), drag (drag on the map).
+type SimActionSpec struct {
+	Type  string `json:"type"`
+	Label string `json:"label"`
+	Tip   string `json:"tip"`
+	Kind  string `json:"kind"`
+}
+
+// SimScenario describes a start scenario for the picker. W, H = the venue
+// it builds (0 = the live venue).
+type SimScenario struct {
+	ID            string          `json:"id"`
+	Name          string          `json:"name"`
+	Desc          string          `json:"desc"`
+	People        int             `json:"people"`
+	MaxPeople     int             `json:"maxPeople"`
+	Participation float64         `json:"participation"`
+	W             float64         `json:"w,omitempty"`
+	H             float64         `json:"h,omitempty"`
+	Actions       []SimActionSpec `json:"actions"`
 }
 
 // SimTruth is the simulation's ground truth and Pulse's lead time. Times
@@ -655,4 +793,10 @@ type SimStatus struct {
 	Exits         []SimExit    `json:"exits"`
 	Walls         [][4]float64 `json:"walls"`
 	Truth         *SimTruth    `json:"truth,omitempty"`
+	// Scenario and the venue it built (may differ from the live venue),
+	// its furniture, and every scenario on offer.
+	Scenario  string         `json:"scenario,omitempty"`
+	Venue     *VenueSize     `json:"venue,omitempty"`
+	Furniture []SimFurniture `json:"furniture,omitempty"`
+	Scenarios []SimScenario  `json:"scenarios,omitempty"`
 }

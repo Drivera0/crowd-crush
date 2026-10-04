@@ -6,18 +6,30 @@
 // yellow = steady "!"
 // red    = flashing arrow, alternating with "STOP"
 //   GET /pulse → status JSON for the dashboard / server discovery:
-//   {"kind":"sign","level":"calm","zone":"B","rssi":-58,"uptime":123,"wifi":true}
-//   (rssi = Wi-Fi signal in dBm, uptime in seconds)
+//   {"kind":"sign","level":"calm","zone":"B","rssi":-58,"uptime":123,"wifi":true,
+//    "fw":"1a2b3c4 2026-10-04","ssid":"HomeWiFi","ip":"192.168.1.88"}
+//   (rssi = Wi-Fi signal in dBm, uptime in seconds, fw = firmware build id:
+//   content hash of this sketch + build date, written by scripts/boards.sh)
 //
 // The same commands work over the USB cable (Serial, 115200 baud), one per
 // line, so the sign needs no Wi-Fi when it's plugged into the laptop
 // (SIGN_URL=serial:auto on the server):
 //   L <calm|yellow|red> [zone]   set the level, exactly like /level
 //   S                            reply with one /pulse-shaped JSON line
+//   W <ssid><TAB><password>      save a Wi-Fi network in flash and join it (tried before the
+//   W <ssid> <password>          built-in ones; the password is never printed; without a tab
+//   W -                          the last space splits them). "W -" forgets it.
 //
 // Wi-Fi is optional: if it hasn't connected within 15 s the sign carries on
 // over USB only (a small "USB" shows while calm) and keeps retrying Wi-Fi in
-// the background.
+// the background, going through its networks in turn: the one saved over
+// USB, then SECRET_SSID, SECRET_SSID2, SECRET_SSID3 (the last two optional).
+//
+// While calm the matrix shows who is talking to it:
+//   two dots, double flash   = the server is in touch (USB or Wi-Fi, last 20 s)
+//   one dot, heartbeat       = on Wi-Fi, waiting for the server
+//   three dots               = still trying Wi-Fi (first 15 s)
+//   "USB"                    = no Wi-Fi: plug it into the laptop running the server
 //
 // Beacon mode (SIGN_BEACON 1, e.g. scripts/flash-sign.ps1 -Beacon): the sign
 // advertises itself over Bluetooth as "PULSE-S", like the zone lights, so
@@ -26,9 +38,12 @@
 // alongside WiFiS3, so a beacon sign has no Wi-Fi: it is driven over USB only
 // (SIGN_URL=serial:auto). Needs the ArduinoBLE library.
 //
-// Copy arduino_secrets.h.example to arduino_secrets.h and fill in your Wi-Fi.
-// The IP is printed on the Serial Monitor (115200 baud); set
-// SIGN_URL=http://<that ip> on the server.
+// Flash it with scripts/boards.sh flash (Mac / Linux) or pwsh scripts/flash-sign.ps1
+// (Windows): both stamp the build id. Wi-Fi is optional: copy
+// arduino_secrets.h.example to arduino_secrets.h and fill it in, or set a
+// network later over USB (scripts/boards.sh wifi). On a table, plug it into
+// the laptop and use SIGN_URL=serial:auto; over Wi-Fi the IP is printed on the
+// Serial Monitor (115200 baud): SIGN_URL=http://<that ip>.
 
 #ifndef SIGN_BEACON
 #define SIGN_BEACON 0
@@ -41,9 +56,50 @@
 #include <ArduinoBLE.h>
 #else
 #include <WiFiS3.h>
+#include <EEPROM.h>
 #endif
 #include "Arduino_LED_Matrix.h"
 #include "arduino_secrets.h"
+// pulse_build.h is written by scripts/boards.sh / the flash scripts: #define PULSE_FW "<hash> <date>".
+#if __has_include("pulse_build.h")
+#include "pulse_build.h"
+#endif
+#ifndef PULSE_FW
+#define PULSE_FW "dev"
+#endif
+
+// Wi-Fi networks, tried in turn after the one saved over USB (W command).
+// SECRET_SSID2/3 are optional: a secrets file without them still builds.
+#ifndef SECRET_SSID
+#define SECRET_SSID ""
+#define SECRET_PASS ""
+#endif
+#if defined(SECRET_SSID2) && !defined(SECRET_PASS2)
+#define SECRET_PASS2 ""
+#endif
+#if defined(SECRET_SSID3) && !defined(SECRET_PASS3)
+#define SECRET_PASS3 ""
+#endif
+struct WifiNet { const char* ssid; const char* pass; };
+const WifiNet BUILTIN_NETS[] = {
+  {SECRET_SSID, SECRET_PASS},
+#ifdef SECRET_SSID2
+  {SECRET_SSID2, SECRET_PASS2},
+#endif
+#ifdef SECRET_SSID3
+  {SECRET_SSID3, SECRET_PASS3},
+#endif
+};
+const int BUILTIN_NET_COUNT = sizeof BUILTIN_NETS / sizeof BUILTIN_NETS[0];
+
+// The network saved over USB, in the R4's EEPROM (emulated in data flash).
+struct SavedNet {
+  uint32_t magic;
+  char ssid[33];
+  char pass[64];
+};
+const uint32_t SAVED_MAGIC = 0x50554C53; // "PULS"
+SavedNet saved = {0, "", ""};
 
 // Optional: a buzzer or big LED on this pin turns on while red.
 const int ALARM_PIN = 7;
@@ -123,6 +179,18 @@ uint8_t linked[8][12] = {
   {0,0,0,0,0,0,0,0,0,0,0,0},
 };
 
+// Three dots: still trying Wi-Fi (first 15 s after boot or a lost connection).
+uint8_t waiting[8][12] = {
+  {0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,1,1,0,0,1,1,0,0,1,1,0},
+  {0,1,1,0,0,1,1,0,0,1,1,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0},
+};
+
 // "USB" in 3-px letters: shown while calm and Wi-Fi is down.
 uint8_t usb[8][12] = {
   {0,0,0,0,0,0,0,0,0,0,0,0},
@@ -164,11 +232,50 @@ void beginBeacon() {
 }
 
 void pollWiFi() {}
+const char* curSsid = "";
 #else
+int netIdx = -1;          // network being tried: 0 = the saved one (if any), then the built-in ones
+const char* curSsid = ""; // name of the network being tried or joined
+
+int netCount() { return (saved.magic == SAVED_MAGIC && saved.ssid[0] ? 1 : 0) + BUILTIN_NET_COUNT; }
+
+// The i-th network to try; false = none there.
+bool netAt(int i, const char*& ssid, const char*& pass) {
+  if (saved.magic == SAVED_MAGIC && saved.ssid[0]) {
+    if (i == 0) { ssid = saved.ssid; pass = saved.pass; return true; }
+    i--;
+  }
+  if (i < 0 || i >= BUILTIN_NET_COUNT) return false;
+  ssid = BUILTIN_NETS[i].ssid;
+  pass = BUILTIN_NETS[i].pass;
+  return true;
+}
+
+const unsigned long WIFI_NET_DWELL_MS = 12000; // keep re-trying one network this long before moving on
+unsigned long netStart = 0;                    // when the current network was first tried
+
+// beginWiFi (re)starts joining: the same network again, or after WIFI_NET_DWELL_MS
+// the next usable one (skipping empty and placeholder names).
 void beginWiFi() {
+  unsigned long now = millis();
+  lastBegin = now;
+  int n = netCount();
+  const char *ssid, *pass;
+  bool same = netIdx >= 0 && now - netStart < WIFI_NET_DWELL_MS && netAt(netIdx, ssid, pass) && ssid[0];
+  for (int k = 0; !same && k < n; k++) {
+    netIdx = (netIdx + 1) % n;
+    if (!netAt(netIdx, ssid, pass) || !ssid[0] || strcmp(ssid, "your-wifi") == 0) continue;
+    netStart = now;
+    same = true;
+  }
+  if (!same) {
+    curSsid = "";
+    return;
+  }
+  curSsid = ssid;
   Serial.print("Connecting to ");
-  Serial.println(SECRET_SSID);
-  WiFi.begin(SECRET_SSID, SECRET_PASS);
+  Serial.println(ssid);
+  WiFi.begin(ssid, pass);
   lastBegin = millis();
 }
 
@@ -189,6 +296,7 @@ void pollWiFi() {
     wifiUp = false;
     wifiSince = now;
     Serial.println("Wi-Fi lost; still listening on USB");
+    netStart = now; // the network that just dropped gets another WIFI_NET_DWELL_MS first
     beginWiFi();
   } else if (!connected) {
     bool grace = now - wifiSince < WIFI_GRACE_MS;
@@ -205,13 +313,19 @@ void setup() {
   Serial.begin(115200);
   pinMode(ALARM_PIN, OUTPUT);
   matrix.begin();
-  matrix.renderBitmap(bang, 8, 12);
+  matrix.renderBitmap(waiting, 8, 12);
+  Serial.print("Pulse sign, firmware ");
+  Serial.println(PULSE_FW);
 #if SIGN_BEACON
   beginBeacon();
 #else
   // The radio module's firmware version (Bluetooth beacon mode needs 0.2.0 or newer).
   Serial.print("radio firmware ");
   Serial.println(WiFi.firmwareVersion());
+  EEPROM.get(0, saved);
+  if (saved.magic != SAVED_MAGIC) saved.ssid[0] = 0;
+  saved.ssid[sizeof saved.ssid - 1] = 0;
+  saved.pass[sizeof saved.pass - 1] = 0;
   WiFi.setTimeout(1000);
   wifiSince = millis();
   beginWiFi();
@@ -251,11 +365,21 @@ void statusJSON(char* body, size_t n) {
     if (zone[i] != '"' && zone[i] != '\\') z[j++] = zone[i];
   z[j] = 0;
 #if SIGN_BEACON
-  snprintf(body, n, "{\"kind\":\"sign\",\"level\":\"%s\",\"zone\":\"%s\",\"rssi\":0,\"uptime\":%lu,\"wifi\":false,\"name\":\"%s\",\"ble\":%s}",
-           levelName(), z, millis() / 1000, BEACON_NAME, bleUp ? "true" : "false");
+  snprintf(body, n, "{\"kind\":\"sign\",\"level\":\"%s\",\"zone\":\"%s\",\"rssi\":0,\"uptime\":%lu,\"wifi\":false,\"name\":\"%s\",\"ble\":%s,\"fw\":\"%s\"}",
+           levelName(), z, millis() / 1000, BEACON_NAME, bleUp ? "true" : "false", PULSE_FW);
 #else
-  snprintf(body, n, "{\"kind\":\"sign\",\"level\":\"%s\",\"zone\":\"%s\",\"rssi\":%d,\"uptime\":%lu,\"wifi\":%s}",
-           levelName(), z, wifiUp ? (int)WiFi.RSSI() : 0, millis() / 1000, wifiUp ? "true" : "false");
+  char ssid[34];
+  j = 0;
+  for (int i = 0; curSsid[i] && j < 33; i++)
+    if (curSsid[i] != '"' && curSsid[i] != '\\' && (unsigned char)curSsid[i] >= 0x20) ssid[j++] = curSsid[i];
+  ssid[j] = 0;
+  char ip[16] = "";
+  if (wifiUp) {
+    IPAddress a = WiFi.localIP();
+    snprintf(ip, sizeof ip, "%u.%u.%u.%u", a[0], a[1], a[2], a[3]);
+  }
+  snprintf(body, n, "{\"kind\":\"sign\",\"level\":\"%s\",\"zone\":\"%s\",\"rssi\":%d,\"uptime\":%lu,\"wifi\":%s,\"fw\":\"%s\",\"ssid\":\"%s\",\"ip\":\"%s\"}",
+           levelName(), z, wifiUp ? (int)WiFi.RSSI() : 0, millis() / 1000, wifiUp ? "true" : "false", PULSE_FW, ssid, ip);
 #endif
 }
 
@@ -270,17 +394,56 @@ Route handleRequestLine(const String& line) {
   return LEVEL;
 }
 
-// USB commands, one per line: "L <level> [zone]" or "S".
-char serialBuf[32];
+// USB commands, one per line: "L <level> [zone]", "S" or "W <ssid> <password>".
+char serialBuf[128];
 int serialLen = 0;
+
+#if !SIGN_BEACON
+// handleWifiCommand saves (or with "-" forgets) the network from a W line and starts joining it.
+void handleWifiCommand(char* arg) {
+  while (*arg == ' ') arg++;
+  if (strcmp(arg, "-") == 0) {
+    saved.magic = 0;
+    saved.ssid[0] = saved.pass[0] = 0;
+    EEPROM.put(0, saved);
+    Serial.println("wifi: forgot the saved network");
+  } else {
+    char* sep = strchr(arg, '\t');
+    if (!sep) sep = strrchr(arg, ' ');
+    if (sep) *sep++ = 0;
+    if (!*arg || strlen(arg) > 32 || (sep && strlen(sep) > 63)) {
+      Serial.println("wifi: want W <ssid><TAB><password> (ssid up to 32, password up to 63 characters)");
+      return;
+    }
+    saved.magic = SAVED_MAGIC;
+    strncpy(saved.ssid, arg, sizeof saved.ssid - 1);
+    saved.ssid[sizeof saved.ssid - 1] = 0;
+    strncpy(saved.pass, sep ? sep : "", sizeof saved.pass - 1);
+    saved.pass[sizeof saved.pass - 1] = 0;
+    EEPROM.put(0, saved);
+    Serial.print("wifi: saved ");
+    Serial.print(saved.ssid); // never the password
+    Serial.println("; joining it now");
+  }
+  if (wifiUp) WiFi.disconnect();
+  wifiUp = false;
+  wifiSince = millis();
+  netIdx = -1; // start over from the saved network
+  beginWiFi();
+}
+#endif
 
 void handleSerialLine(char* s) {
   while (*s == ' ') s++;
-  if (s[0] == 'S' || s[0] == 'L') lastContact = millis();
+  if (s[0] == 'S' || s[0] == 'L' || s[0] == 'W') lastContact = millis();
   if (s[0] == 'S' && (s[1] == 0 || s[1] == ' ')) {
-    char body[160];
+    char body[256];
     statusJSON(body, sizeof body);
     Serial.println(body);
+#if !SIGN_BEACON
+  } else if (s[0] == 'W' && (s[1] == ' ' || s[1] == '\t')) {
+    handleWifiCommand(s + 2);
+#endif
   } else if (s[0] == 'L' && s[1] == ' ') {
     char* lv = s + 2;
     while (*lv == ' ') lv++;
@@ -329,7 +492,7 @@ void serveClient() {
   }
   if (route != NOT_FOUND) lastContact = millis();
   if (route == PULSE) {
-    char body[160];
+    char body[256];
     statusJSON(body, sizeof body);
     client.println("HTTP/1.1 200 OK");
     client.println("Content-Type: application/json");
@@ -370,7 +533,7 @@ void render() {
         unsigned long lp = t % 1500;
         show((lp < 120 || (lp >= 260 && lp < 380)) ? linked : blank);
       } else if (usbOnly()) show(((t % 1500) < 120) ? blank : usb);
-      else if (!wifiUp) show(bang);  // still trying Wi-Fi (first 15 s)
+      else if (!wifiUp) show(waiting);  // still trying Wi-Fi (first 15 s)
       else show(((t % 1500) < 120) ? heart : blank);
       digitalWrite(ALARM_PIN, LOW);
       break;

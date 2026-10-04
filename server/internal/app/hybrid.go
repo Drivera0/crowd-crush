@@ -254,6 +254,7 @@ func (a *App) statesFrom(p *pipeline, sim bool, out map[string]protocol.PhoneSta
 		zoneLevel[z.ID] = p.zoneLevel(z)
 	}
 	inCluster := clusterLevels(p)
+	rows := a.demoRowsLocked() // places in the demo spot's row (demo.go)
 	for _, pr := range p.last.Phones {
 		m := a.live.meta[pr.ID]
 		if m == nil || !m.connected {
@@ -286,6 +287,6 @@ func (a *App) statesFrom(p *pipeline, sim bool, out map[string]protocol.PhoneSta
 		}
 		out[pr.ID] = protocol.PhoneState{Type: protocol.TypeState, Node: node, Zone: level, Move: moveFor(p, pr.ID),
 			Bearing: bearing, X: math.Round(m.x*10) / 10, Y: math.Round(m.y*10) / 10, W: cfg.VenueW, H: cfg.VenueH,
-			Name: m.name, Color: m.color, Sim: sim}
+			Name: m.name, Color: m.color, Sim: sim, Row: rows[pr.ID]}
 	}
 }

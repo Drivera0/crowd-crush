@@ -111,9 +111,12 @@ func (a *App) guideGeom(w, h float64, sim bool) crowd.Geom {
 	l := a.venue.Layout
 	if sim {
 		exits, walls := crowdsim.GeometryJSON(crowdsim.LayoutGeometry(w, h, l))
+		if s := a.sim; s != nil {
+			exits, walls = s.geo.exits, s.geo.walls // the running simulation's own room (a classroom, a gate…)
+		}
 		g.Walls = walls
 		for _, e := range exits {
-			if e.Open {
+			if e.Open && e.Kind != "door" {
 				g.Exits = append(g.Exits, crowd.Exit{ID: e.ID, Name: e.Name, X0: e.X0, Y0: e.Y0, X1: e.X1, Y1: e.Y1})
 			}
 		}
@@ -163,6 +166,9 @@ func sameState(a, b protocol.PhoneState) bool {
 		return false
 	}
 	if a.Name != b.Name || a.Color != b.Color || a.Sim != b.Sim {
+		return false
+	}
+	if (a.Row == nil) != (b.Row == nil) || (a.Row != nil && *a.Row != *b.Row) {
 		return false
 	}
 	if (a.Bearing == nil) != (b.Bearing == nil) || (a.Bearing != nil && *a.Bearing != *b.Bearing) {

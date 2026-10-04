@@ -112,6 +112,51 @@ type Config struct {
 	RedScore     float64 `json:"redScore"`
 	Margin       float64 `json:"margin"` // hysteresis: clear below threshold-margin
 	HoldMs       int64   `json:"holdMs"` // score must stay above a threshold this long
+
+	// Table demo profile (table.go): used only while the app turns it on
+	// (the demo spot is on, live phones only), and only in zones holding at
+	// most Table.MaxPhones phones. It never changes anything above.
+	Table TableConfig `json:"table"`
+}
+
+// TableConfig is the table demo profile: a handful of judges in a row at
+// the demo spot. See table.go for what each rule means and why.
+type TableConfig struct {
+	MaxPhones int   `json:"maxPhones"` // the profile applies to zones with at most this many active phones; 0 = never
+	SmoothMs  int64 `json:"smoothMs"`  // zone score EMA time constant in such a zone (instead of zoneSmoothMs)
+	HoldMs    int64 `json:"holdMs"`    // … and hold time (instead of holdMs)
+	// PairScore: a wave edge that is not part of a chain (two phones, or a
+	// push that reached only two people) still counts, but the zone score
+	// it gives is capped here, below redScore: yellow at most. 0 = off.
+	PairScore float64 `json:"pairScore"`
+	// Moving together: neighbours whose horizontal motion matches (|r| ≥
+	// TogetherCorr) at a small lag (≤ TogetherMaxLagMs) over the last
+	// TogetherWindowMs, with neither trace rhythmic (autocorrelation at
+	// lags up to TogetherRhythmLagMs below TogetherRhythm: dancing, jumping
+	// and walking are), horizontal stronger than vertical, sustained for
+	// TogetherHoldMs with the lag steady (within TogetherJitterMs of where
+	// it started). Raises the zone score to TogetherScore (below redScore:
+	// yellow at most) while it holds. TogetherScore 0 = off.
+	TogetherCorr        float64 `json:"togetherCorr"`
+	TogetherMaxLagMs    int64   `json:"togetherMaxLagMs"`
+	TogetherWindowMs    int64   `json:"togetherWindowMs"`
+	TogetherRhythm      float64 `json:"togetherRhythm"`
+	TogetherRhythmLagMs int64   `json:"togetherRhythmLagMs"`
+	TogetherHoldMs      int64   `json:"togetherHoldMs"`
+	TogetherJitterMs    int64   `json:"togetherJitterMs"`
+	TogetherScore       float64 `json:"togetherScore"`
+}
+
+// DefaultTableConfig is the table demo profile, tuned on the table-demo
+// cases (sim/table.go; numbers in docs/TABLE-DEMO.md).
+func DefaultTableConfig() TableConfig {
+	return TableConfig{
+		MaxPhones: 5, SmoothMs: 7000, HoldMs: 500,
+		PairScore:    0.45,
+		TogetherCorr: 0.7, TogetherMaxLagMs: 300, TogetherWindowMs: 15000,
+		TogetherRhythm: 0.5, TogetherRhythmLagMs: 5000,
+		TogetherHoldMs: 8000, TogetherJitterMs: 120, TogetherScore: 0.45,
+	}
 }
 
 // DefaultConfig is tuned on the simulator scenarios; retune on real recordings.
@@ -164,6 +209,8 @@ func DefaultConfig() Config {
 		RedScore:     0.6,
 		Margin:       0.1,
 		HoldMs:       2000,
+
+		Table: DefaultTableConfig(),
 	}
 }
 
@@ -216,6 +263,18 @@ func (c Config) Validate() error {
 		return fmt.Errorf("minOverlap must be in (0, 1]")
 	case c.Axis != "x" && c.Axis != "z" && c.Axis != "xz":
 		return fmt.Errorf("axis must be x, z or xz")
+	}
+	if t := c.Table; t.MaxPhones > 0 {
+		switch {
+		case t.SmoothMs <= 0 || t.HoldMs < 0:
+			return fmt.Errorf("table: smoothMs > 0 and holdMs ≥ 0")
+		case !(t.PairScore >= 0 && t.PairScore < c.RedScore) || !(t.TogetherScore >= 0 && t.TogetherScore < c.RedScore):
+			return fmt.Errorf("table: pairScore and togetherScore must be ≥ 0 and below redScore (they are yellow at most)")
+		case t.TogetherScore > 0 && (!(t.TogetherCorr > 0 && t.TogetherCorr <= 1) || t.TogetherMaxLagMs < 0 ||
+			t.TogetherWindowMs < c.CorrWindowMs || t.TogetherRhythmLagMs <= 0 || 2*t.TogetherRhythmLagMs >= t.TogetherWindowMs ||
+			t.TogetherWindowMs > HistoryMs || t.TogetherHoldMs < 0 || t.TogetherJitterMs < 0):
+			return fmt.Errorf("table: togetherCorr in (0, 1], togetherWindowMs between corrWindowMs and %d ms and more than twice togetherRhythmLagMs", HistoryMs)
+		}
 	}
 	return nil
 }

@@ -206,3 +206,36 @@ button:disabled { opacity: 0.4; }
   0% { border-color: var(--accent); box-shadow: inset 0 0 60px rgba(56, 189, 248, 0.5); }
   100% { border-color: transparent; box-shadow: none; }
 }
+
+/* Joining at the table (env.ts, placemap.ts, the demo row). */
+.privacy { font-size: 15px; color: var(--muted); margin: 0; max-width: 26em; line-height: 1.4; }
+.privacy-more { font-size: 15px; color: var(--muted); max-width: 26em; text-align: left; }
+.privacy-more summary { cursor: pointer; text-align: center; color: var(--accent); }
+.privacy-more p { margin: 8px 0 0; line-height: 1.45; }
+.env-note {
+  width: 100%; max-width: 26em; margin: 0; padding: 12px 14px;
+  border: 2px solid var(--yellow); border-radius: 14px; background: #2a2205;
+  font-size: 16px; line-height: 1.4; text-align: left;
+}
+.env-note[hidden], .env-actions[hidden] { display: none; }
+.env-note p { margin: 0 0 10px; }
+.env-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+.env-btn {
+  display: inline-block; padding: 10px 18px; border-radius: 14px; font-size: 15px; font-weight: 700;
+  background: var(--accent); color: #001018; text-decoration: none;
+}
+.env-btn[hidden] { display: none; }
+.env-actions .small { word-break: break-all; }
+.row-card {
+  margin: 0; padding: 12px 18px; border-radius: 16px; border: 2px solid var(--accent);
+  background: rgba(56, 189, 248, 0.08); max-width: 26em;
+}
+.row-card[hidden] { display: none; }
+.row-card p { margin: 0; }
+.row-n { font-size: 22px; }
+.row-n b { font-size: 40px; color: #fff; }
+.row-where { font-size: 17px; color: var(--fg); margin-top: 4px !important; line-height: 1.35; }
+.venue-svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.venue-svg text { font-family: inherit; font-weight: 600; }
+.stage[hidden] { display: none; }
+.pocket-btn small { display: block; font-size: 12px; font-weight: 400; opacity: 0.8; }

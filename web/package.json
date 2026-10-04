@@ -7,10 +7,12 @@
     "dev:dash": "vite --config dashboard/vite.config.ts",
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --test phone/src/*.test.mjs",
+    "test:e2e": "node phone/e2e/join.e2e.mjs",
     "build": "tsc --noEmit && vite build --config phone/vite.config.ts && vite build --config dashboard/vite.config.ts"
   },
   "devDependencies": {
     "@types/node": "^26.6.4",
+    "playwright-core": "^1.63.0",
     "typescript": "^5.9.3",
     "vite": "^7.3.6"
   },

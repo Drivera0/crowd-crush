@@ -1,13 +1,17 @@
 import './style.css';
 import { onPage, page } from './shell';
-import type { Alert, AlertRules, Cluster, Config, DrillReady, DrillRecord, DrillStatus, DrillZone, EdgeExplain, EvalReport, FloorplanSuggestion, Hardware, Level, Node, NodeDetail, SimAction, SimState, Snapshot, ToDash, Venue } from '../../shared/protocol';
+import type { Alert, AlertRules, Cluster, Config, DrillReady, DrillRecord, DrillStatus, DrillZone, EdgeExplain, EvalReport, FloorplanSuggestion, Hardware, Level, Node, NodeDetail, SimAction, SimActionSpec, SimScenario, SimState, Snapshot, ToDash, Venue } from '../../shared/protocol';
 import { wsURL } from '../../shared/protocol';
 import { animate } from 'motion';
 import { Areas, inPoly, type Tool } from './areas';
 import { initDemo } from './demo';
 import { initMeshNet } from './meshnet';
 import { Mesh, crushRGB } from './mesh';
+import { CAUSE_LABEL, TableLayer } from './tablelayer';
 import { Setup } from './setup';
+import { escalateNow, initEscalation } from './escalation';
+import { initJoinQR } from './joinqr';
+import { initHwSetup } from './hwsetup';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -47,6 +51,8 @@ function refreshSetup() {
 // ---------------------------------------------------------------------------
 
 const mesh = new Mesh($('mesh') as HTMLCanvasElement);
+const table = new TableLayer(mesh, $('mesh').parentElement!);
+mesh.table = table;
 
 setInterval(() => {
   const s = mesh.stats();
@@ -132,7 +138,7 @@ areas.onChange = () => {
         `<div class="a-controls">` +
         `<div class="a-field"><span>Priority</span><div class="seg2 sens" role="radiogroup" aria-label="Priority">` +
         `<button type="button" role="radio" data-sens="normal" data-tip="Standard thresholds, for open floor">Standard</button>` +
-        `<button type="button" role="radio" data-sens="high" data-tip="Lower thresholds: alerts sooner at spots where trouble starts fast">High (alerts sooner)</button>` +
+        `<button type="button" role="radio" data-sens="high" data-tip="Lower thresholds: alerts sooner at spots where trouble starts fast">High risk (alerts sooner)</button>` +
         `</div></div>` +
         `<label class="a-field light-field"><span>Zone light</span><select class="light" aria-label="Zone light for this area"></select></label>` +
         `</div>` +
@@ -246,6 +252,9 @@ interface Situation {
 let situation: Situation = { cls: 'calm', place: '', kind: '', text: 'Waiting for attendees', detail: 'No pushes travelling through the crowd.' };
 
 const kindText = (k?: Alert['kind']) => (k === 'density' ? 'crowding' : k === 'rule' ? 'over the limit' : 'crowd push');
+/** Headline of a table demo alert with no briefing (yellow ones get none). */
+const causeHead = (c: NonNullable<Alert['cause']>, where: string) =>
+  c === 'pair' ? `${where}: push between two people` : `${where}: moving as one (people pressed together)`;
 
 /** Name of the area or zone a point lies in (areas first: they are what staff drew). */
 function placeAt(s: Snapshot, x: number, y: number): string {
@@ -270,11 +279,16 @@ function computeSituation(s: Snapshot): Situation {
       };
     }
     const place = st.where || (st.zone ? (areas.get(st.zone)?.name ?? zoneNames.get(st.zone) ?? '') : '');
-    const kind = st.kind === 'density' ? 'crowding' : st.kind === 'rule' ? 'over the limit' : st.kind === 'early' ? 'crowding fast' : 'crowd push';
+    // Table demo: a yellow "push" may be a push between just two people, or people moving as one.
+    const cause = (st.kind ?? 'wave') === 'wave' && st.level !== 'red' ? table.cause(s, st.zone, alertsById.values()) : null;
+    const kind = cause ? CAUSE_LABEL[cause].toLowerCase() : st.kind === 'density' ? 'crowding' : st.kind === 'rule' ? 'over the limit' : st.kind === 'early' ? 'crowding fast' : 'crowd push';
     const where = place ? ` in ${place}` : ' in the crowd';
     const dens = st.density != null ? ` (about ${st.density.toFixed(1)} people/m²)` : '';
-    const detail =
-      kind === 'crowd push'
+    const detail = cause === 'pair'
+      ? `A push passed from one person to the next${where}. With only two phones it can't be a wave through a crowd, so it stays yellow.`
+      : cause === 'together'
+        ? `People${where} are moving as one, the way people pressed together are (or rocking together by choice). Shown as yellow, never red.`
+        : kind === 'crowd push'
         ? `${st.level === 'red' ? 'A crowd push is travelling' : 'Pressure is building'}${where}${waves ? `, passing between ${waves} pair${waves === 1 ? '' : 's'} of neighbours` : ''}.`
         : kind === 'over the limit'
           ? `An alert rule was crossed${where}${dens}.`
@@ -424,7 +438,7 @@ function renderTooltip() {
     (n.press ? `<div class="tt-packed"><span class="st packed-${n.press}">${packedText(n)}</span></div>` : '') +
     `<div class="tt-ua">${esc(deviceName(n.ua))} · ${where(n)}${n.real ? ' · real phone in the simulated crowd' : ''}</div>` +
     (meshNet.tip(n.id) ? `<div class="tt-ua tt-mesh">${esc(meshNet.tip(n.id))}</div>` : '') +
-    `<div class="tt-foot">${n.name && lastMode !== 'replay' ? 'Click for live telemetry · drag to move' : 'Click for live telemetry'}</div>`;
+    `<div class="tt-foot">${n.name && lastMode !== 'replay' ? 'Click for details · drag to move' : 'Click for details'}</div>`;
   tip.hidden = false;
   const w = $('mesh').clientWidth;
   tip.style.left = `${Math.min(p.x + 22, w - 230)}px`;
@@ -645,6 +659,7 @@ setInterval(() => ($('zoomPct').textContent = `${Math.round(mesh.view.k * 100)}%
 function applyTheme(t: 'dark' | 'light') {
   document.documentElement.dataset.theme = t;
   mesh.setTheme(t);
+  $('setTheme').textContent = t === 'light' ? 'Switch to dark' : 'Switch to light';
   try {
     localStorage.setItem('pulse.theme', t);
   } catch {
@@ -652,9 +667,9 @@ function applyTheme(t: 'dark' | 'light') {
   }
 }
 applyTheme(document.documentElement.dataset.theme === 'light' ? 'light' : 'dark');
-$('themeBtn').addEventListener('click', () =>
-  applyTheme(document.documentElement.dataset.theme === 'light' ? 'dark' : 'light'),
-);
+const flipTheme = () => applyTheme(document.documentElement.dataset.theme === 'light' ? 'dark' : 'light');
+$('themeBtn').addEventListener('click', flipTheme);
+$('setTheme').addEventListener('click', flipTheme);
 
 const tickClock = () => ($('clock').textContent = new Date().toLocaleTimeString([], { hour12: false }));
 tickClock();
@@ -715,7 +730,11 @@ function renderRisk(level: Level, score: number) {
   $('riskPanel').className = `card risk ${level}`;
   $('kRisk').textContent = String(n);
   $('riskNum').textContent = String(n);
-  $('kRiskSub').textContent = `of 100 · ${levelText[level].toLowerCase()}`;
+  // The thresholds give the number its meaning ("28 of 100" alone says nothing).
+  $('kRiskSub').textContent =
+    level === 'calm'
+      ? `of 100 · calm · warning from ${Math.round(thresholds.yellow * 100)}, danger from ${Math.round(thresholds.red * 100)}`
+      : `of 100 · ${levelText[level].toLowerCase()}`;
   $('riskLevel').textContent = levelText[level];
   $('riskSub').textContent = situation.detail;
   const pts = riskHist.map((v, i) => `${i + 60 - riskHist.length - 1},${1 - Math.min(1, Math.max(0, v))}`);
@@ -851,6 +870,22 @@ function renderLog(fresh = false) {
   );
 }
 $('logClear').addEventListener('click', async () => {
+  // It clears for every console, so ask once: the first click arms the button for 4 s.
+  const btn = $('logClear') as HTMLButtonElement;
+  if (btn.dataset.armed !== '1') {
+    btn.dataset.armed = '1';
+    btn.textContent = 'Clear for everyone?';
+    btn.classList.add('warn');
+    window.setTimeout(() => {
+      btn.dataset.armed = '0';
+      btn.textContent = 'Clear';
+      btn.classList.remove('warn');
+    }, 4000);
+    return;
+  }
+  btn.dataset.armed = '0';
+  btn.textContent = 'Clear';
+  btn.classList.remove('warn');
   // The server drops resolved and drill alerts; open real alerts stay (they still need handling).
   try {
     const r = await fetch('/api/alerts/clear', { method: 'POST' });
@@ -881,6 +916,7 @@ function showBrief(a: Alert, fresh = false) {
   $('briefPanel').classList.toggle('red', a.level === 'red' && !a.test);
   $('briefPanel').classList.toggle('drill', !!a.test);
   ($('replayAudioBtn') as HTMLButtonElement).disabled = false;
+  syncBriefVisibility();
   if (!fresh) {
     el.textContent = a.brief ?? '';
     return;
@@ -904,10 +940,12 @@ function showBrief(a: Alert, fresh = false) {
 
 let audioCtx: AudioContext | null = null;
 
-$('soundBtn').addEventListener('click', () => {
-  soundOn = !soundOn;
-  $('soundBtn').dataset.tip = soundOn ? 'Spoken alerts on' : 'Turn on spoken alerts';
+function setSound(on: boolean) {
+  soundOn = on;
+  $('soundBtn').dataset.tip = soundOn ? 'Spoken alerts on (click to mute)' : 'Turn on spoken alerts';
   $('soundBtn').classList.toggle('on', soundOn);
+  $('setSound').textContent = soundOn ? 'Turn off' : 'Turn on';
+  $('setSound').classList.toggle('on', soundOn);
   toast(soundOn ? 'Spoken alerts on' : 'Spoken alerts off');
   if (soundOn) {
     audioCtx ??= new AudioContext();
@@ -916,7 +954,9 @@ $('soundBtn').addEventListener('click', () => {
   } else {
     speechSynthesis?.cancel();
   }
-});
+}
+$('soundBtn').addEventListener('click', () => setSound(!soundOn));
+$('setSound').addEventListener('click', () => setSound(!soundOn));
 
 $('replayAudioBtn').addEventListener('click', () => {
   if (lastBrief) playBrief(lastBrief, true);
@@ -992,6 +1032,7 @@ function onSnapshot(s: Snapshot) {
   for (const z of s.zones) zoneNames.set(z.id, z.name);
   const clusters = s.clusters ?? [];
   mesh.update(s.nodes, s.waves, s.links ?? [], clusters, s.venue ?? { w: 24, h: 16 });
+  table.update(s);
   areas.sync(s.zones, s.nodes);
   meshNet.onSnapshot(s.mesh, s.nodes);
   // People each phone stands for (for the "Max people" hint).
@@ -1027,8 +1068,9 @@ function onSnapshot(s: Snapshot) {
   badge.className = `badge ${replay ? 'replay' : simulating ? 'sim' : 'live'}`;
   $('replayBanner').hidden = !replay && !simulating;
   $('replayBanner').classList.toggle('sim', simulating);
-  // A recording made in another venue plays in that venue: today's floor plan, layout and areas don't belong on it.
-  const foreign = replay && !!s.venue && (s.venue.w !== venue.w || s.venue.h !== venue.h);
+  // A recording made in another venue plays in that venue, and a classroom or auditorium simulation builds its own
+  // room: today's floor plan, layout and areas don't belong on them.
+  const foreign = (replay || simulating) && !!s.venue && (s.venue.w !== venue.w || s.venue.h !== venue.h);
   if (foreign !== foreignVenue) {
     foreignVenue = foreign;
     areas.hidden = foreign;
@@ -1043,8 +1085,11 @@ function onSnapshot(s: Snapshot) {
       : 'Not live: a saved run is playing through the detector.';
   } else if (simulating) {
     $('rbTag').textContent = 'SIMULATION';
-    $('replayInfo').textContent = `${simState?.people ?? s.sim?.bodies.length ?? 0} people · ${actionText[s.sim?.action ?? ''] ?? s.sim?.action ?? ''}`;
-    $('rbNote').textContent = 'Not live: a virtual crowd is feeding the detector.';
+    const where = scenarioOf(simState?.scenario ?? '')?.name;
+    $('replayInfo').textContent = `${where ? `${where} · ` : ''}${simState?.people ?? s.sim?.bodies.length ?? 0} people · ${actionText[s.sim?.action ?? ''] ?? s.sim?.action ?? ''}`;
+    $('rbNote').textContent = foreign
+      ? `Not live: a virtual ${where?.toLowerCase() ?? 'venue'} (${s.venue.w} × ${s.venue.h} m) is feeding the detector, shown without today's areas.`
+      : 'Not live: a virtual crowd is feeding the detector.';
   }
   mesh.setSim(simulating ? (s.sim ?? null) : null, simulating ? simState : null);
   const mode = s.mode;
@@ -1052,6 +1097,7 @@ function onSnapshot(s: Snapshot) {
     const was = lastMode;
     lastMode = mode;
     renderSimRunning(mode === 'sim');
+    void showSimPreview(); // the room preview gives way to the running crowd, and comes back after it
     renderReplayRunning(mode === 'replay');
     if (mode !== 'sim') {
       if (was === 'sim') simEnded();
@@ -1112,7 +1158,8 @@ function onAlert(a: Alert, fresh: boolean) {
   const where = placeName(a.zone);
   const fallback = a.test
     ? `Drill at ${where}: not a real incident.`
-    : a.kind === 'density' ? `${where}: crowd too dense.` : a.kind === 'rule' ? `${where}: alert rule crossed.` : `${where}: crowd push detected.`;
+    : a.level === 'calm' ? `${where}: back to calm.` // the notice of a zone returning to calm
+    : a.kind === 'density' ? `${where}: crowd too dense.` : a.kind === 'rule' ? `${where}: alert rule crossed.` : a.cause && a.level !== 'red' ? `${causeHead(a.cause, where)}.` : `${where}: crowd push detected.`;
   logEntry({ id: a.id, t: a.t, level: a.level, text: a.brief ?? fallback, test: a.test, src: a.source, area: a.kind === 'density' ? 'DENSITY' : undefined }, fresh);
   // History from the server: its acknowledgement and resolution too.
   if (a.ackAt && (a.status === 'ack' || a.status === 'resolved')) {
@@ -1588,6 +1635,7 @@ let qrMode: 'auto' | 'shown' | 'hidden' = 'auto';
 /** The tower whose check-in code the modal shows; null = the ordinary join code. */
 let qrTower: Hardware | null = null;
 let joinUrl = '';
+let qrVer = 0; // bumped when the join link changes, so the code image reloads
 const qrDefault = { title: $('qrTitle').textContent ?? '', caption: document.querySelector('#qr .qr-caption')!.textContent ?? '' };
 let onLivePage = false;
 onPage((p) => {
@@ -1609,7 +1657,7 @@ const closeQR = () => {
 function renderQRContent() {
   const key = qrTower?.key;
   const img = $('qrImg') as HTMLImageElement;
-  const src = key ? `/api/qr.png?at=${encodeURIComponent(key)}` : '/api/qr.png';
+  const src = key ? `/api/qr.png?at=${encodeURIComponent(key)}&v=${qrVer}` : `/api/qr.png?v=${qrVer}`;
   if (!img.src.endsWith(src)) img.src = src;
   $('qrTitle').textContent = qrTower ? `Check in at ${qrTower.name === 'This laptop' ? 'the control laptop' : qrTower.name}` : qrDefault.title;
   document.querySelector('#qr .qr-caption')!.textContent = qrTower
@@ -1676,6 +1724,12 @@ function updateQR() {
     refreshSetup();
   }
 }
+
+// The join link changed (joinqr.ts: staff pasted a tunnel URL): a fresh code and address.
+window.addEventListener('pulse:join', () => {
+  qrVer++;
+  void loadJoinInfo();
+});
 
 /** The join link and whether phones can reach it (GET /api/join; /api/phone-url on older servers). */
 async function loadJoinInfo() {
@@ -1754,6 +1808,7 @@ async function init() {
   }
   ($('qrImg') as HTMLImageElement).src = '/api/qr.png';
   void loadJoinInfo();
+  initJoinQR(); // the QR window's link test, link setting and join counts (joinqr.ts)
   await loadRecordings();
   await areas.load();
   await loadVenue();
@@ -1781,6 +1836,7 @@ function renderVenue() {
     ? `GPS on: map anchored at ${venue.lat?.toFixed(5)}, ${venue.lon?.toFixed(5)}`
     : 'GPS off: attendees place themselves on the map';
   $('vGeo').className = `small ${venue.geo ? 'ok-text' : 'muted'}`;
+  ($('vClearGeo') as HTMLButtonElement).disabled = !venue.geo;
   renderTemplates();
   loadPlanImage();
   mesh.setLayout(venue.layout ?? null);
@@ -1904,6 +1960,7 @@ async function loadHardware() {
   hwTotal = boards.length;
   hwLoaded = true;
   mesh.setBoards(list);
+  table.setBoards(list);
   areas.onChange();
   // Settings' "Sign" chip follows what Hardware sees, not just "configured".
   const signChip = document.querySelector<HTMLElement>('.svc[data-svc="sign"]');
@@ -1947,8 +2004,8 @@ async function loadHardware() {
       // Check-in point: a QR code that places whoever scans it next to this tower.
       const checkin =
         h.x != null && h.key
-          ? `<div class="hw-checkin"><button class="sm" data-checkin>Check-in QR</button><span class="muted small">Phones that scan it are placed here (${h.x.toFixed(1)} m, ${h.y!.toFixed(1)} m)</span></div>`
-          : `<div class="hw-areas">Drag its marker onto the map to use it as a check-in point for phones</div>`;
+          ? `<div class="hw-checkin"><button class="sm" data-checkin>Check-in QR</button><span class="muted small">Phones that scan this code are placed here (${h.x.toFixed(1)} m, ${h.y!.toFixed(1)} m), no GPS or tapping</span></div>`
+          : `<div class="hw-areas">Drag its marker onto the map to get a check-in QR: phones that scan it are placed at that spot</div>`;
       const shows = laptop
         ? ''
         : h.zone
@@ -1984,7 +2041,140 @@ const actionText: Record<string, string> = {
   exit: 'exits changed',
   dance: 'dancing',
   intermission: 'intermission',
+  dismiss: 'leaving',
+  alarm: 'alarm: evacuating',
+  arrive: 'next class arriving',
+  rush: 'kick-off rush',
 };
+
+/** The scenarios the server offers (GET /api/sim), the one chosen in the picker, and its preview geometry. */
+let simScenarios: SimScenario[] = [];
+let simScenario = 'concert';
+let simPreviewFor = '';
+/** Staff picked a scenario themselves (so a late scenario list or a running crowd must not change it under them). */
+let simScenarioPicked = false;
+
+function scenarioOf(id: string): SimScenario | undefined {
+  return simScenarios.find((s) => s.id === id);
+}
+
+/** The picker: one button per scenario with a one-line description; choosing one sets the sliders' defaults. */
+function renderScenarios() {
+  const box = $('simScenarios');
+  if (box.childElementCount !== simScenarios.length) {
+    box.replaceChildren(
+      ...simScenarios.map((s) => {
+        const b = document.createElement('button');
+        b.dataset.scn = s.id;
+        b.setAttribute('role', 'radio');
+        b.innerHTML = `<b>${esc(s.name)}</b><span>${esc(s.desc)}</span>`;
+        b.addEventListener('click', () => chooseScenario(s.id, true));
+        return b;
+      }),
+    );
+  }
+  for (const b of box.querySelectorAll<HTMLElement>('button')) {
+    const on = b.dataset.scn === simScenario;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-checked', String(on));
+  }
+}
+
+/** Pick a scenario: sliders take its defaults (unless staff moved them), the actions and the map preview follow. */
+function chooseScenario(id: string, byUser: boolean) {
+  const s = scenarioOf(id);
+  if (!s) return;
+  simScenario = id;
+  if (byUser) simScenarioPicked = true;
+  const people = $('simPeople') as HTMLInputElement;
+  people.max = String(Math.min(1000, s.maxPeople));
+  people.step = s.maxPeople > 200 ? '10' : '1';
+  if (byUser) {
+    simSlidersTouched = true;
+    setSimSliders(s.people, Math.round(s.participation * 100));
+  }
+  renderScenarios();
+  renderSimActions(s);
+  renderSimApply();
+  void showSimPreview();
+}
+
+/** The action buttons of a scenario (what the director can do there). */
+function renderSimActions(s: SimScenario | undefined) {
+  const box = $('simActions');
+  const acts = s?.actions ?? [];
+  const icon: Record<string, string> = {
+    calm: '😌', dance: '💃', intermission: '🍺', stage: '🎤', surge: '🌊', attract: '📍', shove: '👉', spawn: '➕', disperse: '🚪',
+    dismiss: '🔔', alarm: '🚨', arrive: '🎒', rush: '🏃',
+  };
+  box.replaceChildren(
+    ...acts.map((a) => {
+      const b = document.createElement('button');
+      b.dataset.sim = a.type;
+      b.dataset.tip = a.tip;
+      b.textContent = `${icon[a.type] ?? '•'} ${a.label}`;
+      b.addEventListener('click', () => runSimAction(a));
+      return b;
+    }),
+  );
+  const strength = acts.find((a) => a.kind === 'strength');
+  ($('simStrength').parentElement as HTMLElement).hidden = !strength && !acts.some((a) => a.type === 'shove');
+  $('simStrengthLabel').textContent = strength ? `${strength.label} strength` : 'Shove strength';
+}
+
+/** Run an action from its spec: a plain button, one with the strength slider, a click on the map, or a drag. */
+function runSimAction(a: SimActionSpec) {
+  const strength = Number(($('simStrength') as HTMLInputElement).value) / 100;
+  areas.cancelPick(); // a new choice replaces a pick still waiting for a click
+  switch (a.kind) {
+    case 'behaviour':
+      void simAction({ type: a.type } as SimAction);
+      break;
+    case 'strength':
+      void simAction({ type: a.type, strength } as SimAction);
+      break;
+    case 'point':
+      pickOnMap(a.type === 'spawn' ? 'Click where 20 people arrive' : 'Click where the group should gather', false, (p) =>
+        void simAction(a.type === 'spawn' ? { type: 'spawn', x: p.x, y: p.y, n: 20 } : ({ type: a.type, x: p.x, y: p.y } as SimAction)),
+      );
+      break;
+    case 'drag':
+      pickOnMap('Drag on the map: where the push starts, and which way', true, (p) => {
+        const len = Math.hypot(p.dx, p.dy);
+        if (len < 0.3) return msg('Drag a little further to give the push a direction', true);
+        void simAction({ type: 'shove', x: p.x, y: p.y, dx: p.dx / len, dy: p.dy / len, strength });
+      });
+      break;
+  }
+}
+
+/** While nothing runs and the Simulation page is showing, the map shows the room the chosen scenario builds. */
+async function showSimPreview() {
+  const want = page() === 'sim' && lastMode !== 'sim' ? simScenario : '';
+  if (!want) {
+    if (simPreviewFor) {
+      simPreviewFor = '';
+      mesh.setSimPreview(null);
+    }
+    return;
+  }
+  if (want === simPreviewFor) return;
+  simPreviewFor = want;
+  try {
+    const r = await fetch(`/api/sim?scenario=${encodeURIComponent(want)}`);
+    if (!r.ok) return;
+    const st = (await r.json()) as SimState;
+    if (simPreviewFor !== want) return; // the choice moved on meanwhile
+    if (st.scenarios?.length && !simScenarios.length) {
+      simScenarios = st.scenarios;
+      renderScenarios();
+    }
+    mesh.setSimPreview(st);
+  } catch {
+    /* server busy */
+  }
+}
+onPage(() => void showSimPreview());
 
 /** The operator moved a slider since the running crowd was started (so the sliders are a wish, not a mirror). */
 let simSlidersTouched = false;
@@ -2032,18 +2222,22 @@ function renderSimApply() {
   now.textContent = `Running now: ${people} people · ${part}% carry Pulse (${st.phones ?? Math.round((people * part) / 100)} phones)`;
   const wantPeople = Number(($('simPeople') as HTMLInputElement).value);
   const wantPart = Number(($('simPart') as HTMLInputElement).value);
-  const started = simStarted ?? { people, part };
+  const started = simStarted ?? { people, part, scenario: st.scenario ?? 'concert' };
   // A crowd started elsewhere (surge around the phones, another console): the sliders follow it until touched.
   if (!simSlidersTouched && (wantPeople !== started.people || wantPart !== started.part)) {
     const slider = $('simPeople') as HTMLInputElement;
     setSimSliders(Math.min(Number(slider.max), Math.max(Number(slider.min), started.people)), started.part);
   }
-  restart.hidden = !simSlidersTouched || (wantPeople === started.people && Math.abs(wantPart - started.part) < 1);
+  const otherPlace = simScenario !== started.scenario;
+  restart.hidden = !otherPlace && (!simSlidersTouched || (wantPeople === started.people && Math.abs(wantPart - started.part) < 1));
   restart.disabled = simBusy;
-  if (!restart.hidden) restart.dataset.tip = `Stop this crowd and start a new one with ${wantPeople} people, ${wantPart}% with the app`;
+  if (!restart.hidden) {
+    const where = scenarioOf(simScenario)?.name.toLowerCase() ?? simScenario;
+    restart.dataset.tip = `Stop this crowd and start a ${where} with ${wantPeople} people, ${wantPart}% with the app`;
+  }
 }
 /** What the running crowd was started with (people drift as they arrive and leave). */
-let simStarted: { people: number; part: number } | null = null;
+let simStarted: { people: number; part: number; scenario: string } | null = null;
 
 function renderSimRunning(running: boolean) {
   $('simStart').hidden = running;
@@ -2083,7 +2277,7 @@ async function startSim(restart: boolean) {
         });
       }
       try {
-        await post('/api/sim/start', { people, participation, scenario: 'concert' });
+        await post('/api/sim/start', { people, participation, scenario: simScenario });
         break;
       } catch (e) {
         // Already running (started from another console, or by "surge around the phones" a moment ago).
@@ -2099,8 +2293,9 @@ async function startSim(restart: boolean) {
     }
     // A fresh run: nothing from the previous one stays on screen.
     simEnded();
-    simStarted = { people, part: Math.round(participation * 100) };
-    msg(restart ? `Restarted with ${people} people, ${Math.round(participation * 100)}% with the app` : `Simulating ${people} people`);
+    simStarted = { people, part: Math.round(participation * 100), scenario: simScenario };
+    const where = scenarioOf(simScenario)?.name.toLowerCase() ?? simScenario;
+    msg(restart ? `Restarted: ${where}, ${people} people, ${Math.round(participation * 100)}% with the app` : `Simulating a ${where} with ${people} people`);
     await pollSim();
   } catch (e) {
     msg((e as Error).message, true);
@@ -2142,41 +2337,11 @@ function pickOnMap(label: string, arrow: boolean, done: (p: { x: number; y: numb
   };
 }
 
-for (const b of document.querySelectorAll<HTMLButtonElement>('[data-sim]')) {
-  b.addEventListener('click', () => {
-    const type = b.dataset.sim!;
-    const strength = Number(($('simStrength') as HTMLInputElement).value) / 100;
-    areas.cancelPick(); // a new choice replaces a pick still waiting for a click
-    switch (type) {
-      case 'calm':
-      case 'stage':
-      case 'disperse':
-      case 'dance':
-      case 'intermission':
-        void simAction({ type });
-        break;
-      case 'surge':
-        void simAction({ type: 'surge', strength });
-        break;
-      case 'attract':
-        pickOnMap('Click where the group should gather', false, (p) => void simAction({ type: 'attract', x: p.x, y: p.y }));
-        break;
-      case 'spawn':
-        pickOnMap('Click where 20 people arrive', false, (p) => void simAction({ type: 'spawn', x: p.x, y: p.y, n: 20 }));
-        break;
-      case 'shove':
-        pickOnMap('Drag on the map: where the push starts, and which way', true, (p) => {
-          const len = Math.hypot(p.dx, p.dy);
-          if (len < 0.3) return msg('Drag a little further to give the push a direction', true);
-          void simAction({ type: 'shove', x: p.x, y: p.y, dx: p.dx / len, dy: p.dy / len, strength });
-        });
-        break;
-    }
-  });
-}
-// The strength slider applies to a surge that is already running, too.
+// The strength slider applies to a surge (or alarm) that is already running, too.
 $('simStrength').addEventListener('change', () => {
-  if (lastMode === 'sim' && simState?.action === 'surge') void simAction({ type: 'surge', strength: Number(($('simStrength') as HTMLInputElement).value) / 100 });
+  const act = simState?.action;
+  const spec = scenarioOf(simState?.scenario ?? simScenario)?.actions.find((a) => a.type === act && a.kind === 'strength');
+  if (lastMode === 'sim' && spec) void simAction({ type: spec.type, strength: Number(($('simStrength') as HTMLInputElement).value) / 100 } as SimAction);
 });
 
 const mmss = (sec: number) => `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}`;
@@ -2190,9 +2355,10 @@ function renderSimState(st: SimState) {
     $('simExits').replaceChildren(
       ...(st.exits ?? []).map((e) => {
         const btn = document.createElement('button');
-        btn.className = `sm exit ${e.open ? 'open' : 'closed'}`;
+        const what = e.kind === 'door' ? 'door' : e.kind === 'turnstile' ? 'turnstile' : 'exit';
+        btn.className = `sm exit ${e.open ? 'open' : 'closed'} ${e.kind ?? ''}`;
         btn.textContent = `${e.open ? '🟢' : '🔴'} ${e.name}`;
-        btn.dataset.tip = e.open ? 'Open. Click to close this exit' : 'Closed. Click to open this exit';
+        btn.dataset.tip = e.open ? `Open. Click to close this ${what}` : `Closed. Click to open this ${what}`;
         btn.addEventListener('click', () => void simAction({ type: 'exit', id: e.id, open: !e.open }));
         return btn;
       }),
@@ -2235,13 +2401,41 @@ async function pollSim() {
       return;
     }
     simState = st;
-    simStarted ??= { people: st.people ?? 0, part: Math.round((st.participation ?? 0) * 100) };
+    if (st.scenarios?.length) {
+      simScenarios = st.scenarios;
+      renderScenarios();
+    }
+    if (!simStarted || (st.scenario && simStarted.scenario !== st.scenario)) {
+      // Started elsewhere (another console, "surge around the phones", the API): the picker follows the running scenario.
+      simStarted = { people: st.people ?? 0, part: Math.round((st.participation ?? 0) * 100), scenario: st.scenario ?? 'concert' };
+      if (!simScenarioPicked && st.scenario && st.scenario !== simScenario) chooseScenario(st.scenario, false);
+    }
+    // The action buttons are the running scenario's (not the picker's) while it runs.
+    const running = scenarioOf(st.scenario ?? 'concert');
+    if (running && $('simActions').childElementCount !== running.actions.length) renderSimActions(running);
     renderSimState(st);
     renderSimApply();
   } catch {
     /* server busy */
   }
 }
+
+/** The scenario list, once, so the picker is there before anything runs. */
+void (async () => {
+  try {
+    const r = await fetch('/api/sim');
+    if (!r.ok) return;
+    const st = (await r.json()) as SimState;
+    if (st.scenarios?.length) {
+      simScenarios = st.scenarios;
+      if (st.running && st.scenario && !simScenarioPicked) simScenario = st.scenario;
+      if (!simScenarioPicked) chooseScenario(simScenario, false);
+      else renderScenarios();
+    }
+  } catch {
+    /* server busy */
+  }
+})();
 setInterval(() => {
   if (lastMode === 'sim') void pollSim();
 }, 1000);
@@ -2306,10 +2500,18 @@ function renderAlertCards() {
     $(box).replaceChildren(...list.map((a) => alertCardEl(a, box)));
   }
   $('simAlertsEmpty').hidden = sourced.length > 0 || lastMode === 'sim' || lastMode === 'replay';
+  syncBriefVisibility();
   renderSimBrief();
   renderAlertSummary();
   renderBriefAfterChange();
   if (page() === 'drill') renderDrillResult();
+}
+
+/** The briefing paragraph repeats the card's text: show it only when its alert has no card on screen. */
+function syncBriefVisibility() {
+  const id = lastBrief?.id;
+  const onCard = !!id && !!$('alertCards').querySelector(`[data-id="${CSS.escape(id)}"]`);
+  $('brief').hidden = onCard;
 }
 
 /** The briefing of the latest simulated alert, on the Simulation page. */
@@ -2330,8 +2532,9 @@ function alertCardEl(a: Alert, box: string): HTMLElement {
       const { head, action } = splitBrief(a);
       const el = document.createElement('div');
       el.className = `alert-card ${a.level} ${a.status === 'ack' ? 'ack' : ''} ${a.test ? 'drill' : ''} ${a.source ? 'sourced' : ''}`;
+      if (a.id) el.dataset.id = a.id;
       const where = placeName(a.zone);
-      const kind = a.test ? 'Drill' : a.early ? 'Early warning' : a.kind === 'density' ? 'Crowding' : a.kind === 'rule' ? 'Alert rule' : 'Crowd push';
+      const kind = a.test ? 'Drill' : a.early ? 'Early warning' : a.kind === 'density' ? 'Crowding' : a.kind === 'rule' ? 'Alert rule' : a.cause && a.level !== 'red' ? CAUSE_LABEL[a.cause] : 'Crowd push';
       const label = a.test ? 'DRILL · not a real incident' : `${sourceTag(a) ? `${sourceTag(a)} · ` : ''}${a.level === 'red' ? 'Danger' : 'Watch'}`;
       const acked = a.status === 'ack'
         ? `<span class="muted small">Acknowledged ${a.ackAt ? fmtTime(a.ackAt) : ''}${a.ackBy ? ` by ${esc(a.ackBy)}` : ''}</span>`
@@ -2341,7 +2544,7 @@ function alertCardEl(a: Alert, box: string): HTMLElement {
       el.innerHTML =
         `<div class="ac-top"><b>${label}</b><span>${esc(kind)} · ${esc(where)} · ${fmtTime(a.t)}</span>` +
         `${a.escalated ? '<span class="esc">escalated</span>' : ''}</div>` +
-        `<div class="ac-head">${esc(head || (a.test ? `Drill at ${where}` : `${where}: ${kind.toLowerCase()} detected`))}</div>` +
+        `<div class="ac-head">${esc(head || (a.test ? `Drill at ${where}` : a.cause && a.level !== 'red' ? causeHead(a.cause, where) : `${where}: ${kind.toLowerCase()} detected`))}</div>` +
         (action ? `<div class="ac-action">${esc(action)}</div>` : '') +
         (form
           ? `<form class="ac-resolve">` +
@@ -2350,6 +2553,7 @@ function alertCardEl(a: Alert, box: string): HTMLElement {
             `<label>Your name <span class="muted">(for the log)</span><input name="by" maxlength="40" placeholder="e.g. Maya, safety lead" /></label>` +
             `<div class="ac-btns"><button class="sm ${danger ? 'danger-btn' : 'primary'}" type="submit">${danger ? 'Resolve anyway' : 'Resolve'}</button><button class="sm ghost" type="button" data-cancel>Cancel</button></div></form>`
           : `<div class="ac-btns">${acked}<button class="sm ghost" data-resolve>Resolve…</button>` +
+            `<button class="sm ghost" data-escalate title="Announce this alert again now: voice and a red sign">Escalate now</button>` +
             `${!a.test && (a.kind ?? 'wave') === 'wave' ? '<button class="ac-why" data-why>Why did it fire?</button>' : ''}</div>`);
       el.querySelector('[data-why]')?.addEventListener('click', () => {
         const pair = evidenceFor(a);
@@ -2357,6 +2561,12 @@ function alertCardEl(a: Alert, box: string): HTMLElement {
         else toast('No two neighbouring phones in that area right now to show the evidence for.', 'info');
       });
       el.querySelector('[data-ack]')?.addEventListener('click', () => void alertAction(a, 'ack'));
+      el.querySelector('[data-escalate]')?.addEventListener('click', () => {
+        if (!a.id) return;
+        escalateNow(a.id)
+          .then(() => toast(`Escalated: ${placeName(a.zone)}`, 'danger'))
+          .catch((e: Error) => toast(`Couldn't escalate: ${e.message}`, 'error'));
+      });
       el.querySelector('[data-resolve]')?.addEventListener('click', () => {
         resolving = { id: a.id!, note: '' };
         renderAlertCards();
@@ -2399,15 +2609,16 @@ function renderBriefAfterChange() {
   $('briefMeta').textContent = '';
   $('briefPanel').classList.remove('red', 'drill');
   ($('replayAudioBtn') as HTMLButtonElement).disabled = true;
+  el.hidden = false;
 }
 
 async function alertAction(a: Alert, what: 'ack' | 'resolve', note = '') {
   if (!a.id) return;
-  let by = operator();
-  if (what === 'ack' && !by) {
-    // Ask once; Cancel keeps it anonymous.
-    by = (window.prompt('Your name for the incident log (asked once on this console):', '') ?? '').trim().slice(0, 40);
-    if (by) lsSet('pulse.operator', by);
+  const by = operator();
+  if (what === 'ack' && !by && !flag('pulse.nameHint')) {
+    // Never block an acknowledgement with a prompt: say once where the name goes.
+    setFlag('pulse.nameHint');
+    toast('Acknowledged. Add your name in Settings and the log will say who did.', 'info');
   }
   // Optimistic: the server's update arrives over the socket too.
   const now = Date.now();
@@ -2446,15 +2657,18 @@ function buildRules(box: HTMLElement, id: string) {
   // Empty boxes mean the rule is off; the server's limits are mirrored in min/max.
   box.innerHTML =
     `<div class="rules-form">` +
-    `<p class="rf-lead">Alert when…</p>` +
-    `<div class="rf-rule"><label class="rf-line"><span>…more than</span><input type="number" name="density" min="0.5" max="20" step="0.5" placeholder="off" value="${r.density ?? ''}" aria-label="People per square metre" />` +
-    `<span>people per m² for</span><input type="number" name="densityHoldS" min="1" max="600" step="1" placeholder="5" value="${r.densityHoldS ?? ''}" aria-label="Seconds" /><span>s</span></label>` +
-    `<p class="rf-hint">People per m². About 2 is comfortable, 4 is tight, 5+ is dangerous.</p></div>` +
-    `<div class="rf-rule"><label class="rf-line"><span>Max people</span><input type="number" name="maxPhones" min="1" max="100000" step="1" placeholder="off" value="${r.maxPhones ?? ''}" aria-label="Max people" /></label>` +
+    `<p class="rf-note muted">Three ways this area can raise an alert. Leave a box empty to turn that rule off; changes save as you go.</p>` +
+    `<div class="rf-rule"><span class="rf-name">Crowding</span>` +
+    `<label class="rf-line"><span>more than</span><input type="number" name="density" min="0.5" max="20" step="0.5" placeholder="off" value="${r.density ?? ''}" aria-label="People per square metre" /><span>people per m²</span></label>` +
+    `<label class="rf-line"><span>for at least</span><input type="number" name="densityHoldS" min="1" max="600" step="1" placeholder="5" value="${r.densityHoldS ?? ''}" aria-label="Seconds" /><span>seconds</span></label>` +
+    `<p class="rf-hint">About 2 per m² is comfortable, 4 is tight, 5 and up is dangerous. Warning at 75 % of your limit.</p></div>` +
+    `<div class="rf-rule"><span class="rf-name">Capacity</span>` +
+    `<label class="rf-line"><span>more than</span><input type="number" name="maxPhones" min="1" max="100000" step="1" placeholder="off" value="${r.maxPhones ?? ''}" aria-label="Maximum people inside" /><span>people inside</span></label>` +
     `<p class="rf-hint" data-share></p></div>` +
-    `<label class="rf-line rf-switch"><input type="checkbox" name="push" ${r.push !== false ? 'checked' : ''} role="switch" /><span>Detect crowd pushes</span><span class="muted">a shove rippling through the crowd</span></label>` +
-    `<p class="rf-note muted">Leave a box empty to turn that limit off.</p>` +
-    `<label class="rf-block"><span>Message staff will hear</span><input type="text" name="message" maxlength="140" placeholder="e.g. Open the side gate and slow the barrier queue" value="${esc(r.message ?? '')}" /></label>` +
+    `<div class="rf-rule"><span class="rf-name">Crowd push</span>` +
+    `<label class="rf-line rf-switch"><input type="checkbox" name="push" ${r.push !== false ? 'checked' : ''} role="switch" /><span>Detect pushes travelling through this area</span></label></div>` +
+    `<label class="rf-block"><span>Message staff will hear</span><input type="text" name="message" maxlength="140" placeholder="e.g. Open the side gate and slow the barrier queue" value="${esc(r.message ?? '')}" />` +
+    `<span class="rf-hint">Replaces the suggested action in every briefing for this area.</span></label>` +
     `<div class="rf-block"><span>Send to</span><div class="rf-chips">` +
     `<label class="chip"><input type="checkbox" name="sign" ${n.sign !== false ? 'checked' : ''}/> Sign</label>` +
     `<label class="chip"><input type="checkbox" name="light" ${n.light !== false ? 'checked' : ''}/> Zone light</label>` +
@@ -2495,8 +2709,8 @@ let peoplePerPhone: number | null = null;
 function renderShareHint(root: ParentNode = document) {
   const text =
     peoplePerPhone && peoplePerPhone > 1.05
-      ? `Estimated from phones: about 1 in ${Math.round(peoplePerPhone)} attendees runs Pulse.`
-      : 'Estimated from the phones running Pulse inside the area.';
+      ? `Counted from the phones inside: right now about 1 in ${Math.round(peoplePerPhone)} attendees runs Pulse, so the count is scaled up.`
+      : 'Counted from the phones running Pulse inside the area, scaled up by how many attendees run it.';
   for (const el of root.querySelectorAll<HTMLElement>('[data-share]')) el.textContent = text;
 }
 
@@ -2510,6 +2724,10 @@ const TEMPLATES = [
   { id: 'theatre', name: 'Theatre floor', w: 30, h: 20, sub: '≈ 1,500 standing' },
   { id: 'arena', name: 'Arena floor', w: 60, h: 40, sub: '≈ 6,000 standing' },
   { id: 'festival', name: 'Festival field', w: 120, h: 80, sub: '≈ 20,000+' },
+  // The rooms the simulator's classroom, auditorium and stadium-gate scenarios build (same sizes, so areas drawn here fit them).
+  { id: 'classroom', name: 'Classroom', w: 11.6, h: 16, sub: 'Lecture room + corridor, 63 desks' },
+  { id: 'auditorium', name: 'Auditorium', w: 30, h: 25, sub: '504 seats, lobby, 4 exits' },
+  { id: 'gate', name: 'Stadium gate', w: 30, h: 22, sub: 'Turnstile bank inside fences' },
   { id: 'custom', name: 'Custom', w: 0, h: 0, sub: 'Type the size below' },
 ];
 
@@ -2924,6 +3142,41 @@ $('resetForm').addEventListener('submit', async (e) => {
   );
 });
 
+// ---------------------------------------------------------------------------
+// settings: this console's event name and operator name (the top-bar buttons
+// for sound and theme have twins here, wired where they are defined)
+// ---------------------------------------------------------------------------
+
+const setEvent = $('setEvent') as HTMLInputElement;
+const setOperator = $('setOperator') as HTMLInputElement;
+function flashSaved(text = 'Saved ✓') {
+  const el = $('setSaved');
+  el.textContent = text;
+  animate(el, { opacity: [0, 1] }, { duration: 0.2 });
+  window.clearTimeout(Number(el.dataset.t));
+  el.dataset.t = String(window.setTimeout(() => animate(el, { opacity: 0 }, { duration: 0.4 }), 2500));
+}
+setEvent.addEventListener('change', () => {
+  const v = setEvent.value.trim();
+  if (!v) return (setEvent.value = eventInput.value);
+  setEventName(v);
+  refreshSetup();
+  flashSaved();
+});
+setEvent.addEventListener('keydown', (e) => e.key === 'Enter' && setEvent.blur());
+setOperator.addEventListener('change', () => {
+  const v = setOperator.value.trim();
+  if (v) lsSet('pulse.operator', v);
+  else lsDel('pulse.operator');
+  flashSaved(v ? `Saved ✓ The log will say “by ${v}”.` : 'Saved ✓ Acknowledgements stay anonymous.');
+});
+setOperator.addEventListener('keydown', (e) => e.key === 'Enter' && setOperator.blur());
+onPage((p) => {
+  if (p !== 'settings') return;
+  setEvent.value = eventInput.value;
+  setOperator.value = operator();
+});
+
 // Last: runs immediately, so everything it touches must already exist.
 let lastPage = '';
 onPage((p) => {
@@ -2946,6 +3199,7 @@ let explainTimer = 0;
 
 areas.onLink = (from, to) => void openExplain([from, to]);
 $('exClose').addEventListener('click', () => closeExplain());
+window.addEventListener('keydown', (e) => e.key === 'Escape' && explainPair && closeExplain());
 
 function closeExplain() {
   window.clearInterval(explainTimer);
@@ -2961,6 +3215,8 @@ function closeExplain() {
  */
 function evidenceFor(a: Alert): [string, string] | null {
   if (!snap) return null;
+  const moving = a.cause === 'together' ? table.evidence(snap, a.zone) : null; // table demo: a pair in the group
+  if (moving) return moving;
   const zone = (id: string) => nodesById.get(id)?.zone;
   const named = (p: [string, string]) => (nodesById.get(p[0])?.name ? 1 : 0) + (nodesById.get(p[1])?.name ? 1 : 0);
   const inZone = (p: [string, string]) => (zone(p[0]) === a.zone ? 1 : 0) + (zone(p[1]) === a.zone ? 1 : 0);
@@ -3010,9 +3266,20 @@ async function refreshExplain() {
   v.className = `st ${e.wave ? 'wave' : 'ok'}`;
   v.textContent = e.wave ? 'Push detected' : 'Not a push';
   const failed = e.checks.filter((c) => !c.pass);
-  $('exSummary').textContent = e.wave
-    ? `${who(e.to)} repeats ${who(e.from)}'s motion ${Math.abs(e.lagMs)} ms later (similarity ${e.peak.toFixed(2)}): a push passing from one person to the next.`
-    : `Not counted as a push: ${failed.map((c) => c.name.toLowerCase()).join(', ') || 'below the thresholds'}.`;
+  // Table demo rows: a two-phone push (yellow at most) and moving as one (yellow, not a push).
+  const pairPush = e.wave && e.checks.some((c) => c.pass && c.name.startsWith('Two-phone push'));
+  const asOne = !e.wave && e.checks.some((c) => c.pass && c.name.startsWith('Moving as one'));
+  if (pairPush || asOne) {
+    v.className = 'st swaying';
+    v.textContent = pairPush ? 'Push between two people' : 'Moving as one';
+  }
+  $('exSummary').textContent = asOne
+    ? `${who(e.from)} and ${who(e.to)} move as one, at most a few hundred ms apart, not to a beat: what people pressed together feel like (or people rocking together by choice). Shown as yellow, never red.`
+    : pairPush
+      ? `${who(e.to)} repeats ${who(e.from)}'s motion ${Math.abs(e.lagMs)} ms later (similarity ${e.peak.toFixed(2)}): a push from one to the other. With only two phones there is no chain through a crowd, so it shows as yellow, never red.`
+      : e.wave
+        ? `${who(e.to)} repeats ${who(e.from)}'s motion ${Math.abs(e.lagMs)} ms later (similarity ${e.peak.toFixed(2)}): a push passing from one person to the next.`
+        : `Not counted as a push: ${failed.map((c) => c.name.toLowerCase()).join(', ') || 'below the thresholds'}.`;
   $('exWin').textContent = `${((e.a.length * e.stepMs) / 1000).toFixed(0)} s`;
   $('exPeak').textContent = `peak ${e.peak.toFixed(2)} at ${e.lagMs} ms`;
   drawTraces(e);
@@ -3166,3 +3433,6 @@ const demo = initDemo({
   nameOf: who,
   goLive,
 });
+
+initEscalation((text, kind) => toast(text, kind));
+initHwSetup({ toast, refresh: () => void loadHardware() }); // Hardware page: table demo + board readiness (hwsetup.ts)

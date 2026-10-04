@@ -179,7 +179,7 @@ func (a *App) PhoneHelloAt(id, at, ua string) bool {
 	}
 	a.helloLiveLocked(now, id, x, y, ua)
 	m = a.live.meta[id]
-	m.tower, m.bias = key, bias
+	m.tower, m.bias, m.pinned = key, bias, false
 	return true
 }
 
