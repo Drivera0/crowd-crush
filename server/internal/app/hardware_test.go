@@ -41,6 +41,20 @@ func TestAreaLightValidation(t *testing.T) {
 	}
 }
 
+// One missed check must not flip a board to offline; a long silence must.
+func TestHardwareGrace(t *testing.T) {
+	prev := []protocol.Hardware{{URL: "http://sign", Online: true, LastSeen: 1000, Level: "red"}}
+	miss := []sign.Status{{URL: "http://sign", Err: "not reachable"}}
+	hw := hardwareList(miss, prev, nil, 1000+HardwareGraceMs-1)
+	if !hw[0].Online || hw[0].Level != "red" || hw[0].LastSeen != 1000 {
+		t.Fatalf("within grace: %+v", hw[0])
+	}
+	hw = hardwareList(miss, prev, nil, 1000+HardwareGraceMs+1)
+	if hw[0].Online || hw[0].Error == "" {
+		t.Fatalf("after grace: %+v", hw[0])
+	}
+}
+
 func TestHardwareProbe(t *testing.T) {
 	light := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"kind":"zone-light","level":"calm","rssi":-55,"uptime":42,"ble":{"devices":24,"near":5,"scans":7,"age":1}}`))
