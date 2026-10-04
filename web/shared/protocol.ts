@@ -63,6 +63,13 @@ export interface Motion {
    * (x, z horizontal, y vertical).
    */
   g?: [number, number, number];
+  /**
+   * Compass heading in degrees clockwise from north, for dead reckoning (shared/locate.ts): `hd` of the
+   * phone's top edge, or, when the top edge points more up or down than along the ground (|g[1]| > 0.8),
+   * `hb` of its back (the way the rear camera looks). Send whichever axis is closer to horizontal. Optional.
+   */
+  hd?: number;
+  hb?: number;
 }
 
 export type FromPhone = Hello | Pos | Gps | Pong | Motion;
@@ -117,8 +124,20 @@ export interface Node {
   y: number;
   /** GPS accuracy radius in metres; 0 = placed by hand. */
   acc?: number;
-  /** How the position was set: GPS, by hand, or by checking in at a tower (its QR code). */
-  src?: 'gps' | 'manual' | 'tower' | 'beacon';
+  /**
+   * How the position was set: GPS, by hand, by checking in at a tower (its QR code), Bluetooth beacons, or
+   * 'est': worked out by the position estimator without GPS (entry spot, steps, neighbours; shared/locate.ts).
+   */
+  src?: 'gps' | 'manual' | 'tower' | 'beacon' | 'est';
+  /**
+   * The position estimator (shared/locate.ts). With it on, x, y are its estimate and acc its uncertainty
+   * (68 % radius, m; 0 = as good as placed by hand). raw: where the phone would be shown without it (smoothed
+   * GPS fix or hand placement), when that differs. loc: what went into the estimate. lost: too vague to say
+   * where in the venue the phone is; it counts toward no cluster or density.
+   */
+  raw?: [number, number];
+  loc?: import('./locate').LocSource[];
+  lost?: boolean;
   /** Outside the venue rectangle: counts toward nothing. */
   outside?: boolean;
   /** A real phone's generated name and colour (absent for simulated and replayed phones). */
@@ -241,6 +260,8 @@ export interface SimFrame {
   bodies: [number, number, number, number][];
   t: number;
   action: string;
+  /** How far the positions Pulse uses are from where the simulated people stand, once a second (shared/locate.ts). */
+  loc?: import('./locate').LocError;
 }
 
 export interface Snapshot {

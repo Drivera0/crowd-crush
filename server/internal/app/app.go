@@ -62,6 +62,9 @@ type Options struct {
 	// PublicURL is the URL phones should open (GET /api/join); empty =
 	// env PUBLIC_URL, else the dashboard's own host.
 	PublicURL string
+	// NoLocate turns the position estimator off (locate.go); it is on by
+	// default. data/locate.json and PULSE_LOCATE=0 override this.
+	NoLocate bool
 }
 
 type nodeMeta struct {
@@ -101,6 +104,7 @@ type nodeMeta struct {
 	bias  gpsBias
 
 	bcn beaconPos // latest Bluetooth beacon report and fix (beacons.go)
+	loc locMeta   // the position estimator's view of this phone (locate.go)
 }
 
 func (m *nodeMeta) src() string {
@@ -154,6 +158,7 @@ type pipeline struct {
 	guide    *crowd.Guide          // personal guidance state (guide.go)
 	moves    map[string]crowd.Move // guidance for the phones in danger, latest step
 	stepDur  []stepTime            // detector step durations, last ~5 s
+	loc      *locState             // position estimator; nil = off (locate.go)
 }
 
 // stepTime is one pipeline step's duration.
@@ -195,12 +200,15 @@ func (p *pipeline) step(now int64) (detect.Result, []crowd.Change) {
 		}
 		p.stepDur = append(p.stepDur[:0], p.stepDur[cut:]...)
 	}()
+	if p.loc != nil {
+		p.loc.step(p, now) // the estimator's positions are what this step uses
+	}
 	p.last = p.det.Step(now)
 	var pts []crowd.Point
 	for _, pr := range p.last.Phones {
 		m := p.meta[pr.ID]
-		if pr.Status == protocol.StatusStale || pr.Outside || (m != nil && !m.connected) {
-			continue
+		if pr.Status == protocol.StatusStale || pr.Outside || (m != nil && (!m.connected || m.loc.lost)) {
+			continue // a lost phone (locate.go) is nowhere in particular: it stays in the detector, not in the density
 		}
 		pts = append(pts, crowd.Point{ID: pr.ID, X: pr.X, Y: pr.Y, Acc: pr.Acc})
 	}
@@ -222,6 +230,9 @@ func (p *pipeline) step(now int64) (detect.Result, []crowd.Change) {
 
 // place moves a phone in this pipeline.
 func (p *pipeline) place(id string, m *nodeMeta) {
+	if p.loc != nil {
+		p.loc.placed(id, m) // the estimator takes it from here (locate.go)
+	}
 	p.det.SetPhone(id, m.x, m.y)
 	p.det.SetAccuracy(id, m.acc) // > 0 (a GPS fix): neighbours by motion, density at the scale the fix supports
 	p.det.SetOutside(id, m.outside || m.unplaced)
@@ -275,10 +286,11 @@ type App struct {
 	openInc   map[string]string    // incident key → id of its unresolved alert
 	snapBytes int                  // size of the last snapshot broadcast
 
-	names map[string]names.Name // generated phone names, by session id (demo.go)
-	demo  protocol.DemoSpot     // where joining phones are lined up (demo.go)
-	surge *surgeDirector        // "surge around the phones" in progress (hybrid.go)
-	mesh  *meshState            // phone-to-phone mesh bookkeeping (mesh.go)
+	names  map[string]names.Name // generated phone names, by session id (demo.go)
+	demo   protocol.DemoSpot     // where joining phones are lined up (demo.go)
+	surge  *surgeDirector        // "surge around the phones" in progress (hybrid.go)
+	locCfg protocol.LocateConfig // the position estimator's settings (locate.go)
+	mesh   *meshState            // phone-to-phone mesh bookkeeping (mesh.go)
 
 	bcn beaconState // Bluetooth beacon positioning: constants and board links (beacons.go, beaconlinks.go)
 }
@@ -331,6 +343,8 @@ func New(opt Options) *App {
 	a.areas = a.loadAreas()
 	a.demo = a.loadDemo()
 	a.live = newPipeline(a.liveConfig())
+	a.locInit()
+	a.locAttach(a.live, false, hub.Now())
 	a.applyZones(a.live)
 	a.Hub = hub.New(a)
 	return a
@@ -465,6 +479,9 @@ func (a *App) gpsLocked(now int64, id string, lat, lon, acc float64) {
 	}
 	anchor := geo.Anchor{Lat: a.venue.Lat, Lon: a.venue.Lon, Bearing: a.venue.Bearing}
 	x, y := anchor.ToVenue(lat, lon)
+	if a.locGPS(a.live, now, id, m, x, y, acc) {
+		return // the position estimator takes the fix as it is (locate.go)
+	}
 	x, y = m.gps.Add(x, y, acc)
 	x, y = m.bias.apply(now, x, y) // a tower check-in's correction, fading out (tower.go)
 	if m.bcn.holds(m, now) {
@@ -546,6 +563,7 @@ func (a *App) motionIn(p *pipeline, id string, mo protocol.Motion, recv int64) (
 		m.recorded = true
 	}
 	p.det.Add(id, detect.Sample{T: mo.T, AX: mo.AX, AY: mo.AY, AZ: mo.AZ, Rot: detRot(p.cfg(), m, mo, recv), G: detect.Gravity(mo.G)})
+	a.locMotion(p, id, mo)
 	if !m.unplaced { // a recording has no place for a phone that is nowhere yet
 		a.record(store.Record{K: store.KindM, T: recv, ID: id, CT: mo.T, AX: mo.AX, AY: mo.AY, AZ: mo.AZ, Rot: mo.Rot, G: gravityOf(mo)})
 	}
@@ -804,6 +822,7 @@ func (a *App) snapshotLocked(now int64) protocol.Snapshot {
 		if !m.outside && !m.unplaced {
 			n.Zone = p.det.ZoneOf(m.x, m.y)
 		}
+		locNode(m, &n)
 		pr, ok := status[id]
 		switch {
 		case !m.connected:

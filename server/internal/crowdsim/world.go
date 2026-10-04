@@ -302,6 +302,12 @@ type Config struct {
 	// Realism makes the phones messy (GPS error, carry, dropouts; see
 	// realism.go). The zero value is the ideal phone.
 	Realism Realism
+	// Bearing is the compass direction of the venue map's up, in degrees
+	// clockwise from north; phones that report a heading need it.
+	Bearing float64
+	// Entry, when set, starts with an empty venue: everyone comes in at one
+	// spot and walks to their place (entry.go).
+	Entry *Entry
 }
 
 // Scenarios lists the start scenarios.
@@ -343,6 +349,10 @@ type World struct {
 	seed      int64
 	env       Env        // what the messy phones share (common GPS error)
 	envRng    *rand.Rand // nil with ideal phones
+	bearing   float64
+	entry     *Entry
+	pending   []*group // entry.go: groups still outside, in arrival order
+	pendingAt []float64
 }
 
 // Realism is the phones' imperfections.
@@ -370,7 +380,7 @@ func New(c Config) (*World, error) {
 	}
 	w := &World{G: LayoutGeometry(c.W, c.H, c.Layout), StartMs: c.StartMs, Participation: c.Participation,
 		Action: ActCalm, rng: rand.New(rand.NewSource(c.Seed)), Churn: true, Trips: true,
-		realism: c.Realism, seed: c.Seed}
+		realism: c.Realism, seed: c.Seed, bearing: c.Bearing}
 	if !c.Realism.Ideal() {
 		w.envRng = rand.New(rand.NewSource(mixSeed(c.Seed, -7)))
 	}
@@ -380,6 +390,11 @@ func New(c Config) (*World, error) {
 	w.defaultPOIs()
 	w.placeConcert(c.People)
 	w.settle()
+	if c.Entry != nil {
+		if err := w.queueEntry(*c.Entry); err != nil {
+			return nil, err
+		}
+	}
 	w.measure()
 	return w, nil
 }

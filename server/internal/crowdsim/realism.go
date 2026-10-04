@@ -110,6 +110,16 @@ import (
 //     motion events at 10 Hz instead of 50–60 Hz, so a summary is one raw
 //     sample; half of those also send only every 200 ms.
 //
+// # 4. Heading (Realism.Heading) and no position (Realism.NoPos)
+//
+// For dead reckoning (internal/locate; see heading.go). With Heading > 0 a
+// phone reports its compass heading with every summary (protocol.Motion HD
+// or HB), with an indoor compass's error, and the walking signal gets the
+// fore-aft component real gait has. With NoPos the phone never says where
+// it is (no tap on a map, no GPS): its hello carries no position and the
+// server has to work it out. Both are off in every preset, so the numbers
+// measured before they existed don't move.
+//
 // With every strength at 0 nothing in this file runs and the phones are
 // exactly the ideal ones (same random numbers, same messages).
 
@@ -127,6 +137,18 @@ type Realism struct {
 	// phone page), so the server can't level them. For measuring what
 	// levelling buys.
 	NoGravity bool `json:"noGravity,omitempty"`
+	// Heading: the phone reports a compass heading (0 = it doesn't; 1 = a
+	// realistic indoor compass; 2 = harsh) and its gait has a fore-aft
+	// component. See heading.go.
+	Heading float64 `json:"heading,omitempty"`
+	// NoPos: the phone never reports a position by hand (one shared QR
+	// code, no tapping a map). Its hello carries none; with GPS on it still
+	// sends fixes.
+	NoPos bool `json:"noPos,omitempty"`
+	// PhoneDR: the phone counts its own steps at full sensor rate and
+	// reports them (protocol "dr"). A model of what such a phone page
+	// could deliver, not a simulation of one: see dr.go. Needs Heading.
+	PhoneDR float64 `json:"phoneDR,omitempty"`
 }
 
 // MaxRealism is the largest strength accepted.
@@ -156,11 +178,13 @@ func RealismPreset(name string) (Realism, error) {
 }
 
 // Ideal reports whether every imperfection is off.
-func (r Realism) Ideal() bool { return r.GPS == 0 && r.Carry == 0 && r.Dropout == 0 }
+func (r Realism) Ideal() bool {
+	return r.GPS == 0 && r.Carry == 0 && r.Dropout == 0 && r.Heading == 0 && !r.NoPos
+}
 
 // Validate checks the strengths.
 func (r Realism) Validate() error {
-	for _, v := range []float64{r.GPS, r.Carry, r.Dropout} {
+	for _, v := range []float64{r.GPS, r.Carry, r.Dropout, r.Heading, r.PhoneDR} {
 		if math.IsNaN(v) || v < 0 || v > MaxRealism {
 			return fmt.Errorf("realism strengths must be 0–%g", MaxRealism)
 		}
@@ -249,12 +273,16 @@ type Raw struct {
 	Rot        float64
 	Gait       float64 // 0 standing … 1 walking
 	Step       float64 // gait phase (rad), advancing 2π per step
+	Face       float64 // body facing (rad, venue frame: 0 = +x, y down); heading.go
+	Speed      float64 // m/s
+	Dir        float64 // direction of travel (rad, venue frame)
 }
 
 // Env is what the device needs to know about the run.
 type Env struct {
 	StartMs int64 // server clock at T = 0
 	Common  GPSCommon
+	Bearing float64 // the venue map's up, degrees clockwise from north (heading.go)
 }
 
 type queued struct {
@@ -379,6 +407,10 @@ type Device struct {
 	stallUntil  float64
 	q           []queued
 	lastRel     float64
+
+	qNow m3      // attitude this tick (the pocket swings)
+	cmp  compass // heading.go
+	dr   phoneDR // dr.go
 }
 
 // NewDevice creates a phone with the given imperfections; seed fixes
@@ -411,6 +443,13 @@ func NewDevice(id string, rl Realism, seed int64) *Device {
 		d.swingA = 0.25 + 0.2*r.Float64()
 		d.swingP = 2 * math.Pi * r.Float64()
 		d.bagSwing = 0.2 + 0.4*r.Float64()
+	}
+	d.qNow = d.q0
+	if rl.Heading > 0 {
+		d.cmp.init(rl.Heading, rand.New(rand.NewSource(mixSeed(seed, 77))))
+	}
+	if rl.PhoneDR > 0 {
+		d.dr.init(rl.PhoneDR, rand.New(rand.NewSource(mixSeed(seed, 78))))
 	}
 	return d
 }
@@ -568,15 +607,27 @@ func (d *Device) Tick(in Raw, env Env, out []Event) []Event {
 	if !d.hello {
 		d.hello = true
 		d.sx, d.sy, d.sent = r2c(in.X), r2c(in.Y), false
-		d.send(t, Event{Kind: EvHello, ID: d.ID, X: x, Y: y, Auto: d.rl.GPS > 0})
+		d.send(t, Event{Kind: EvHello, ID: d.ID, X: x, Y: y, Auto: d.rl.GPS > 0 || d.rl.NoPos})
 		d.send(t, Event{Kind: EvSync, ID: d.ID, Offset: d.offset + int64(d.clockBias), RTT: d.rtt})
 		d.nextFix = t
 	}
 
+	if d.rl.Heading > 0 {
+		// Along the direction of travel, which a body squeezing through a
+		// crowd is not always facing.
+		fa := d.cmp.foreAft(in)
+		s, c := math.Sincos(in.Dir - in.Face)
+		in.BZ += fa * c
+		in.BX += fa * s
+	}
 	ax, ay, az, rot := in.BX, in.BY, in.BZ, in.Rot
 	var g []float64
 	if d.rl.Carry > 0 {
 		ax, ay, az, rot = d.carried(in, dt)
+	}
+	if d.rl.Heading > 0 {
+		ax = -ax // a right-handed device frame, as a real phone's (heading.go)
+		d.cmp.step(dt)
 	}
 
 	// Sampling: a slow sensor only sees every fifth tick.
@@ -599,10 +650,23 @@ func (d *Device) Tick(in Raw, env Env, out []Event) []Event {
 			if d.rl.Carry > 0 && !d.rl.NoGravity {
 				g = d.gravity()
 			}
-			d.send(t, Event{Kind: EvMotion, ID: d.ID, M: protocol.Motion{Type: protocol.TypeMotion, T: ts,
-				AX: r3(d.ax / n), AY: r3(d.ay / n), AZ: r3(d.az / n), Rot: math.Round(d.rot*10) / 10, G: g}})
+			mo := protocol.Motion{Type: protocol.TypeMotion, T: ts,
+				AX: r3(d.ax / n), AY: r3(d.ay / n), AZ: r3(d.az / n), Rot: math.Round(d.rot*10) / 10, G: g}
+			if d.rl.Heading > 0 {
+				if len(mo.G) == 3 {
+					mo.G[0] = -mo.G[0]
+				}
+				mo.HD, mo.HB = d.cmp.report(d.qNow, in.Face, env.Bearing)
+			}
+			d.send(t, Event{Kind: EvMotion, ID: d.ID, M: mo})
 		}
 		d.n, d.ax, d.ay, d.az, d.rot, d.tick = 0, 0, 0, 0, 0, 0
+	}
+
+	if d.rl.PhoneDR > 0 {
+		if ev, ok := d.dr.tick(d, in, env, dt); ok {
+			d.send(t, ev)
+		}
 	}
 
 	// Position: a GPS fix about once a second, else the true position at
@@ -613,6 +677,8 @@ func (d *Device) Tick(in Raw, env Env, out []Event) []Event {
 			acc := math.Max(gpsAccFloor, r68ToSigma*d.sigma*d.accFactor)
 			d.send(t, Event{Kind: EvGPS, ID: d.ID, X: r2c(x), Y: r2c(y), Acc: math.Round(acc*10) / 10})
 		}
+	} else if d.rl.NoPos {
+		// never says where it is
 	} else if d.posTick++; d.posTick >= PosEveryTicks {
 		d.posTick = 0
 		if px, py := r2c(in.X), r2c(in.Y); px != d.sx || py != d.sy {
@@ -716,6 +782,7 @@ func (d *Device) carried(in Raw, dt float64) (ax, ay, az, rot float64) {
 		}
 	}
 	// Into the device frame: device = Qᵀ · body.
+	d.qNow = q
 	qt := q.t()
 	ax, ay, az = qt.apply(bx, by, bz)
 	// Gravity as the phone would estimate it: down (body −y) in the device
