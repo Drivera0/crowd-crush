@@ -12,7 +12,6 @@ Ordered by value per hour. Judging: technical complexity · design · pitch · o
    - **USB:** plugged into the laptop, the server writes `red B` / `calm` down the serial cable (`SIGN_URL=serial:auto`).
    - **Wireless on a power bank:** the sketch remembers two Wi-Fi networks (home + phone hotspot) and joins whichever is there. It answers `GET /pulse` so the server can find it on the local network by itself (`SIGN_URL=auto`). Discovery works when the server runs natively (the Mac); inside WSL, keep the explicit IP.
    - Power bank: test 10–15 min first; some switch off when the draw is this low.
-4. [ ] **Google Home Mini speaks the alert** (~1 h). Cast the ElevenLabs briefing to the Home Mini on the same Wi-Fi (no jailbreak). Sign + speaker on the table → Surge Choice, Best Hardware, MLH ElevenLabs.
 
 ## Cheap wins (< 1 h each)
 - [ ] **Venue floor plan as the map background**: upload an image, or an iPhone 15 Pro Max LiDAR room scan exported as an image.
@@ -40,7 +39,7 @@ The demo runs on the **MacBook**, on a different network from home. Nothing belo
 - [ ] Plan for the demo network: the phone hotspot (iPhone: Maximize Compatibility on) for the Mac and any Wi-Fi devices; attendees' phones can use any network or mobile data.
 - [ ] Tunnel running and the join QR opens on a phone that's on **mobile data** (proves it works off the laptop's network).
 - [ ] If using the quick tunnel: the address changes on every restart, so re-check the QR. The `.tech` domain fixes this.
-- [ ] Google Home Mini (if used) on the same network as the Mac.
+- [ ] Voice plays through the Mac's speakers: volume up, dashboard 🔇 clicked once (browsers block audio until a click).
 
 **Phones: test on real devices (at home, over the tunnel)**
 | Phone / browser | Join + motion prompt | GPS dot lands right | Tap-your-spot fallback | Red screen on alert | Screen stays on |
