@@ -14,6 +14,7 @@ import (
 type outcome struct {
 	maxLevel     string         // worst level any zone reached
 	redAt        float64        // seconds until the first red (-1 if never)
+	yellowAt     float64        // seconds until the first yellow or worse (-1 if never)
 	waveSteps    int            // steps with at least one wave edge
 	handlingSeen bool           // some node was marked handling
 	swayingSeen  bool           // some node was marked swaying or wave
@@ -32,11 +33,16 @@ func runScenario(t *testing.T, name string, n int, dur float64, clockErrMs int64
 // flipOdd holds every other phone upside down (x axis negated).
 func runScenarioFlip(t *testing.T, name string, n int, dur float64, clockErrMs int64, flipOdd bool) outcome {
 	t.Helper()
-	sc, err := sim.New(name, n, 1, n, 42)
+	return runScenarioCfg(t, name, n, dur, clockErrMs, flipOdd, 42, DefaultConfig())
+}
+
+// runScenarioCfg runs one scenario with a given simulator seed and config.
+func runScenarioCfg(t *testing.T, name string, n int, dur float64, clockErrMs int64, flipOdd bool, seed int64, cfg Config) outcome {
+	t.Helper()
+	sc, err := sim.New(name, n, 1, n, seed)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := DefaultConfig()
 	cfg.Rows, cfg.Cols = 1, n
 	d := New(cfg)
 	rng := rand.New(rand.NewSource(7))
@@ -50,7 +56,7 @@ func runScenarioFlip(t *testing.T, name string, n int, dur float64, clockErrMs i
 	}
 	const t0 = 1_700_000_000_000
 	evs := sc.Generate(t0, dur)
-	out := outcome{maxLevel: protocol.LevelCalm, redAt: -1, directions: map[string]int{}}
+	out := outcome{maxLevel: protocol.LevelCalm, redAt: -1, yellowAt: -1, directions: map[string]int{}}
 	j := 0
 	for now := int64(t0); now <= t0+int64(dur*1000); now += 250 {
 		for j < len(evs) && evs[j].T <= now {
@@ -73,6 +79,9 @@ func runScenarioFlip(t *testing.T, name string, n int, dur float64, clockErrMs i
 		for _, z := range r.Zones {
 			if levelRank[z.Level] > levelRank[out.maxLevel] {
 				out.maxLevel = z.Level
+			}
+			if z.Level != protocol.LevelCalm && out.yellowAt < 0 {
+				out.yellowAt = float64(now-t0) / 1000
 			}
 			if z.Level == protocol.LevelRed {
 				if out.redAt < 0 {
@@ -105,7 +114,42 @@ func TestScenarios(t *testing.T) {
 		{scenario: "dance", dur: 60, wantMaxLevel: "calm", exact: true, wantSway: true, maxWaveSteps: 8},
 		{scenario: "handle", dur: 60, wantMaxLevel: "calm", exact: true, wantHandling: true, maxWaveSteps: 0},
 		{scenario: "shove", dur: 40, wantMaxLevel: "yellow", maxWaveSteps: -1, wantSway: true},
-		{scenario: "wave", dur: 70, wantMaxLevel: "red", exact: true, wantRedBy: 60, wantSway: true, maxWaveSteps: -1},
+		{scenario: "wave", dur: 70, wantMaxLevel: "red", exact: true, wantRedBy: 30, wantSway: true, maxWaveSteps: -1},
+		// The same wave while everyone jumps to a beat: the vertical veto must
+		// not hide it (jumping is rhythmic, so it never vetoes). Slower than a
+		// clean wave because the jumping leaks into x as noise.
+		{scenario: "wave-jump", dur: 90, wantMaxLevel: "red", exact: true, wantRedBy: 75, wantSway: true, maxWaveSteps: -1},
+
+		// False-positive scenarios: real crowd behaviour that looks a bit like
+		// a travelling wave.
+		//
+		// Swaying to music with a lag gradient: periodic, so the mirror peak
+		// half a period away makes the lag ambiguous (0.5 Hz); at 0.2 Hz the
+		// mirror is out of the lag range, but the amplitude is small and the
+		// few edges that pass don't form chains.
+		{scenario: "sway", dur: 90, wantMaxLevel: "calm", exact: true, wantSway: true, maxWaveSteps: 8},
+		{scenario: "sway-slow", dur: 90, wantMaxLevel: "calm", exact: true, wantSway: true, maxWaveSteps: 80},
+		// Stadium wave: travels at 250 ms/person like a crush wave, but it is
+		// vertical (vetoed: stronger, non-rhythmic vertical motion travelling
+		// with it). Without the veto this reaches red.
+		{scenario: "mexican", dur: 90, wantMaxLevel: "calm", exact: true, maxWaveSteps: 8},
+		// One person squeezing past is a genuine single travelling jolt, the
+		// same shape as a shove: a brief yellow is the honest answer, red would
+		// need it to keep coming (the 8 s score smoothing makes a single event
+		// of ≤ 6 s unable to reach 0.6). TestSingleEventsDecay checks it clears.
+		{scenario: "walkpast", dur: 60, wantMaxLevel: "yellow", maxWaveSteps: -1},
+		// A procession walking past, lightly brushing about half the phones:
+		// travelling but gappy and gentle, so hops rarely chain. Yellow allowed
+		// (repeated travelling contact is borderline), calm expected.
+		{scenario: "procession", dur: 90, wantMaxLevel: "yellow", maxWaveSteps: 60},
+		// The line walks off together with nearly the same cadence: periodic.
+		{scenario: "march", dur: 90, wantMaxLevel: "calm", exact: true, maxWaveSteps: 8},
+		// Pockets, drops and fumbles: independent per phone, never a chain.
+		{scenario: "pocket", dur: 90, wantMaxLevel: "calm", exact: true, wantHandling: true, maxWaveSteps: 4},
+		// Neighbours bumping pairwise: isolated edges, removed by the chain rule.
+		{scenario: "bump", dur: 90, wantMaxLevel: "calm", exact: true, maxWaveSteps: 20},
+		// Jumping to a beat with 0–300 ms reaction delays: vertical and periodic.
+		{scenario: "jump-stagger", dur: 90, wantMaxLevel: "calm", exact: true, maxWaveSteps: 8},
 	}
 	for _, tt := range tests {
 		for _, clockErr := range []int64{0, 25} {
@@ -159,6 +203,62 @@ func TestShoveDecays(t *testing.T) {
 		if l != protocol.LevelCalm {
 			t.Errorf("zone %s still %s 50 s after a single shove", z, l)
 		}
+	}
+}
+
+// TestSingleEventsDecay: one person walking past is at most a brief yellow.
+func TestSingleEventsDecay(t *testing.T) {
+	o := runScenario(t, "walkpast", 8, 60, 0)
+	if o.maxLevel == protocol.LevelRed {
+		t.Errorf("walkpast reached red")
+	}
+	for z, l := range o.finalLevels {
+		if l != protocol.LevelCalm {
+			t.Errorf("zone %s still %s 45 s after one person walked past", z, l)
+		}
+	}
+}
+
+// TestFalsePositivesAcrossSeeds runs the false-positive scenarios with other
+// random crowds (timings, amplitudes, tilts) so the outcomes don't hinge on
+// one lucky seed, and checks the true positives still fire in each.
+func TestFalsePositivesAcrossSeeds(t *testing.T) {
+	atMost := map[string]string{
+		"sway": "calm", "sway-slow": "calm", "mexican": "calm", "march": "calm",
+		"pocket": "calm", "bump": "calm", "jump-stagger": "calm",
+		"walkpast": "yellow", "procession": "yellow",
+	}
+	for seed := int64(1); seed <= 8; seed++ {
+		for name, want := range atMost {
+			o := runScenarioCfg(t, name, 8, 90, 25, false, seed, DefaultConfig())
+			if levelRank[o.maxLevel] > levelRank[want] {
+				t.Errorf("%s seed %d reached %s, want at most %s", name, seed, o.maxLevel, want)
+			}
+		}
+		if o := runScenarioCfg(t, "wave", 8, 70, 25, false, seed, DefaultConfig()); o.redAt < 0 || o.redAt > 30 {
+			t.Errorf("wave seed %d red at %.1f s, want within 30 s", seed, o.redAt)
+		}
+		if o := runScenarioCfg(t, "wave-jump", 8, 90, 25, false, seed, DefaultConfig()); o.redAt < 0 {
+			t.Errorf("wave-jump seed %d never reached red", seed)
+		}
+	}
+}
+
+// TestGuardsAreNeeded keeps the false-positive scenarios honest: each guard
+// must actually be what stops its scenario, otherwise the scenario is too
+// easy to prove anything.
+func TestGuardsAreNeeded(t *testing.T) {
+	noVeto := DefaultConfig()
+	noVeto.VerticalRatio = 0
+	if o := runScenarioCfg(t, "mexican", 8, 90, 25, false, 42, noVeto); o.maxLevel == protocol.LevelCalm {
+		t.Errorf("mexican stays calm even without the vertical veto")
+	}
+	noChain := DefaultConfig()
+	noChain.MinChain = 0
+	with := runScenarioCfg(t, "bump", 8, 90, 25, false, 42, DefaultConfig())
+	without := runScenarioCfg(t, "bump", 8, 90, 25, false, 42, noChain)
+	if without.waveSteps < 2*with.waveSteps+10 {
+		t.Errorf("bump: %d steps with wave edges without chains, %d with; the chain rule should remove most", without.waveSteps, with.waveSteps)
 	}
 }
 
