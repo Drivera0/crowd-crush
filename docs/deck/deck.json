@@ -1,0 +1,54 @@
+{
+ "v": 4,
+ "createdOnFiles": {
+  "v": 1,
+  "at": "2026-10-04T06:00:00Z"
+ },
+ "lists": "css",
+ "title": "Pulse pitch deck",
+ "order": [
+  "cover",
+  "problem",
+  "insight",
+  "how",
+  "phone",
+  "table",
+  "simcrush",
+  "holds",
+  "breaks",
+  "event",
+  "sponsors",
+  "roadmap",
+  "why"
+ ],
+ "cover": "cover",
+ "sections": {
+  "s1": {
+   "description": "What Pulse is and the problem it addresses.",
+   "start": "cover"
+  },
+  "s2": {
+   "description": "The insight and how it works.",
+   "start": "insight"
+  },
+  "s3": {
+   "description": "What judges see at the table and in the simulation.",
+   "start": "phone"
+  },
+  "s4": {
+   "description": "Evidence: what holds and what breaks.",
+   "start": "holds"
+  },
+  "s5": {
+   "description": "The product, sponsors, who pays, and a backup slide.",
+   "start": "event"
+  }
+ },
+ "faces": {
+  "inter": {
+   "family": "Inter",
+   "href": "https://fonts.googleapis.com/css2?family=Inter:wght@400..700&display=swap"
+  }
+ },
+ "designSystems": []
+}

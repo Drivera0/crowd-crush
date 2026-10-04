@@ -1,6 +1,6 @@
 # Pulse: pitch deck content
 
-Eleven slides. Each one: a title, the few words that go on it (a statement or one big number, not bullets), what to show, and speaker notes. Only numbers from EVAL.md, LOCATE.md, loadtest.md, the README and the table measurement (DEMO.md) appear, each with its condition in the notes. Placeholders are `[…]`. The live script is [PITCH.md](PITCH.md); the deck is for a judge who wants slides, the Devpost gallery, or a projector.
+Thirteen slides (the last is a backup). Each one: a title, the few words that go on it (a statement or one big number, not bullets), what to show, and speaker notes. Only numbers from EVAL.md, LOCATE.md, loadtest.md, the README and the table measurement (DEMO.md) appear, each with its condition in the notes. Placeholders are `[…]`. The live script is [PITCH.md](PITCH.md); the deck is for a judge who wants slides, the Devpost gallery, or a projector.
 
 Style: dark background, one colour per level (calm / yellow / red, as on the dashboard), large type, the ripple logo.
 
@@ -18,7 +18,7 @@ Style: dark background, one colour per level (calm / yellow / red, as on the das
 
 ### 2. The problem
 
-**On the slide:** `[VERIFY: one number, e.g. the final official Itaewon death toll]`. Nobody inside could see it building.
+**On the slide:** 159: lives lost in the Itaewon crowd crush, Seoul, 29 October 2022 (checked; see PITCH.md). Nobody inside could see it building.
 
 **Show:** black slide, the number large, the place and year small. No photo of victims.
 
@@ -106,7 +106,15 @@ Style: dark background, one colour per level (calm / yellow / red, as on the das
 
 ---
 
-### 11. Who pays, and what's next
+### 11. What each sponsor does
+
+**On the slide:** four cards: Tiger Data (motion readings and alerts in TimescaleDB hypertables, a per-zone per-second continuous aggregate, replays), Google Gemini (one headline and one action as structured JSON; reads floor plans; never decides), ElevenLabs (speaks every briefing; re-voices unanswered alerts), .Tech domain (the HTTPS address behind the QR).
+
+**Notes:** Details in QA.md, "What each sponsor does". Every service can be down and Pulse still alerts.
+
+---
+
+### 12. Who pays, and what's next
 
 **On the slide:** Venue safety teams and ticketing platforms. Nothing to install.
 
@@ -116,7 +124,7 @@ Style: dark background, one colour per level (calm / yellow / red, as on the das
 
 ---
 
-### Optional 12. Why did it fire?
+### 13 (backup). Why did it fire?
 
 **On the slide:** Every alert shows its evidence.
 
@@ -131,7 +139,6 @@ Style: dark background, one colour per level (calm / yellow / red, as on the das
 | Placeholder | Slide | Fill with |
 |---|---|---|
 | `[TECH: .tech URL]` | 1 | the join URL, or drop it |
-| `[VERIFY: …]` | 2 | one opening number checked against PITCH.md's sources |
 | `[ORIGIN: …]` | 2 | Dan's moment, or cut |
 | `[PRICE]` | 11 | per event or per attendee |
 | `[BUYER: one verified fact]` | 11 | a checked fact about the buyer, or cut |
