@@ -671,6 +671,9 @@ function speak(text: string) {
 
 function playBrief(a: Alert, force = false) {
   if (!soundOn && !force) return;
+  // An area set to "no voice" stays silent (the server skips its audio, so
+  // don't fall back to the browser's voice either), unless staff press Play.
+  if (!force && areas.get(a.zone)?.rules?.notify?.voice === false) return;
   currentAudio?.pause();
   if (!a.brief) return;
   if (a.audioUrl) {
@@ -1117,7 +1120,9 @@ async function loadHardware() {
         ? `<div class="hw-ble">📶 Bluetooth: <b>${h.ble.devices}</b> devices nearby · ${h.ble.near} close</div>`
         : '';
       const peers = h.peers?.length
-        ? `<div class="hw-peers">Hears ${h.peers.map((p) => `<b>${esc(p.name)}</b> ≈${p.dist.toFixed(1)} m`).join(', ')}</div>`
+        ? `<div class="hw-peers">Hears ${h.peers
+            .map((p) => `<b>${esc(p.name)}</b> ≈${p.dist.toFixed(1)} m${p.mapDist != null ? ` (${p.mapDist.toFixed(1)} m on the map)` : ''}`)
+            .join(', ')}</div>`
         : '';
       const shows = h.zone
         ? `<div class="hw-areas">${h.areas?.length ? `Shows ${h.areas.map(esc).join(', ')}` : 'No area assigned yet: pick “Light ' + esc(h.zone) + '” on a watch area'}</div>`
@@ -1350,7 +1355,7 @@ function buildRules(box: HTMLElement, id: string) {
   box.innerHTML =
     `<div class="rules-grid">` +
     `<label>Density alert above<input type="number" name="density" min="0.5" max="10" step="0.5" placeholder="off" value="${r.density ?? ''}" /><span class="muted">people per m²</span></label>` +
-    `<label>…for at least<input type="number" name="densityHoldS" min="0" max="120" step="1" placeholder="5" value="${r.densityHoldS ?? ''}" /><span class="muted">seconds</span></label>` +
+    `<label>…for at least<input type="number" name="densityHoldS" min="1" max="120" step="1" placeholder="5" value="${r.densityHoldS ?? ''}" /><span class="muted">seconds</span></label>` +
     `<label>Capacity<input type="number" name="maxPhones" min="1" max="10000" step="1" placeholder="off" value="${r.maxPhones ?? ''}" /><span class="muted">phones inside</span></label>` +
     `<label>Push detection<select name="push"><option value="on">On</option><option value="off">Off</option></select><span class="muted">travelling waves</span></label>` +
     `<label class="wide">Message for staff<input type="text" name="message" maxlength="140" placeholder="e.g. Open the side gate and slow the barrier queue" value="${esc(r.message ?? '')}" /></label>` +
