@@ -2685,6 +2685,31 @@ async function alertAction(a: Alert, what: 'ack' | 'resolve', note = '') {
 // area alert rules
 // ---------------------------------------------------------------------------
 
+/** Ready-made rule sets: one click fills the form below, which staff can then adjust (Custom). */
+const RULE_PRESETS: { id: string; name: string; tip: string; rules: AlertRules }[] = [
+  { id: 'standard', name: 'Standard', tip: 'Any part of the venue: crowding above 4 per m² for 5 s, pushes on',
+    rules: { density: 4, densityHoldS: 5, push: true } },
+  { id: 'stage', name: 'Stage front', tip: 'Barrier at the stage: alerts sooner, at 3.5 per m² for 3 s',
+    rules: { density: 3.5, densityHoldS: 3, push: true, message: 'Ease the crowd back from the barrier and pause the show if it keeps building' } },
+  { id: 'exit', name: 'Exit or gate', tip: 'Exits and entrances must stay clear: 3 per m² for 5 s',
+    rules: { density: 3, densityHoldS: 5, push: true, message: 'Keep the exit clear: hold entry and open the next gate' } },
+  { id: 'queue', name: 'Bar or queue', tip: 'Queues pack in slowly: 3 per m² held for 10 s',
+    rules: { density: 3, densityHoldS: 10, push: true, message: 'Open another serving point and space out the queue' } },
+  { id: 'room', name: 'Small room', tip: 'A classroom or meeting room: 50 people at most, crowding above 2.5 per m² for 10 s',
+    rules: { density: 2.5, densityHoldS: 10, maxPhones: 50, push: true, message: 'Stop more people coming in and open the doors' } },
+];
+
+/** The preset these rules match (ignoring where alerts go), if any. */
+function presetOf(r?: AlertRules): string | undefined {
+  if (!r) return undefined;
+  return RULE_PRESETS.find((p) =>
+    (p.rules.density ?? undefined) === (r.density ?? undefined) &&
+    (p.rules.densityHoldS ?? undefined) === (r.densityHoldS ?? undefined) &&
+    (p.rules.maxPhones ?? undefined) === (r.maxPhones ?? undefined) &&
+    (p.rules.push !== false) === (r.push !== false) &&
+    (p.rules.message ?? '') === (r.message ?? ''))?.id;
+}
+
 function buildRules(box: HTMLElement, id: string) {
   const a = areas.get(id);
   if (!a) return;
@@ -2694,6 +2719,9 @@ function buildRules(box: HTMLElement, id: string) {
   // Empty boxes mean the rule is off; the server's limits are mirrored in min/max.
   box.innerHTML =
     `<div class="rules-form">` +
+    `<div class="rf-block"><span>Start from a standard set</span><div class="rf-chips rf-presets">` +
+    RULE_PRESETS.map((p) => `<button type="button" class="sm" data-preset="${p.id}" data-tip="${esc(p.tip)}">${esc(p.name)}</button>`).join('') +
+    `<button type="button" class="sm" data-preset="custom" data-tip="Set your own limits in the boxes below">Custom</button></div></div>` +
     `<p class="rf-note muted">Three ways this area can raise an alert. Leave a box empty to turn that rule off; changes save as you go.</p>` +
     `<div class="rf-rule"><span class="rf-name">Crowding</span>` +
     `<label class="rf-line"><span>more than</span><input type="number" name="density" min="0.5" max="20" step="0.5" placeholder="off" value="${r.density ?? ''}" aria-label="People per square metre" /><span>people per m²</span></label>` +
@@ -2730,7 +2758,35 @@ function buildRules(box: HTMLElement, id: string) {
     };
   };
   const saved = box.querySelector<HTMLElement>('.rf-saved')!;
+  const markPreset = () => {
+    const cur = presetOf(read()) ?? 'custom';
+    for (const b of box.querySelectorAll<HTMLButtonElement>('[data-preset]')) {
+      b.classList.toggle('on', b.dataset.preset === cur);
+      b.setAttribute('aria-pressed', String(b.dataset.preset === cur));
+    }
+  };
+  // Only highlight Custom once staff have touched the rules; a fresh area shows no choice yet.
+  if (hasRules(a.rules)) markPreset();
+  box.querySelector('.rf-presets')!.addEventListener('click', (e) => {
+    const b = (e.target as HTMLElement).closest<HTMLButtonElement>('[data-preset]');
+    if (!b) return;
+    const p = RULE_PRESETS.find((x) => x.id === b.dataset.preset);
+    if (!p) {
+      // Custom: keep what's there and go to the first box.
+      for (const x of box.querySelectorAll<HTMLButtonElement>('[data-preset]')) x.classList.toggle('on', x === b);
+      box.querySelector<HTMLInputElement>('[name=density]')!.focus();
+      return;
+    }
+    const set = (name: string, v: string) => ((box.querySelector(`[name=${name}]`) as HTMLInputElement).value = v);
+    set('density', String(p.rules.density ?? ''));
+    set('densityHoldS', String(p.rules.densityHoldS ?? ''));
+    set('maxPhones', String(p.rules.maxPhones ?? ''));
+    set('message', p.rules.message ?? '');
+    (box.querySelector('[name=push]') as HTMLInputElement).checked = p.rules.push !== false;
+    box.dispatchEvent(new Event('change'));
+  });
   box.addEventListener('change', () => {
+    markPreset();
     areas.setRules(id, read());
     // Inline confirmation next to the form, instead of a toast per keystroke.
     saved.textContent = 'Saved ✓';

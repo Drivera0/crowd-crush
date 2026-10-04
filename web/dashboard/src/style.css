@@ -640,6 +640,7 @@ body[data-page='areas'] .split { grid-template-columns: minmax(0, 1fr) 420px; }
 .rf-block > span { font-weight: 500; color: var(--fg-2); }
 .rf-block input[type='text'] { width: 100%; padding: 5px 8px; }
 .rf-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.rf-presets button { font-size: 12px; padding: 5px 10px; border-radius: 999px; }
 .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px 3px 8px; border-radius: 999px; border: 1px solid var(--line-strong); background: var(--surface); cursor: pointer; }
 .chip:has(input:checked) { border-color: var(--fg); }
 .chip input, .rf-switch input { accent-color: var(--primary); margin: 0; }
