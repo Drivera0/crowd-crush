@@ -53,23 +53,27 @@ func TestGeminiRequestAndFallback(t *testing.T) {
 }
 
 func TestRetriesWithoutThinking(t *testing.T) {
-	calls := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
-		var body struct {
-			GenerationConfig map[string]any `json:"generationConfig"`
+	// gemini-3.5-flash-lite says only "invalid argument", without naming thinking.
+	for _, reject := range []string{"Thinking budget is not supported", "Request contains an invalid argument."} {
+		calls := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls++
+			var body struct {
+				GenerationConfig map[string]any `json:"generationConfig"`
+			}
+			json.NewDecoder(r.Body).Decode(&body)
+			if _, ok := body.GenerationConfig["thinkingConfig"]; ok {
+				http.Error(w, `{"error":{"message":"`+reject+`"}}`, http.StatusBadRequest)
+				return
+			}
+			w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}`))
+		}))
+		c := New("k", "")
+		c.base = srv.URL
+		text, err := c.Brief(context.Background(), info)
+		srv.Close()
+		if err != nil || text != "ok" || calls != 2 {
+			t.Fatalf("%q: got %q %v after %d calls", reject, text, err, calls)
 		}
-		json.NewDecoder(r.Body).Decode(&body)
-		if _, ok := body.GenerationConfig["thinkingConfig"]; ok {
-			http.Error(w, `{"error":{"message":"Thinking budget is not supported"}}`, http.StatusBadRequest)
-			return
-		}
-		w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}`))
-	}))
-	defer srv.Close()
-	c := New("k", "")
-	c.base = srv.URL
-	if text, err := c.Brief(context.Background(), info); err != nil || text != "ok" || calls != 2 {
-		t.Fatalf("got %q %v after %d calls", text, err, calls)
 	}
 }

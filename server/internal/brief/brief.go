@@ -152,7 +152,9 @@ func (c *Client) call(ctx context.Context, sys, user string, maxTokens int, noTh
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode == http.StatusBadRequest && noThinking && strings.Contains(strings.ToLower(string(raw)), "thinking") {
+	// Some models reject thinkingBudget 0 with a generic "invalid argument",
+	// so any 400 on the no-thinking call earns one retry without it.
+	if resp.StatusCode == http.StatusBadRequest && noThinking {
 		return "", errThinking
 	}
 	if resp.StatusCode != http.StatusOK {
