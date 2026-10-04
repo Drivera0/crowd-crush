@@ -1,5 +1,6 @@
 import './style.css';
-import type { Alert, Cluster, Config, Hardware, Level, Node, NodeDetail, SimAction, SimState, Snapshot, ToDash, Venue } from '../../shared/protocol';
+import { onPage, page } from './shell';
+import type { Alert, AlertRules, Cluster, Config, FloorplanSuggestion, Hardware, Level, Node, NodeDetail, SimAction, SimState, Snapshot, ToDash, Venue } from '../../shared/protocol';
 import { wsURL } from '../../shared/protocol';
 import { animate } from 'motion';
 import { Areas, type Tool } from './areas';
@@ -87,7 +88,8 @@ areas.onChange = () => {
         `<button class="sens sm" data-tip="High-risk areas alert on the first push"></button>` +
         `<select class="light sm" aria-label="Zone light for this area" data-tip="Which zone light shows this area"></select>` +
         `<button class="del sm ghost" data-tip="Delete area" aria-label="Delete area">✕</button>` +
-        `<div class="meta"></div>`;
+        `<div class="meta"></div>` +
+        `<div class="rules-wrap" style="grid-area: rules"><button class="rules-toggle">Alert rules ▾</button><div class="rules" hidden></div></div>`;
       const id = a.id;
       const name = li.querySelector<HTMLInputElement>('.name')!;
       name.value = a.name;
@@ -98,8 +100,15 @@ areas.onChange = () => {
         areas.setLight(id, (e.target as HTMLSelectElement).value),
       );
       li.querySelector('.del')!.addEventListener('click', () => areas.remove(id));
+      const rulesBox = li.querySelector<HTMLElement>('.rules')!;
+      li.querySelector('.rules-toggle')!.addEventListener('click', (e) => {
+        e.stopPropagation();
+        rulesBox.hidden = !rulesBox.hidden;
+        (e.target as HTMLElement).textContent = rulesBox.hidden ? 'Alert rules ▾' : 'Alert rules ▴';
+        if (!rulesBox.hidden && !rulesBox.childElementCount) buildRules(rulesBox, id);
+      });
       li.addEventListener('click', (e) => {
-        if (!(e.target as HTMLElement).closest('button')) areas.select(id);
+        if (!(e.target as HTMLElement).closest('button, input, select, .rules')) areas.select(id);
       });
       ul.append(li);
       areaEls.set(a.id, li);
@@ -728,7 +737,6 @@ function onSnapshot(s: Snapshot) {
     $('replayBtn').classList.toggle('on', mode === 'replay');
     $('simBtn').classList.toggle('on', mode === 'sim');
     $('replayOpts').hidden = mode !== 'replay';
-    if (mode === 'sim') $('simOpts').hidden = false;
     renderSimRunning(mode === 'sim');
   }
 
@@ -742,6 +750,25 @@ function onSnapshot(s: Snapshot) {
 }
 
 function onAlert(a: Alert, fresh: boolean) {
+  if (a.id && alertsById.has(a.id)) {
+    // An update to an alert we already have (briefing arrived, acknowledged, resolved, escalated).
+    const prev = alertsById.get(a.id)!;
+    alertsById.set(a.id, { ...prev, ...a });
+    renderAlertCards();
+    if (fresh && a.escalated && !prev.escalated) {
+      toast(`Escalated: ${zoneNames.get(a.zone) ?? a.zone} still unacknowledged`, 'danger');
+      if (a.brief) playBrief(a);
+    }
+    if (fresh && a.brief && !prev.brief) {
+      showBrief(a, fresh);
+      playBrief(a);
+    }
+    return;
+  }
+  if (a.id) {
+    alertsById.set(a.id, a);
+    renderAlertCards();
+  }
   const where = zoneNames.get(a.zone) ?? a.zone;
   const fallback = a.kind === 'density' ? `${where}: crowd too dense.` : `${where}: crowd risk ${Math.round(a.score * 100)}.`;
   logEntry({ t: a.t, level: a.level, text: a.brief ?? fallback, test: a.test, area: a.kind === 'density' ? 'DENSITY' : undefined }, fresh);
@@ -835,7 +862,6 @@ async function goLive() {
     await post('/api/live');
     if (lastMode === 'sim') await fetch('/api/sim/stop', { method: 'POST' }).catch(() => {});
     $('replayOpts').hidden = true;
-    $('simOpts').hidden = true;
     $('liveBtn').classList.add('on');
     $('replayBtn').classList.remove('on');
     $('simBtn').classList.remove('on');
@@ -849,7 +875,6 @@ $('backLiveBtn').addEventListener('click', () => void goLive());
 // Choosing Replay only opens the picker; nothing changes until Play.
 $('replayBtn').addEventListener('click', () => {
   $('replayOpts').hidden = false;
-  $('simOpts').hidden = true;
   $('liveBtn').classList.remove('on');
   $('simBtn').classList.remove('on');
   $('replayBtn').classList.add('on');
@@ -910,6 +935,12 @@ $('fsBtn').addEventListener('click', () => {
 
 // QR overlay: shown automatically while nobody has joined, or on demand.
 let qrMode: 'auto' | 'shown' | 'hidden' = 'auto';
+let onLivePage = false;
+onPage((p) => {
+  onLivePage = p === 'live';
+  if (p !== 'live' && qrMode === 'shown') qrMode = 'auto';
+  updateQR();
+});
 $('qrBtn').addEventListener('click', () => {
   qrMode = $('qr').hidden ? 'shown' : 'hidden';
   updateQR();
@@ -919,7 +950,7 @@ $('qr').addEventListener('click', () => {
   updateQR();
 });
 function updateQR() {
-  const show = qrMode === 'shown' || (qrMode === 'auto' && snap?.mode === 'live' && snap.stats.phones === 0);
+  const show = qrMode === 'shown' || (qrMode === 'auto' && onLivePage && snap?.mode === 'live' && snap.stats.phones === 0);
   $('qr').hidden = !show;
 }
 
@@ -973,6 +1004,9 @@ function renderVenue() {
     ? `GPS on: map anchored at ${venue.lat?.toFixed(5)}, ${venue.lon?.toFixed(5)}`
     : 'GPS off: attendees place themselves on the map';
   $('vGeo').className = `small ${venue.geo ? 'ok-text' : 'muted'}`;
+  renderTemplates();
+  loadPlanImage();
+  mesh.setLayout(venue.layout ?? null);
 }
 
 async function loadVenue() {
@@ -1063,6 +1097,8 @@ async function loadHardware() {
     return;
   }
   lightKeys = list.filter((h) => h.zone).map((h) => h.zone!);
+  hwOnline = list.filter((h) => h.online).length;
+  mesh.setBoards(list);
   areas.onChange();
   $('hwEmpty').hidden = list.length > 0;
   const on = list.filter((h) => h.online).length;
@@ -1080,12 +1116,15 @@ async function loadHardware() {
       const ble = h.ble
         ? `<div class="hw-ble">📶 Bluetooth: <b>${h.ble.devices}</b> devices nearby · ${h.ble.near} close</div>`
         : '';
+      const peers = h.peers?.length
+        ? `<div class="hw-peers">Hears ${h.peers.map((p) => `<b>${esc(p.name)}</b> ≈${p.dist.toFixed(1)} m`).join(', ')}</div>`
+        : '';
       const shows = h.zone
         ? `<div class="hw-areas">${h.areas?.length ? `Shows ${h.areas.map(esc).join(', ')}` : 'No area assigned yet: pick “Light ' + esc(h.zone) + '” on a watch area'}</div>`
         : '<div class="hw-areas">Shows the worst alert anywhere</div>';
       li.innerHTML =
         `<span class="hw-dot"></span><div class="hw-main"><div class="hw-top"><b>${esc(h.name)}</b>${lvl}</div>` +
-        `<div class="hw-sub"><span class="mono">${esc(host)}</span>${status}</div>${ble}${shows}</div>`;
+        `<div class="hw-sub"><span class="mono">${esc(host)}</span>${status}</div>${ble}${peers}${shows}</div>`;
       return li;
     }),
   );
@@ -1122,14 +1161,6 @@ for (const [id, out, fmt] of [
   show();
 }
 
-$('simBtn').addEventListener('click', () => {
-  $('simOpts').hidden = false;
-  $('replayOpts').hidden = true;
-  $('liveBtn').classList.remove('on');
-  $('replayBtn').classList.remove('on');
-  $('simBtn').classList.add('on');
-  animate($('simOpts'), { opacity: [0, 1], y: [-6, 0] }, { duration: 0.25 });
-});
 
 function renderSimRunning(running: boolean) {
   $('simStart').hidden = running;
@@ -1251,3 +1282,336 @@ async function pollSim() {
 setInterval(() => {
   if (lastMode === 'sim') void pollSim();
 }, 1000);
+
+// ---------------------------------------------------------------------------
+// alert cards: what / where / what to do, acknowledge and resolve
+// ---------------------------------------------------------------------------
+
+const alertsById = new Map<string, Alert>();
+
+/** Split a two-sentence briefing into headline + action when the server didn't. */
+function splitBrief(a: Alert): { head: string; action: string } {
+  if (a.headline || a.action) return { head: a.headline ?? a.brief ?? '', action: a.action ?? '' };
+  const parts = (a.brief ?? '').split(/(?<=[.!?])\s+/);
+  return { head: parts[0] ?? '', action: parts.slice(1).join(' ') };
+}
+
+function renderAlertCards() {
+  const open = [...alertsById.values()]
+    .filter((a) => a.status !== 'resolved' && a.level !== 'calm')
+    .sort((x, y) => y.t - x.t)
+    .slice(0, 4);
+  const badge = $('navAlert');
+  const reds = open.filter((a) => a.level === 'red' && a.status !== 'ack').length;
+  badge.hidden = reds === 0;
+  badge.textContent = String(reds);
+  $('alertCards').replaceChildren(
+    ...open.map((a) => {
+      const { head, action } = splitBrief(a);
+      const el = document.createElement('div');
+      el.className = `alert-card ${a.level} ${a.status === 'ack' ? 'ack' : ''}`;
+      const where = zoneNames.get(a.zone) ?? a.zone;
+      const kind = a.kind === 'density' ? 'Crowding' : a.kind === 'rule' ? 'Rule' : 'Crowd push';
+      el.innerHTML =
+        `<div class="ac-top"><b>${a.level === 'red' ? 'Danger' : 'Watch'}</b><span>${esc(kind)} · ${esc(where)} · ${fmtTime(a.t)}</span>` +
+        `${a.test ? '<span class="tag">TEST</span>' : ''}${a.escalated ? '<span class="esc">escalated</span>' : ''}</div>` +
+        `<div class="ac-head">${esc(head || `${where}: ${kind.toLowerCase()} detected`)}</div>` +
+        (action ? `<div class="ac-action">${esc(action)}</div>` : '') +
+        `<div class="ac-btns">${a.status === 'ack' ? `<span class="muted small">Acknowledged ${a.ackAt ? fmtTime(a.ackAt) : ''}</span>` : '<button class="sm primary" data-ack>Acknowledge</button>'}` +
+        `<button class="sm ghost" data-resolve>Resolve</button></div>`;
+      el.querySelector('[data-ack]')?.addEventListener('click', () => void alertAction(a, 'ack'));
+      el.querySelector('[data-resolve]')!.addEventListener('click', () => void alertAction(a, 'resolve'));
+      return el;
+    }),
+  );
+}
+
+async function alertAction(a: Alert, what: 'ack' | 'resolve') {
+  if (!a.id) return;
+  // Optimistic: the server's update arrives over the socket too.
+  alertsById.set(a.id, { ...a, status: what === 'ack' ? 'ack' : 'resolved', ackAt: what === 'ack' ? Date.now() : a.ackAt });
+  renderAlertCards();
+  try {
+    await post(`/api/alerts/${encodeURIComponent(a.id)}/${what}`);
+  } catch (e) {
+    toast(`Couldn't ${what === 'ack' ? 'acknowledge' : 'resolve'}: ${(e as Error).message}`, 'error');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// area alert rules
+// ---------------------------------------------------------------------------
+
+function buildRules(box: HTMLElement, id: string) {
+  const a = areas.get(id);
+  if (!a) return;
+  const r: AlertRules = a.rules ?? {};
+  const n = r.notify ?? {};
+  box.innerHTML =
+    `<div class="rules-grid">` +
+    `<label>Density alert above<input type="number" name="density" min="0.5" max="10" step="0.5" placeholder="off" value="${r.density ?? ''}" /><span class="muted">people per m²</span></label>` +
+    `<label>…for at least<input type="number" name="densityHoldS" min="0" max="120" step="1" placeholder="5" value="${r.densityHoldS ?? ''}" /><span class="muted">seconds</span></label>` +
+    `<label>Capacity<input type="number" name="maxPhones" min="1" max="10000" step="1" placeholder="off" value="${r.maxPhones ?? ''}" /><span class="muted">phones inside</span></label>` +
+    `<label>Push detection<select name="push"><option value="on">On</option><option value="off">Off</option></select><span class="muted">travelling waves</span></label>` +
+    `<label class="wide">Message for staff<input type="text" name="message" maxlength="140" placeholder="e.g. Open the side gate and slow the barrier queue" value="${esc(r.message ?? '')}" /></label>` +
+    `<div class="checks"><label><input type="checkbox" name="sign" ${n.sign !== false ? 'checked' : ''}/> Sign</label>` +
+    `<label><input type="checkbox" name="light" ${n.light !== false ? 'checked' : ''}/> Zone light</label>` +
+    `<label><input type="checkbox" name="voice" ${n.voice !== false ? 'checked' : ''}/> Voice</label></div>` +
+    `</div>`;
+  (box.querySelector('[name=push]') as HTMLSelectElement).value = r.push === false ? 'off' : 'on';
+  const read = (): AlertRules => {
+    const v = (name: string) => (box.querySelector(`[name=${name}]`) as HTMLInputElement).value.trim();
+    const num = (name: string) => (v(name) ? Number(v(name)) : undefined);
+    const chk = (name: string) => (box.querySelector(`[name=${name}]`) as HTMLInputElement).checked;
+    return {
+      density: num('density'),
+      densityHoldS: num('densityHoldS'),
+      maxPhones: num('maxPhones'),
+      push: v('push') !== 'off',
+      message: v('message') || undefined,
+      notify: { sign: chk('sign'), light: chk('light'), voice: chk('voice') },
+    };
+  };
+  box.addEventListener('change', () => {
+    areas.setRules(id, read());
+    toast(`Rules saved for ${areas.get(id)?.name ?? 'area'}`);
+  });
+  box.addEventListener('click', (e) => e.stopPropagation());
+}
+
+// ---------------------------------------------------------------------------
+// venue templates and floor plan
+// ---------------------------------------------------------------------------
+
+const TEMPLATES = [
+  { id: 'demo', name: 'Demo room', w: 8, h: 6, sub: 'A classroom or table demo' },
+  { id: 'club', name: 'Club', w: 16, h: 12, sub: '≈ 300–500 people' },
+  { id: 'theatre', name: 'Theatre floor', w: 30, h: 20, sub: '≈ 1,500 standing' },
+  { id: 'arena', name: 'Arena floor', w: 60, h: 40, sub: '≈ 6,000 standing' },
+  { id: 'festival', name: 'Festival field', w: 120, h: 80, sub: '≈ 20,000+' },
+  { id: 'custom', name: 'Custom', w: 0, h: 0, sub: 'Type the size below' },
+];
+
+function renderTemplates() {
+  const grid = $('tplGrid');
+  if (!grid.childElementCount) {
+    for (const t of TEMPLATES) {
+      const b = document.createElement('button');
+      b.className = 'tpl';
+      b.dataset.tpl = t.id;
+      b.innerHTML = `<b>${t.name}</b><span>${t.w ? `${t.w} × ${t.h} m · ` : ''}${t.sub}</span>`;
+      b.addEventListener('click', () => {
+        if (t.id === 'custom') {
+          ($('vW') as HTMLInputElement).focus();
+          void saveVenue({ ...venueForm(), template: 'custom' });
+          return;
+        }
+        void saveVenue({ ...venue, w: t.w, h: t.h, template: t.id });
+      });
+      grid.append(b);
+    }
+  }
+  for (const b of grid.querySelectorAll<HTMLElement>('.tpl')) b.classList.toggle('on', b.dataset.tpl === (venue.template ?? ''));
+  const t = TEMPLATES.find((x) => x.id === venue.template);
+  $('vTplMeta').textContent = `${venue.w} × ${venue.h} m${t && t.id !== 'custom' ? ` · ${t.name}` : ''}`;
+}
+
+let planImg: HTMLImageElement | null = null;
+const planAlpha = () => Number(($('fpOpacity') as HTMLInputElement).value) / 100;
+
+function loadPlanImage() {
+  $('fpTools').hidden = !venue.floorplan;
+  if (!venue.floorplan) {
+    planImg = null;
+    mesh.setFloorplan(null);
+    return;
+  }
+  const img = new Image();
+  img.onload = () => {
+    planImg = img;
+    mesh.setFloorplan(img, planAlpha());
+  };
+  img.src = `/api/venue/floorplan?v=${Date.now()}`;
+}
+
+async function uploadPlan(file: File) {
+  if (!/^image\/(png|jpeg|webp)$/.test(file.type)) return toast('Use a PNG, JPG or WebP image', 'error');
+  if (file.size > 8 * 1024 * 1024) return toast('That image is over 8 MB', 'error');
+  toast('Uploading floor plan…');
+  try {
+    const r = await fetch('/api/venue/floorplan', { method: 'POST', headers: { 'Content-Type': file.type }, body: file });
+    const j = (await r.json().catch(() => ({}))) as Venue & { error?: string };
+    if (!r.ok) throw new Error(j.error ?? (r.status === 404 ? 'the server needs the floor-plan update' : r.statusText));
+    venue = j;
+    renderVenue();
+    toast('Floor plan uploaded. Try “Read the layout with Gemini”.');
+  } catch (e) {
+    toast(`Upload failed: ${(e as Error).message}`, 'error');
+  }
+}
+
+$('fpFile').addEventListener('change', (e) => {
+  const f = (e.target as HTMLInputElement).files?.[0];
+  if (f) void uploadPlan(f);
+});
+const drop = $('fpDrop');
+drop.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  drop.classList.add('over');
+});
+drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+drop.addEventListener('drop', (e) => {
+  e.preventDefault();
+  drop.classList.remove('over');
+  const f = e.dataTransfer?.files?.[0];
+  if (f) void uploadPlan(f);
+});
+$('fpOpacity').addEventListener('input', () => {
+  if (planImg) mesh.setFloorplan(planImg, planAlpha());
+  try {
+    localStorage.setItem('pulse.planAlpha', ($('fpOpacity') as HTMLInputElement).value);
+  } catch {
+    /* fine */
+  }
+});
+try {
+  const a = localStorage.getItem('pulse.planAlpha');
+  if (a) ($('fpOpacity') as HTMLInputElement).value = a;
+} catch {
+  /* fine */
+}
+$('fpRemove').addEventListener('click', async () => {
+  try {
+    const r = await fetch('/api/venue/floorplan', { method: 'DELETE' });
+    if (r.ok) venue = (await r.json()) as Venue;
+    else throw new Error(r.statusText);
+    renderVenue();
+    $('fpSuggest').hidden = true;
+  } catch (e) {
+    toast(`Couldn't remove: ${(e as Error).message}`, 'error');
+  }
+});
+
+$('fpAnalyze').addEventListener('click', async () => {
+  const box = $('fpSuggest');
+  box.hidden = false;
+  box.innerHTML = '<b>Gemini is reading the floor plan…</b>';
+  try {
+    const r = await fetch('/api/venue/floorplan/analyze', { method: 'POST' });
+    const j = (await r.json().catch(() => ({}))) as FloorplanSuggestion & { error?: string };
+    if (!r.ok) throw new Error(j.error ?? r.statusText);
+    const exits = j.layout.exits ?? [];
+    box.innerHTML =
+      `<b>Gemini suggests</b> <span class="muted">(${esc(j.confidence)} confidence)</span>` +
+      `<ul><li>Size: <b>${j.w} × ${j.h} m</b></li><li>Stage: ${j.layout.stage ? 'found' : 'not found'}</li>` +
+      `<li>Exits: ${exits.length ? exits.map((e) => esc(e.name)).join(', ') : 'none found'}</li></ul>` +
+      `<p class="muted small">${esc(j.notes)}</p>` +
+      `<div class="row"><button class="sm primary" data-apply>Apply to venue</button><button class="sm ghost" data-dismiss>Dismiss</button></div>`;
+    // Preview it on the map straight away.
+    mesh.setLayout(j.layout);
+    box.querySelector('[data-apply]')!.addEventListener('click', () => {
+      void saveVenue({ ...venue, w: j.w, h: j.h, layout: j.layout, template: 'custom' });
+      box.hidden = true;
+    });
+    box.querySelector('[data-dismiss]')!.addEventListener('click', () => {
+      mesh.setLayout(venue.layout ?? null);
+      box.hidden = true;
+    });
+  } catch (e) {
+    box.innerHTML = `<b>Couldn't read the plan.</b> <span class="muted">${esc((e as Error).message)}</span>`;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// hardware placement on the map
+// ---------------------------------------------------------------------------
+
+areas.onBoardMoved = async (key, x, y) => {
+  try {
+    const r = await fetch(`/api/hardware/${encodeURIComponent(key)}/pos`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ x: Math.round(x * 10) / 10, y: Math.round(y * 10) / 10 }),
+    });
+    if (!r.ok) throw new Error(r.status === 404 ? 'the server needs the board-placement update' : r.statusText);
+    toast('Board placed');
+    await loadHardware();
+  } catch (e) {
+    toast(`Couldn't save the position: ${(e as Error).message}`, 'error');
+  }
+  mesh.boardDrag = null;
+};
+
+
+// ---------------------------------------------------------------------------
+// home: greeting and the event setup checklist
+// ---------------------------------------------------------------------------
+
+let hwOnline = 0;
+const flag = (k: string) => {
+  try {
+    return localStorage.getItem(k) === '1';
+  } catch {
+    return false;
+  }
+};
+const setFlag = (k: string) => {
+  try {
+    localStorage.setItem(k, '1');
+  } catch {
+    /* fine */
+  }
+};
+
+$('testBtn').addEventListener('click', () => setFlag('pulse.drill'));
+
+function renderChecklist() {
+  const h = new Date().getHours();
+  const part = h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';
+  $('homeGreeting').textContent = `${part} · ${($('eventName') as HTMLInputElement).value || 'your event'}`;
+  if ((snap?.stats.phones ?? 0) > 0) setFlag('pulse.joined');
+  const items = [
+    { done: flag('pulse.eventNamed'), title: 'Name your event', sub: 'Shown on the console and in briefings.', go: '#home', optional: false },
+    { done: !!venue.template, title: 'Choose the venue size', sub: 'Pick a template or type the size in metres.', go: '#venue', optional: false },
+    { done: !!venue.floorplan, title: 'Upload a floor plan', sub: 'Gemini reads the stage and exits from it.', go: '#venue', optional: true },
+    { done: areas.list.length > 0, title: 'Draw watch areas', sub: 'Barriers, gates, the stage front.', go: '#areas', optional: false },
+    { done: areas.list.some((a) => a.rules && Object.values(a.rules).some((v) => v !== undefined)), title: 'Set alert rules', sub: 'Density, capacity and your own message per area.', go: '#areas', optional: true },
+    { done: hwOnline > 0, title: 'Connect signs and lights', sub: 'Check they are online and place them on the map.', go: '#hardware', optional: true },
+    { done: flag('pulse.drill'), title: 'Run a drill', sub: 'Fire a test alert through briefing, voice and signs.', go: '#recordings', optional: false },
+    { done: flag('pulse.joined'), title: 'Share the join QR', sub: 'Attendees scan it; their phones join the mesh.', go: '#live', optional: false },
+  ];
+  const req = items.filter((i) => !i.optional);
+  const doneReq = req.filter((i) => i.done).length;
+  $('setupProgress').textContent = `${doneReq} of ${req.length} required steps`;
+  $('setupBar').style.width = `${(doneReq / req.length) * 100}%`;
+  $('checklist').replaceChildren(
+    ...items.map((i) => {
+      const li = document.createElement('li');
+      li.className = i.done ? 'done' : '';
+      li.innerHTML =
+        `<span class="tick">${i.done ? '✓' : ''}</span><span class="ck-text"><span class="ck-title">${esc(i.title)}${i.optional ? '<span class="opt">optional</span>' : ''}</span>` +
+        `<span class="ck-sub">${esc(i.sub)}</span></span>` +
+        (i.done ? '' : `<a class="sm-link" href="${i.go}"><button class="sm">${i.go === '#home' ? 'Edit name' : 'Open'}</button></a>`);
+      if (i.go === '#home') li.querySelector('button')?.addEventListener('click', (e) => {
+        e.preventDefault();
+        ($('eventName') as HTMLInputElement).focus();
+        ($('eventName') as HTMLInputElement).select();
+      });
+      return li;
+    }),
+  );
+}
+$('eventName').addEventListener('change', () => {
+  setFlag('pulse.eventNamed');
+  renderChecklist();
+});
+setInterval(() => {
+  if (page() === 'home') renderChecklist();
+}, 2000);
+
+// Last: runs immediately, so everything it touches must already exist.
+onPage((p) => {
+  mesh.showBoards = p === 'hardware';
+  if (p === 'home') renderChecklist();
+  if (p === 'venue') renderTemplates();
+});

@@ -8,7 +8,7 @@
 // red packets in the direction the push travels. Clusters (where the crowd is
 // packing together) are drawn underneath with their density and trend.
 
-import type { Cluster, Level, Node, NodeStatus, SimFrame, SimState, Wave } from '../../shared/protocol';
+import type { Cluster, Hardware, Level, Node, NodeStatus, SimFrame, SimState, VenueLayout, Wave } from '../../shared/protocol';
 
 type RGB = [number, number, number];
 
@@ -87,6 +87,14 @@ export class Mesh {
   private clusters: Cluster[] = [];
   private sim: SimFrame | null = null;
   private simGeo: SimState | null = null;
+  private floorplan: HTMLImageElement | null = null;
+  private floorplanAlpha = 0.55;
+  private layoutGeo: VenueLayout | null = null;
+  private boards: Hardware[] = [];
+  /** Draw board markers (Hardware page). */
+  showBoards = false;
+  /** A board being dragged: drawn at this venue position until the server confirms. */
+  boardDrag: { key: string; x: number; y: number } | null = null;
   private venue = { w: 24, h: 16 };
   /** World px per metre, and where the venue's top-left corner sits in world px. */
   private fit = { s: 30, ox: 0, oy: 0 };
@@ -161,6 +169,40 @@ export class Mesh {
     this.sim = frame;
     if (geo) this.simGeo = geo;
     if (!frame) this.simGeo = null;
+  }
+
+  /** Floor-plan image drawn under everything, stretched to the venue rectangle. */
+  setFloorplan(img: HTMLImageElement | null, alpha = this.floorplanAlpha) {
+    this.floorplan = img;
+    this.floorplanAlpha = alpha;
+  }
+
+  /** Fixed venue features (stage, exits, walls) from the venue settings. */
+  setLayout(layout: VenueLayout | null) {
+    this.layoutGeo = layout;
+  }
+
+  setBoards(list: Hardware[]) {
+    this.boards = list;
+  }
+
+  /** Board key ("sign" or a light letter) under a screen point, if markers are shown. */
+  boardAt(sx: number, sy: number): string | null {
+    if (!this.showBoards) return null;
+    const { x, y } = this.toWorld(sx, sy);
+    for (const [i, b] of this.boards.entries()) {
+      const p = this.boardPos(b, i);
+      if (Math.abs(p.x - x) < 16 && Math.abs(p.y - y) < 16) return b.zone || 'sign';
+    }
+    return null;
+  }
+
+  /** Where a board is drawn (world px): its saved spot, the drag in progress, or parked along the bottom edge. */
+  private boardPos(b: Hardware, i: number) {
+    const key = b.zone || 'sign';
+    if (this.boardDrag?.key === key) return this.venueToWorld(this.boardDrag.x, this.boardDrag.y);
+    if (b.x != null && b.y != null) return this.venueToWorld(b.x, b.y);
+    return this.venueToWorld(1.5 + i * 2.5, this.venue.h - 1);
   }
 
   setTheme(t: 'dark' | 'light') {
@@ -476,6 +518,7 @@ export class Mesh {
     g.setTransform(this.dpr * k, 0, 0, this.dpr * k, this.dpr * vx, this.dpr * vy);
     const bodies = [...this.bodies.values()];
     this.drawVenue(g);
+    if (!this.sim) this.drawLayout(g);
     this.drawSimGeometry(g);
     this.underlay?.(g, now);
     this.drawClusters(g, now);
@@ -668,6 +711,8 @@ export class Mesh {
       }
     }
 
+    if (this.showBoards) this.drawBoards(g, now);
+
     g.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
 
     // Alert vignette around the whole view.
@@ -700,6 +745,12 @@ export class Mesh {
     const light = this.theme === 'light';
     g.fillStyle = light ? 'rgba(255,255,255,0.7)' : 'rgba(17,24,36,0.65)';
     g.fillRect(ox, oy, W, H);
+    if (this.floorplan?.complete && this.floorplan.naturalWidth) {
+      g.save();
+      g.globalAlpha = this.floorplanAlpha;
+      g.drawImage(this.floorplan, ox, oy, W, H);
+      g.restore();
+    }
     g.strokeStyle = light ? 'rgba(15,23,42,0.06)' : 'rgba(148,163,184,0.06)';
     g.lineWidth = 1;
     const step = s < 12 ? 5 : 1; // metres between grid lines
@@ -732,6 +783,122 @@ export class Mesh {
     g.lineTo(ox + 5 * s, oy + H + 12);
     g.stroke();
     g.fillText(`5 m · venue ${this.venue.w} × ${this.venue.h} m`, ox + 5 * s + 8, oy + H + 16);
+  }
+
+  /** The venue's own stage outline and exits (from the venue settings or Gemini's floor-plan reading). */
+  private drawLayout(g: CanvasRenderingContext2D) {
+    const L = this.layoutGeo;
+    if (!L) return;
+    const light = this.theme === 'light';
+    if (L.stage && L.stage.length >= 3) {
+      g.beginPath();
+      L.stage.forEach(([x, y], i) => {
+        const p = this.venueToWorld(x, y);
+        if (i) g.lineTo(p.x, p.y);
+        else g.moveTo(p.x, p.y);
+      });
+      g.closePath();
+      g.fillStyle = light ? 'rgba(10,10,10,0.07)' : 'rgba(250,250,250,0.07)';
+      g.fill();
+      g.strokeStyle = light ? 'rgba(10,10,10,0.35)' : 'rgba(250,250,250,0.3)';
+      g.lineWidth = 1.5;
+      g.stroke();
+      const c = L.stage.reduce((a, [x, y]) => [a[0] + x / L.stage!.length, a[1] + y / L.stage!.length], [0, 0]);
+      const p = this.venueToWorld(c[0], c[1]);
+      g.fillStyle = light ? 'rgba(10,10,10,0.5)' : 'rgba(250,250,250,0.5)';
+      g.font = '600 10px Inter, system-ui, sans-serif';
+      g.textAlign = 'center';
+      g.fillText('STAGE', p.x, p.y + 3);
+      g.textAlign = 'left';
+    }
+    g.lineCap = 'round';
+    for (const [x0, y0, x1, y1] of L.walls ?? []) {
+      const a = this.venueToWorld(x0, y0), b = this.venueToWorld(x1, y1);
+      g.strokeStyle = light ? 'rgba(10,10,10,0.45)' : 'rgba(250,250,250,0.4)';
+      g.lineWidth = 2.5;
+      g.beginPath();
+      g.moveTo(a.x, a.y);
+      g.lineTo(b.x, b.y);
+      g.stroke();
+    }
+    g.font = '600 10px Inter, system-ui, sans-serif';
+    g.textAlign = 'center';
+    for (const e of L.exits ?? []) {
+      const a = this.venueToWorld(e.x0, e.y0), b = this.venueToWorld(e.x1, e.y1);
+      g.strokeStyle = 'rgba(22,163,74,0.9)';
+      g.lineWidth = 5;
+      g.beginPath();
+      g.moveTo(a.x, a.y);
+      g.lineTo(b.x, b.y);
+      g.stroke();
+      g.fillStyle = 'rgba(22,163,74,0.95)';
+      g.fillText(e.name || 'EXIT', (a.x + b.x) / 2, (a.y + b.y) / 2 - 7);
+    }
+    g.textAlign = 'left';
+  }
+
+  /** Signs and zone lights: draggable markers, with dashed lines to the boards each one hears over Bluetooth. */
+  private drawBoards(g: CanvasRenderingContext2D, now: number) {
+    const light = this.theme === 'light';
+    const pos = new Map<string, { x: number; y: number }>();
+    this.boards.forEach((b, i) => {
+      pos.set(b.beacon || `PULSE-${b.zone}`, this.boardPos(b, i));
+    });
+    g.font = '600 10px Inter, system-ui, sans-serif';
+    g.textAlign = 'center';
+    const drawn = new Set<string>();
+    this.boards.forEach((b, i) => {
+      const a = this.boardPos(b, i);
+      for (const peer of b.peers ?? []) {
+        const q = pos.get(peer.name);
+        const pair = [b.beacon ?? '', peer.name].sort().join('|');
+        if (!q || drawn.has(pair)) continue;
+        drawn.add(pair);
+        g.setLineDash([5, 5]);
+        g.lineDashOffset = -now / 60;
+        g.strokeStyle = light ? 'rgba(37,99,235,0.6)' : 'rgba(96,165,250,0.6)';
+        g.lineWidth = 1.5;
+        g.beginPath();
+        g.moveTo(a.x, a.y);
+        g.lineTo(q.x, q.y);
+        g.stroke();
+        g.setLineDash([]);
+        const mx = (a.x + q.x) / 2, my = (a.y + q.y) / 2;
+        const label = `≈${peer.dist.toFixed(1)} m · ${peer.rssi} dBm`;
+        const tw = g.measureText(label).width;
+        g.fillStyle = light ? 'rgba(255,255,255,0.95)' : 'rgba(20,20,20,0.9)';
+        g.fillRect(mx - tw / 2 - 5, my - 9, tw + 10, 16);
+        g.fillStyle = light ? 'rgba(37,99,235,1)' : 'rgba(147,197,253,1)';
+        g.fillText(label, mx, my + 3);
+      }
+    });
+    this.boards.forEach((b, i) => {
+      const p = this.boardPos(b, i);
+      const col = !b.online ? '#dc2626' : b.level === 'red' ? '#dc2626' : b.level === 'yellow' ? '#d97706' : '#16a34a';
+      // Bluetooth range hint: a faint ring when the board counts devices.
+      if (b.ble && b.online) {
+        g.strokeStyle = `${col}33`;
+        g.lineWidth = 1;
+        g.beginPath();
+        g.arc(p.x, p.y, 3 * this.fit.s, 0, Math.PI * 2);
+        g.stroke();
+      }
+      g.fillStyle = light ? '#0a0a0a' : '#fafafa';
+      g.beginPath();
+      g.roundRect(p.x - 13, p.y - 13, 26, 26, 7);
+      g.fill();
+      g.fillStyle = col;
+      g.beginPath();
+      g.arc(p.x + 10, p.y - 10, 4.5, 0, Math.PI * 2);
+      g.fill();
+      g.fillStyle = light ? '#ffffff' : '#0a0a0a';
+      g.font = '700 12px Inter, system-ui, sans-serif';
+      g.fillText(b.zone || 'S', p.x, p.y + 4);
+      g.font = '600 10px Inter, system-ui, sans-serif';
+      g.fillStyle = light ? 'rgba(10,10,10,0.7)' : 'rgba(250,250,250,0.7)';
+      g.fillText(b.name + (b.x == null ? ' · drag me' : ''), p.x, p.y + 26);
+    });
+    g.textAlign = 'left';
   }
 
   /** Walls, the stage barrier and exits of the simulated venue. */
