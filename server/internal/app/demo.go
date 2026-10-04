@@ -138,6 +138,8 @@ func (a *App) SetDemo(d protocol.DemoSpot, arrange bool) (protocol.DemoSpot, err
 		for id, m := range a.live.meta {
 			if m.connected {
 				ids = append(ids, id)
+			} else {
+				m.dm.slot = 0 // the row starts afresh
 			}
 		}
 		sort.Slice(ids, func(i, j int) bool {
@@ -149,6 +151,8 @@ func (a *App) SetDemo(d protocol.DemoSpot, arrange bool) (protocol.DemoSpot, err
 		})
 		for i, id := range ids {
 			x, y := a.demoSlotLocked(i)
+			a.live.meta[id].dm = demoMove{} // every tap, snap and kept place ends (demomove.go)
+			a.live.meta[id].bcn.placed = false
 			a.posIn(a.live, now, id, x, y)
 			a.live.meta[id].pinned = true
 		}
@@ -262,25 +266,10 @@ func (a *App) demoRowsLocked() map[string]*protocol.DemoRow {
 	return out
 }
 
-// demoFreeSlotLocked is the first slot nobody known to the server stands on.
+// demoFreeSlotLocked is the first slot nobody known to the server stands on
+// (or keeps while it is away from the row: demomove.go).
 func (a *App) demoFreeSlotLocked(skip string) (x, y float64) {
-	sp := a.demo.Spacing
-	if sp <= 0 {
-		sp = DemoSpacing
-	}
-	for i := 0; ; i++ {
-		x, y = a.demoSlotLocked(i)
-		taken := false
-		for id, m := range a.live.meta {
-			if id != skip && !m.unplaced && math.Hypot(m.x-x, m.y-y) < sp/2 {
-				taken = true
-				break
-			}
-		}
-		if !taken || i > 2000 {
-			return x, y
-		}
-	}
+	return a.demoSlotLocked(a.demoFreeIndexLocked(skip))
 }
 
 // PhoneHelloAuto is a hello that carried no position. A phone the server
@@ -327,7 +316,9 @@ func (a *App) nameLiveLocked(id string) {
 var ErrNoPhone = errors.New("no such phone")
 
 // MovePhone is PUT /api/node/{id}/pos: staff dragged a real phone's dot.
-// The phone hears about it in its next state (x, y).
+// The phone hears about it in its next state (x, y). While the demo spot is
+// on, a dot dropped on another phone's place in the row swaps the two
+// (demomove.go).
 func (a *App) MovePhone(id string, x, y float64) (protocol.NodeDetail, error) {
 	if !finite(x) || !finite(y) {
 		return protocol.NodeDetail{}, errors.New("want {x, y} in venue metres")
@@ -338,8 +329,17 @@ func (a *App) MovePhone(id string, x, y float64) (protocol.NodeDetail, error) {
 	if m == nil {
 		return protocol.NodeDetail{}, ErrNoPhone
 	}
-	a.posIn(a.live, hub.Now(), id, x, y)
-	return nodeDetail(a.live, id, m), nil
+	swapped := ""
+	if a.demo.On {
+		swapped = a.demoDropLocked(hub.Now(), id, m, x, y)
+	} else {
+		m.dm.snap = snapState{} // staff know better than the Bluetooth snap
+		m.bcn.placed = false
+		a.posIn(a.live, hub.Now(), id, x, y)
+	}
+	d := nodeDetail(a.live, id, m)
+	d.Swapped = swapped
+	return d, nil
 }
 
 // nodeDetail is GET /api/node/{id}'s answer. Caller holds mu.

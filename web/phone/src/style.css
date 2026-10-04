@@ -239,3 +239,7 @@ button:disabled { opacity: 0.4; }
 .venue-svg text { font-family: inherit; font-weight: 600; }
 .stage[hidden] { display: none; }
 .pocket-btn small { display: block; font-size: 12px; font-weight: 400; opacity: 0.8; }
+/* moving about at the table demo (demomove.ts) */
+.demo-move { display: flex; flex-direction: column; align-items: center; gap: 8px; margin-top: 4px; }
+.demo-move[hidden], .demo-move [hidden] { display: none; }
+.near-line { margin: 0; font-size: 18px; font-weight: 600; color: #7dd3fc; }

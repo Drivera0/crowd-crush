@@ -10,6 +10,7 @@ import { initBeacons } from './beacons';
 import { initNative } from './native';
 import { browserLabel, chromeIntent, embedded, help as envHelp, isIOS, isMobile, reportJoin, type JoinReason } from './env';
 import { drawVenueMap } from './placemap';
+import { backToRow, demoViewBox, loadDemoView, renderDemoMove, type ViewBox } from './demomove';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -194,21 +195,58 @@ $('skipGps').addEventListener('click', () => {
   showPlace();
 });
 $('tryGps').addEventListener('click', () => void locate());
-$('moveBtn').addEventListener('click', () => showPlace());
+$('moveBtn').addEventListener('click', () => void (atDemo() ? showDemoPlace() : showPlace()));
+$('iMoved').addEventListener('click', () => void showDemoPlace());
+$('backRow').addEventListener('click', async () => {
+  const b = $('backRow') as HTMLButtonElement;
+  b.disabled = true;
+  try {
+    const res = await backToRow(id);
+    // The server lines it up again: no spot of its own from now on (a reconnect says hello without one).
+    manual = null;
+    save('pulse-spot-m', '');
+    placedAt = Date.now();
+    updateWhere();
+    b.textContent = `Back on #${res.n}`;
+  } catch (e) {
+    b.textContent = `Couldn’t go back: ${(e as Error).message}`;
+  } finally {
+    b.disabled = false;
+  }
+});
+
+/** The demo spot is on (as the server said at Join, or as this phone's state shows). */
+function atDemo(): boolean {
+  return !!cfg.demo || !!lastState?.row || !!lastState?.spot;
+}
 
 // ---- the venue map: tap or drag your dot ----
 
 let draft: { x: number; y: number } | null = null;
+/** The part of the venue the map shows: all of it, or zoomed to the demo row (demomove.ts). */
+let view: ViewBox | null = null;
+const fullView = (): ViewBox => ({ x: 0, y: 0, w: cfg.venueW, h: cfg.venueH });
 
-function showPlace(hint?: string) {
+function showPlace(hint?: string, zoom?: ViewBox, row?: import('../../shared/demomove').DemoView | null) {
   const v = $('venue');
-  v.style.aspectRatio = `${cfg.venueW} / ${cfg.venueH}`;
+  view = zoom ?? null;
+  const vb = view ?? fullView();
+  v.style.aspectRatio = `${vb.w} / ${vb.h}`;
   $('placeHint').textContent = hint ?? 'Tap where you’re standing. Drag to adjust.';
-  $('tryGps').hidden = !cfg.geo;
-  void drawVenueMap(cfg.venueW, cfg.venueH); // areas, stage, exits and walls to orient by (placemap.ts)
-  draft = manual;
+  $('tryGps').hidden = !cfg.geo || !!zoom;
+  // Areas, stage, exits and walls to orient by; at the demo spot also the row, the boards and the other phones (placemap.ts).
+  void drawVenueMap(cfg.venueW, cfg.venueH, zoom, row, lastState?.name);
+  draft = manual ?? (zoom && lastState?.x !== undefined && lastState.y !== undefined ? { x: lastState.x, y: lastState.y } : null);
   drawMe();
   show('place');
+}
+
+/** "I moved" at the demo spot: the map zoomed to the row so a tap at table scale lands next to the right person. */
+async function showDemoPlace() {
+  const row = await loadDemoView();
+  if (!row) return showPlace();
+  const me = lastState?.x !== undefined && lastState.y !== undefined ? { x: lastState.x, y: lastState.y } : undefined;
+  showPlace('Tap where you’re standing now. Dots are the others in the row (#numbers), squares are the boards.', demoViewBox(row, cfg.venueW, cfg.venueH, me), row);
 }
 
 function drawMe() {
@@ -218,16 +256,20 @@ function drawMe() {
     me.hidden = true;
     return;
   }
+  const vb = view ?? fullView();
   me.hidden = false;
-  me.style.left = `${(draft.x / cfg.venueW) * 100}%`;
-  me.style.top = `${(draft.y / cfg.venueH) * 100}%`;
+  me.style.left = `${((draft.x - vb.x) / vb.w) * 100}%`;
+  me.style.top = `${((draft.y - vb.y) / vb.h) * 100}%`;
 }
 
 function pointAt(e: PointerEvent) {
   const r = $('venue').getBoundingClientRect();
+  const vb = view ?? fullView();
   const fx = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
   const fy = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
-  return { x: Math.round(fx * cfg.venueW * 10) / 10, y: Math.round(fy * cfg.venueH * 10) / 10 };
+  // Zoomed in, a tap is worth centimetres: keep them.
+  const k = view ? 100 : 10;
+  return { x: Math.round((vb.x + fx * vb.w) * k) / k, y: Math.round((vb.y + fy * vb.h) * k) / k };
 }
 
 let dragging = false;
@@ -256,6 +298,10 @@ $('placeDone').addEventListener('click', () => {
 });
 
 function updateWhere() {
+  if (lastState?.near) {
+    $('where').textContent = `Near ${lastState.near}`; // walked up to a board (Bluetooth)
+    return;
+  }
   $('where').textContent =
     tower && !manual
       ? `Placed at ${tower.name}${fix && fix.acc <= GPS_MAX_ACC ? ` · GPS ±${Math.round(fix.acc)} m` : ''}`
@@ -637,6 +683,8 @@ function onServer(msg: ServerMsg) {
     applyGuidance(msg);
     demoState(msg);
     renderRow(msg);
+    renderDemoMove(msg, !!cfg.demo);
+    updateWhere();
   } else if (msg.type === 'shake') {
     demoShake();
     pocketShake();

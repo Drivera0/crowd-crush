@@ -84,8 +84,10 @@ export function initDemo(ctx: DemoCtx) {
   areas.canDragNode = (id) => ctx.mode() !== 'replay' && mesh.isNamed(id);
   areas.onNodeMoved = async (id, x, y) => {
     try {
-      await send('PUT', `/api/node/${encodeURIComponent(id)}/pos`, { x: Math.round(x * 100) / 100, y: Math.round(y * 100) / 100 });
-      toast(`${ctx.nameOf(id)} moved`, 'ok');
+      const d = await send('PUT', `/api/node/${encodeURIComponent(id)}/pos`, { x: Math.round(x * 100) / 100, y: Math.round(y * 100) / 100 });
+      // Dropped on another phone's place in the demo row: the two swapped (server demomove.go).
+      const swapped = (d as { swapped?: string } | undefined)?.swapped;
+      toast(swapped ? `${ctx.nameOf(id)} and ${swapped} swapped places` : `${ctx.nameOf(id)} moved`, 'ok');
     } catch (e) {
       toast(`Couldn't move ${ctx.nameOf(id)}: ${(e as Error).message}`, 'error');
     }

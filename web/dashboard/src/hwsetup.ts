@@ -123,7 +123,7 @@ export function initHwSetup(ctx: HwSetupCtx) {
   table.id = 'hwsTable';
   table.innerHTML =
     `<div class="card-head"><h3>Table demo</h3></div>` +
-    `<p class="muted small">Boards side by side next to this laptop? One click puts the sign, the zone lights and this laptop in a row on the map, lines up phones that join right beside them, and gives each zone light a zone to show, so a test alert lights the right one.</p>` +
+    `<p class="muted small">Boards on the table with this laptop? One click puts them on the map along the table (zone light A at the left end, the sign in the middle by this laptop, zone light B at the right end), lines up phones that join in front of them, all in one zone, and gives each zone light a zone to show, so a test alert lights the right one. Put the real boards the same way, <b>at least 1.5 m apart</b>: a phone walked up to a board can then tell it from the others.</p>` +
     `<div class="hws-actions"><button class="primary" id="hwsSetUp">Set up table demo</button>` +
     `<button id="hwsTest" title="Shows red on every board for 1 s, then asks each what it shows">Test boards</button></div>` +
     `<div class="hws-out" id="hwsOut"></div>`;
@@ -172,7 +172,7 @@ export function initHwSetup(ctx: HwSetupCtx) {
       const lights = res.lights.map((l) => `<li>Zone light ${esc(l.key)} shows ${l.shows ? `<b>${esc(l.shows)}</b>` : '<i>nothing</i>'}</li>`).join('');
       const notes = (res.notes ?? []).map((n) => `<li class="muted">${esc(n)}</li>`).join('');
       out.innerHTML =
-        `<ul><li>Boards and this laptop placed in a row; phones line up from ${res.demo.x.toFixed(1)} m, ${res.demo.y.toFixed(1)} m.</li>${lights}${notes}</ul>`;
+        `<ul><li>Boards placed along the table, 1.5 m apart; phones line up from ${res.demo.x.toFixed(1)} m, ${res.demo.y.toFixed(1)} m.</li>${lights}${notes}</ul>`;
       render(res.hardware);
       ctx.refresh();
       ctx.toast('Table demo set up: boards placed, demo spot on', 'ok');
