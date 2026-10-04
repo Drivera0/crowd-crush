@@ -44,8 +44,9 @@ func TestTableDemo(t *testing.T) {
 		{"push1", []int{3, 4, 5}, want{maxLevel: "yellow", minLevel: "yellow", yellowBy: 8, together: -1},
 			want{maxLevel: "yellow", minLevel: "yellow", yellowBy: 6, together: -1}},
 		// Pressed together and moved as one: invisible without the profile;
-		// with it a yellow "moving as one" in most runs, never red.
-		{"together", []int{2, 3, 4, 5}, calm, want{maxLevel: "yellow", together: 8}},
+		// with it "moving as one" in most runs, yellow, then red once it
+		// has lasted Table.TogetherRedMs.
+		{"together", []int{2, 3, 4, 5}, calm, want{maxLevel: "red", together: 8}},
 	}
 	for _, tt := range tests {
 		for _, n := range tt.n {
@@ -211,8 +212,8 @@ func TestTableLineScenarios(t *testing.T) {
 // runs exactly as without the profile, score for score.
 func TestTableOnlySmallZones(t *testing.T) {
 	for _, name := range []string{"wave", "sway-slow", "bump", "shove"} {
-		_, off := runLineTable(t, name, 8, 42, 60, false)
-		_, on := runLineTable(t, name, 8, 42, 60, true)
+		_, off := runLineTable(t, name, 9, 42, 60, false)
+		_, on := runLineTable(t, name, 9, 42, 60, true)
 		if len(off) != len(on) {
 			t.Fatalf("%s: %d vs %d scores", name, len(off), len(on))
 		}

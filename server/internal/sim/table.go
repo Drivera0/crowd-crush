@@ -29,6 +29,8 @@ import (
 //	          TablePushEvery seconds; each person shoves the next on,
 //	          150–400 ms per hop, a little weaker at each hop
 //	push1     the same, one push only
+//	gentle    the same pushes at 30 % strength: judges swaying each other down
+//	          the row rather than shoving
 //	together  pressed shoulder to shoulder and swayed as one: shared,
 //	          irregular low-frequency horizontal motion with a small,
 //	          constant lag per person (40–100 ms) from one end
@@ -49,7 +51,7 @@ type Table struct {
 }
 
 // TableCases lists the table-demo cases.
-var TableCases = []string{"still", "jump", "dance", "push", "push1", "together", "walk", "handle"}
+var TableCases = []string{"still", "jump", "dance", "push", "push1", "gentle", "together", "walk", "handle"}
 
 // Table timing.
 const (
@@ -124,13 +126,17 @@ func NewTable(name string, n int, seed int64, dur float64) (*Table, error) {
 		t.phones = append(t.phones, p)
 	}
 	switch name {
-	case "push", "push1":
+	case "push", "push1", "gentle":
+		amp0 := 4.0
+		if name == "gentle" {
+			amp0 = 1.2
+		}
 		for s := TableLeadIn; s < dur-2; s += TablePushEvery + uniform(r, -0.3, 0.3) {
 			t.pushes = append(t.pushes, s)
 			// Each person shoves the next on: 150–400 ms per hop, a little
 			// weaker each time.
 			hit, amp := make([]float64, n), make([]float64, n)
-			hit[0], amp[0] = s, 4.0
+			hit[0], amp[0] = s, amp0
 			for j := 1; j < n; j++ {
 				hit[j] = hit[j-1] + uniform(r, 0.15, 0.4)
 				amp[j] = amp[j-1] * uniform(r, 0.75, 0.95)
@@ -292,7 +298,7 @@ func (t *Table) raw(i int, s float64) (a [3]float64, rot float64, g [3]float64) 
 			rot += 25 + 20*math.Abs(math.Sin(2*math.Pi*0.5*tt)) + math.Abs(n(10))
 			roll += 5 * math.Pi / 180 * math.Sin(2*math.Pi*0.5*tt)
 		}
-	case "push", "push1":
+	case "push", "push1", "gentle":
 		for k := range t.pushes {
 			v := p.gain * t.hitAmp[k][i] * tablePush(s-t.hitAt[k][i])
 			bx += v
