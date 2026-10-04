@@ -297,6 +297,8 @@ type App struct {
 	mesh   *meshState            // phone-to-phone mesh bookkeeping (mesh.go)
 
 	bcn beaconState // Bluetooth beacon positioning: constants and board links (beacons.go, beaconlinks.go)
+
+	escAfterS int // escalation wait kept while escalation is off (escalation.go)
 }
 
 // New creates the app and its hub, loading saved areas and venue from
@@ -329,6 +331,7 @@ func New(opt Options) *App {
 	if a.opt.EscalateAfter == 0 {
 		a.opt.EscalateAfter = DefaultEscalateAfter
 	}
+	a.loadEscalation()
 	a.loadFloorplan()
 	a.hwPos = a.loadHardwarePos()
 	v := opt.Venue

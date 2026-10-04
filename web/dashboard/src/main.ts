@@ -8,6 +8,7 @@ import { initDemo } from './demo';
 import { initMeshNet } from './meshnet';
 import { Mesh, crushRGB } from './mesh';
 import { Setup } from './setup';
+import { escalateNow, initEscalation } from './escalation';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -2350,6 +2351,7 @@ function alertCardEl(a: Alert, box: string): HTMLElement {
             `<label>Your name <span class="muted">(for the log)</span><input name="by" maxlength="40" placeholder="e.g. Maya, safety lead" /></label>` +
             `<div class="ac-btns"><button class="sm ${danger ? 'danger-btn' : 'primary'}" type="submit">${danger ? 'Resolve anyway' : 'Resolve'}</button><button class="sm ghost" type="button" data-cancel>Cancel</button></div></form>`
           : `<div class="ac-btns">${acked}<button class="sm ghost" data-resolve>Resolve…</button>` +
+            `<button class="sm ghost" data-escalate title="Announce this alert again now: voice and a red sign">Escalate now</button>` +
             `${!a.test && (a.kind ?? 'wave') === 'wave' ? '<button class="ac-why" data-why>Why did it fire?</button>' : ''}</div>`);
       el.querySelector('[data-why]')?.addEventListener('click', () => {
         const pair = evidenceFor(a);
@@ -2357,6 +2359,12 @@ function alertCardEl(a: Alert, box: string): HTMLElement {
         else toast('No two neighbouring phones in that area right now to show the evidence for.', 'info');
       });
       el.querySelector('[data-ack]')?.addEventListener('click', () => void alertAction(a, 'ack'));
+      el.querySelector('[data-escalate]')?.addEventListener('click', () => {
+        if (!a.id) return;
+        escalateNow(a.id)
+          .then(() => toast(`Escalated: ${placeName(a.zone)}`, 'danger'))
+          .catch((e: Error) => toast(`Couldn't escalate: ${e.message}`, 'error'));
+      });
       el.querySelector('[data-resolve]')?.addEventListener('click', () => {
         resolving = { id: a.id!, note: '' };
         renderAlertCards();
@@ -3166,3 +3174,5 @@ const demo = initDemo({
   nameOf: who,
   goLive,
 });
+
+initEscalation((text, kind) => toast(text, kind));

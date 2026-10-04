@@ -269,7 +269,7 @@
                   <p id="logEmpty" class="muted small">No incidents for this event yet.</p>
                 </div>
 
-                <div class="card ask-card">
+                <div class="card ask-card" hidden>
                   <div class="card-head"><h3>Ask the AI</h3><span class="meta">about the last 10 minutes</span></div>
                   <form id="askForm" class="row">
                     <input id="askInput" placeholder="What happened in the last 10 minutes?" maxlength="300" />
@@ -586,6 +586,14 @@
           <!-- ---------------------------------------------------------- settings -->
           <section class="page" data-page="settings">
             <div class="settings">
+              <div class="card">
+                <div class="card-head"><h3>Escalation</h3><span class="meta">applies to every console</span></div>
+                <div class="set-grid">
+                  <label class="set-row"><span>Re-announce unanswered alerts<small>Turn off for a table demo or rehearsal.</small></span><input id="escOn" type="checkbox" /></label>
+                  <label class="set-row"><span>Wait before re-announcing<small>Seconds a red alert can go unacknowledged (10–3600).</small></span><input id="escAfter" type="number" min="10" max="3600" step="5" style="width:7em" /></label>
+                </div>
+                <p id="escNote" class="small muted" aria-live="polite"></p>
+              </div>
               <div class="card">
                 <div class="card-head"><h3>Privacy</h3></div>
                 <p class="small">Attendees share a random session ID, their position on the venue map and motion summaries. GPS is converted to venue metres on arrival and never stored. No names, contacts, audio or photos.</p>

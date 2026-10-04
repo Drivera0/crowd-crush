@@ -164,6 +164,7 @@ func (a *App) Routes(mux *http.ServeMux) {
 		}
 		writeJSON(w, al)
 	})
+	a.escalationRoutes(mux)
 	mux.HandleFunc("POST /api/alerts/clear", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, a.ClearAlerts())
 	})

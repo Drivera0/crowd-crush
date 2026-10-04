@@ -531,12 +531,13 @@ func (a *App) ClearAlerts() protocol.Alerts {
 
 // escalate re-announces red incidents nobody acknowledged in time.
 func (a *App) escalate(now int64) {
-	after := a.opt.EscalateAfter.Milliseconds()
-	if after <= 0 {
-		return
-	}
 	var due []protocol.Alert
 	a.mu.Lock()
+	after := a.opt.EscalateAfter.Milliseconds() // read under mu: staff can change it (escalation.go)
+	if after <= 0 {
+		a.mu.Unlock()
+		return
+	}
 	for _, al := range a.alerts {
 		inc := a.incidents[al.ID]
 		if inc == nil || al.Test || al.Status != protocol.StatusOpen || al.Level != protocol.LevelRed || al.Escalated ||
@@ -555,15 +556,30 @@ func (a *App) escalate(now int64) {
 	}
 }
 
-func (a *App) escalateOne(al protocol.Alert) {
+func (a *App) escalateOne(al protocol.Alert) { a.escalateWith(al, false) }
+
+// escalateWith re-announces an alert. manual: staff pressed "Escalate now"
+// (escalation.go), which also works on acknowledged alerts and drills.
+func (a *App) escalateWith(al protocol.Alert, manual bool) {
 	a.mu.Lock()
-	n := a.incidents[al.ID].notify
+	var n notify
+	if inc := a.incidents[al.ID]; inc != nil {
+		n = inc.notify
+	}
 	a.mu.Unlock()
-	log.Printf("alert %s (%s %s) still unacknowledged: escalating", al.ID, al.Kind, al.Zone)
+	lead := "Still unacknowledged. "
+	if manual {
+		log.Printf("alert %s (%s %s): escalated by staff", al.ID, al.Kind, al.Zone)
+		if al.Status == protocol.StatusAck {
+			lead = "Escalated by staff. "
+		}
+	} else {
+		log.Printf("alert %s (%s %s) still unacknowledged: escalating", al.ID, al.Kind, al.Zone)
+	}
 	a.opt.Sign.ForceAlert(protocol.LevelRed, al.Zone, n.sign, n.light)
 	url := al.AudioURL
 	if n.voice && al.Brief != "" && a.opt.Voice.Enabled() {
-		if u, err := a.opt.Voice.Speak(context.Background(), "Still unacknowledged. "+al.Brief); err == nil {
+		if u, err := a.opt.Voice.Speak(context.Background(), lead+al.Brief); err == nil {
 			url = u
 		} else if !errors.Is(err, voice.ErrNoKey) {
 			log.Printf("voice: %v (re-using the first clip)", err)
@@ -571,7 +587,7 @@ func (a *App) escalateOne(al protocol.Alert) {
 	}
 	a.mu.Lock()
 	up, ok := a.updateAlertLocked(al.ID, func(x *protocol.Alert, _ *incident) {
-		if x.Status == protocol.StatusOpen { // not acknowledged while the clip was made
+		if x.Status == protocol.StatusOpen || (manual && x.Status != protocol.StatusResolved) { // not acknowledged while the clip was made
 			x.Escalated = true
 			if url != "" {
 				x.AudioURL = url
