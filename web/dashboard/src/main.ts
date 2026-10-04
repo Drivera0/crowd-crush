@@ -2158,15 +2158,18 @@ function runSimAction(a: SimActionSpec) {
   areas.cancelPick(); // a new choice replaces a pick still waiting for a click
   switch (a.kind) {
     case 'behaviour':
+      mesh.gatherPin = null; // a new behaviour ends the gathering
       void simAction({ type: a.type } as SimAction);
       break;
     case 'strength':
+      mesh.gatherPin = null;
       void simAction({ type: a.type, strength } as SimAction);
       break;
     case 'point':
-      pickOnMap(a.type === 'spawn' ? 'Click where 20 people arrive' : 'Click where the group should gather', false, (p) =>
-        void simAction(a.type === 'spawn' ? { type: 'spawn', x: p.x, y: p.y, n: 20 } : ({ type: a.type, x: p.x, y: p.y } as SimAction)),
-      );
+      pickOnMap(a.type === 'spawn' ? 'Click where 20 people arrive' : 'Click where the group should gather', false, (p) => {
+        if (a.type === 'attract') mesh.gatherPin = { x: p.x, y: p.y }; // straight away; the next poll confirms it
+        void simAction(a.type === 'spawn' ? { type: 'spawn', x: p.x, y: p.y, n: 20 } : ({ type: a.type, x: p.x, y: p.y } as SimAction));
+      });
       break;
     case 'drag':
       pickOnMap('Drag on the map: where the push starts, and which way', true, (p) => {
@@ -2283,6 +2286,7 @@ function renderSimRunning(running: boolean) {
 /** The simulation ended (stopped, replaced by a saved run): nothing of it may linger as if current. */
 function simEnded() {
   simState = null;
+  mesh.gatherPin = null;
   simStarted = null;
   simSlidersTouched = false;
   exitsSig = '';
@@ -2427,6 +2431,7 @@ async function pollSim() {
     const st = (await r.json()) as SimState;
     if (!st.running) {
       // Not running (any more): keep nothing of the last run.
+      mesh.gatherPin = null;
       if (simState) simEnded();
       return;
     }
@@ -2444,6 +2449,7 @@ async function pollSim() {
     const running = scenarioOf(st.scenario ?? 'concert');
     if (running && $('simActions').childElementCount !== running.actions.length) renderSimActions(running);
     markSimAction(st.running ? st.action : undefined);
+    mesh.gatherPin = st.running && st.action === 'attract' && st.gather ? { x: st.gather[0], y: st.gather[1] } : null;
     renderSimState(st);
     renderSimApply();
   } catch {

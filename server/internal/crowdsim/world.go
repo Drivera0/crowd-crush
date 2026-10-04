@@ -257,8 +257,8 @@ const (
 	ShoveRadius  = 1.5 // m
 	shoveSec     = 0.3 // a shove is a force over this long
 	shoveDV      = 2.0 // m/s velocity change at the centre at strength 1
-	attractShare = 0.4
-	attractPack  = 3.5 // people/m² at which a follower is close enough
+	attractShare = 0.8
+	attractPack  = 4.0 // people/m² at which a follower is close enough
 )
 
 // Agent is one simulated person.

@@ -300,6 +300,8 @@ export class Mesh {
   overlay: ((g: CanvasRenderingContext2D, now: number) => void) | null = null;
   /** No decorative "readings shared between neighbours" dots (the real mesh links are on screen). */
   quietGossip = false;
+  /** The simulation's "Gather here" spot (venue metres), drawn as a pin above the dots; null = none. */
+  gatherPin: { x: number; y: number } | null = null;
   /** Drawn above the background, below everything else (custom areas). */
   underlay: ((g: CanvasRenderingContext2D, now: number) => void) | null = null;
   /** Table demo layer (tablelayer.ts): drawn below and above the dots; it draws two-phone pushes, so drawWaves skips them. */
@@ -1244,6 +1246,7 @@ export class Mesh {
     drawNearLabels(g, this.list, NODE_R, this.view.k, light); // walked up to a board (nearlabels.ts)
     this.drawBadges(g);
     this.table?.draw(g, now, true);
+    if (this.gatherPin) this.drawGatherPin(g, now, this.gatherPin);
 
     // Links of the selected phone: who it shares readings with.
     const sel = this.selected ? this.bodies.get(this.selected) : undefined;
@@ -1695,6 +1698,47 @@ export class Mesh {
       g.fillText(e.name || 'EXIT', (a.x + b.x) / 2, (a.y + b.y) / 2 - 7);
     }
     g.textAlign = 'left';
+  }
+
+  /** A map pin (red teardrop, labelled) where the simulated crowd is gathering, with a ring pulsing out from its tip. */
+  private drawGatherPin(g: CanvasRenderingContext2D, now: number, at: { x: number; y: number }) {
+    const p = this.venueToWorld(at.x, at.y);
+    const s = 1 / Math.max(this.view.k, 0.5); // same size on screen at any zoom
+    const t = (now % 1600) / 1600;
+    g.strokeStyle = `rgba(239,68,68,${0.6 * (1 - t)})`;
+    g.lineWidth = 2 * s;
+    g.beginPath();
+    g.ellipse(p.x, p.y, (6 + 22 * t) * s, (3 + 11 * t) * s, 0, 0, Math.PI * 2);
+    g.stroke();
+    const h = 30 * s, r = 10 * s, cy = p.y - h + r;
+    g.beginPath();
+    g.moveTo(p.x, p.y);
+    g.bezierCurveTo(p.x - r * 0.4, p.y - h * 0.35, p.x - r, cy + r * 0.6, p.x - r, cy);
+    g.arc(p.x, cy, r, Math.PI, 0);
+    g.bezierCurveTo(p.x + r, cy + r * 0.6, p.x + r * 0.4, p.y - h * 0.35, p.x, p.y);
+    g.closePath();
+    g.fillStyle = '#ef4444';
+    g.shadowColor = 'rgba(0,0,0,0.35)';
+    g.shadowBlur = 6 * s;
+    g.fill();
+    g.shadowBlur = 0;
+    g.lineWidth = 1.5 * s;
+    g.strokeStyle = '#ffffff';
+    g.stroke();
+    g.fillStyle = '#ffffff';
+    g.beginPath();
+    g.arc(p.x, cy, r * 0.38, 0, Math.PI * 2);
+    g.fill();
+    g.font = `700 ${12 * s}px Inter, system-ui, sans-serif`;
+    const label = 'Gather here';
+    const tw = g.measureText(label).width;
+    const lx = p.x - tw / 2 - 7 * s, ly = cy - r - 26 * s;
+    g.fillStyle = '#ef4444';
+    g.beginPath();
+    g.roundRect(lx, ly, tw + 14 * s, 20 * s, 10 * s);
+    g.fill();
+    g.fillStyle = '#ffffff';
+    g.fillText(label, lx + 7 * s, ly + 14 * s);
   }
 
   /** Signs and zone lights: draggable markers, with dashed lines to the boards each one hears over Bluetooth. */
