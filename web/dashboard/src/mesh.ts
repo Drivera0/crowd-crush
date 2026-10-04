@@ -1,13 +1,14 @@
-// Living mesh view of the crowd on a canvas.
+// Living mesh view of the crowd on a canvas, drawn on the venue in metres.
 //
-// Each phone is a body that wanders around its tapped spot like an ant: speed
-// and jitter come from the phone's real sway, and a detected wave shoves the
-// receiving phone in the direction of travel. Bodies link to their grid
-// neighbours (the pairs the detector cross-correlates) and to their nearest
-// bodies on screen, and small packets gossip along those links, hop by hop.
-// Wave edges carry fast red packets in the direction the push travels.
+// Each phone is a body that follows its real position (GPS or placed on the
+// map) and jitters around it like an ant: jitter grows with the phone's real
+// sway, and a detected wave shoves the receiving phone in the direction of
+// travel. Bodies link to the neighbours the server's detector compares, and
+// small packets gossip along those links, hop by hop. Wave edges carry fast
+// red packets in the direction the push travels. Clusters (where the crowd is
+// packing together) are drawn underneath with their density and trend.
 
-import type { Level, Node, NodeStatus, Wave } from '../../shared/protocol';
+import type { Cluster, Level, Node, NodeStatus, Wave } from '../../shared/protocol';
 
 type RGB = [number, number, number];
 
@@ -82,8 +83,11 @@ export class Mesh {
   private packets: Packet[] = [];
   private waves: Wave[] = [];
   private waveSpawn = new Map<string, number>();
-  private rows = 1;
-  private cols = 1;
+  private serverLinks: [string, string][] = [];
+  private clusters: Cluster[] = [];
+  private venue = { w: 24, h: 16 };
+  /** World px per metre, and where the venue's top-left corner sits in world px. */
+  private fit = { s: 30, ox: 0, oy: 0 };
   private last = performance.now();
   private hopTimes: number[] = [];
   level: Level = 'calm';
@@ -113,11 +117,15 @@ export class Mesh {
     return { links: this.links.length, hops: this.hopTimes.length };
   }
 
-  update(nodes: Node[], waves: Wave[], rows: number, cols: number) {
+  update(nodes: Node[], waves: Wave[], links: [string, string][], clusters: Cluster[], venue: { w: number; h: number }) {
     const now = performance.now();
-    const layoutChanged = rows !== this.rows || cols !== this.cols;
-    this.rows = Math.max(1, rows);
-    this.cols = Math.max(1, cols);
+    const layoutChanged = venue.w !== this.venue.w || venue.h !== this.venue.h;
+    if (layoutChanged) {
+      this.venue = { w: Math.max(1, venue.w), h: Math.max(1, venue.h) };
+      this.layout();
+    }
+    this.serverLinks = links;
+    this.clusters = clusters;
     const seen = new Set<string>();
     for (const n of nodes) {
       seen.add(n.id);
@@ -138,10 +146,9 @@ export class Mesh {
       } else if (b.data.status !== n.status) {
         b.ripples.push({ t0: now, color: COLOR[n.status], max: n.status === 'wave' ? 90 : 50 });
       }
-      const moved = b.data.row !== n.row || b.data.col !== n.col;
       b.data = n;
       b.gone = false;
-      if (moved || layoutChanged) this.placeHome(b, n);
+      this.placeHome(b, n);
     }
     for (const b of this.bodies.values()) if (!seen.has(b.id)) b.gone = true;
     this.waves = waves;
@@ -201,17 +208,47 @@ export class Mesh {
     this.canvas.width = Math.round(this.w * this.dpr);
     this.canvas.height = Math.round(this.h * this.dpr);
     this.bg = null;
-    for (const b of this.bodies.values()) this.placeHome(b, b.data);
+    this.layout();
   }
 
-  /** Columns keep their left-to-right order so waves visibly travel; everything else is scattered. */
+  /** Fit the venue rectangle into the canvas, leaving room for the toolbars. */
+  private layout() {
+    const mx = 70, my = 50;
+    const s = Math.max(4, Math.min((this.w - 2 * mx) / this.venue.w, (this.h - 2 * my) / this.venue.h));
+    this.fit = { s, ox: (this.w - this.venue.w * s) / 2, oy: (this.h - this.venue.h * s) / 2 };
+    for (const b of this.bodies.values()) {
+      const hx = b.hx, hy = b.hy;
+      this.placeHome(b, b.data);
+      // Keep bodies where they are relative to their home on a resize.
+      b.x += b.hx - hx;
+      b.y += b.hy - hy;
+    }
+  }
+
+  /** Venue metres → world px. */
+  venueToWorld(x: number, y: number) {
+    return { x: this.fit.ox + x * this.fit.s, y: this.fit.oy + y * this.fit.s };
+  }
+
+  /** World px → venue metres. */
+  worldToVenue(x: number, y: number) {
+    return { x: (x - this.fit.ox) / this.fit.s, y: (y - this.fit.oy) / this.fit.s };
+  }
+
+  /** World px per metre. */
+  get scale() {
+    return this.fit.s;
+  }
+
+  get venueSize() {
+    return { ...this.venue };
+  }
+
+  /** Home = the phone's real position on the venue map. */
   private placeHome(b: Body, n: Node) {
-    const mx = Math.min(110, this.w * 0.1);
-    const my = Math.min(100, this.h * 0.14);
-    const cw = (this.w - 2 * mx) / this.cols;
-    const ch = (this.h - 2 * my) / this.rows;
-    b.hx = mx + (n.col + 0.5) * cw + (rand1(b.seed, 1) - 0.5) * cw * 0.55;
-    b.hy = my + (n.row + 0.5) * ch + (rand1(b.seed, 2) - 0.5) * ch * (this.rows === 1 ? 0.8 : 0.6);
+    const p = this.venueToWorld(n.x, n.y);
+    b.hx = p.x;
+    b.hy = p.y;
   }
 
   private frame(now: number) {
@@ -227,7 +264,8 @@ export class Mesh {
 
   private step(now: number, dt: number) {
     const list = [...this.bodies.values()];
-    const roam = Math.min(this.w, this.h) * 0.07;
+    const roam = Math.max(4, this.fit.s * 0.3); // ants wander ~30 cm around their real spot
+    const space = Math.max(6, Math.min(18, this.fit.s * 0.3)); // personal space, px
 
     for (const b of list) {
       const st = b.data.status;
@@ -235,7 +273,7 @@ export class Mesh {
       // Ants: a heading that wanders, a little faster when the phone sways.
       b.heading += (rand1(b.seed, now * 0.0007) - 0.5) * 5 * dt + Math.sin(now * 0.0011 + b.seed * 40) * 0.9 * dt;
       const still = st === 'stale' || st === 'connecting' ? 0.15 : 1;
-      const speed = (14 + sway * 38) * still;
+      const speed = (6 + sway * 22) * still;
       const tx = Math.cos(b.heading) * speed;
       const ty = Math.sin(b.heading) * speed;
       // Steer toward the wander velocity, and stay near home.
@@ -257,8 +295,8 @@ export class Mesh {
         const a = list[i], b = list[j];
         const dx = b.x - a.x, dy = b.y - a.y;
         const d = Math.hypot(dx, dy) || 0.01;
-        if (d < 46) {
-          const f = ((46 - d) / 46) * 260 * dt;
+        if (d < space) {
+          const f = ((space - d) / space) * 160 * dt;
           a.vx -= (dx / d) * f; a.vy -= (dy / d) * f;
           b.vx += (dx / d) * f; b.vy += (dy / d) * f;
         }
@@ -271,9 +309,12 @@ export class Mesh {
       b.vy *= damp;
       b.x += b.vx * dt;
       b.y += b.vy * dt;
-      const pad = 14;
-      b.x = Math.max(pad, Math.min(this.w - pad, b.x));
-      b.y = Math.max(pad, Math.min(this.h - pad, b.y));
+      // Stay inside the venue (outside phones sit just beyond its edge).
+      const pad = 4;
+      const x0 = this.fit.ox - (b.data.outside ? 30 : -pad), x1 = this.fit.ox + this.venue.w * this.fit.s + (b.data.outside ? 30 : -pad);
+      const y0 = this.fit.oy - (b.data.outside ? 30 : -pad), y1 = this.fit.oy + this.venue.h * this.fit.s + (b.data.outside ? 30 : -pad);
+      b.x = Math.max(x0, Math.min(x1, b.x));
+      b.y = Math.max(y0, Math.min(y1, b.y));
 
       const k = 1 - Math.exp(-dt / 0.2); // ~200 ms colour fade
       const target = COLOR[b.data.status];
@@ -300,9 +341,10 @@ export class Mesh {
     this.deliver(now);
   }
 
+  /** Links are the neighbour pairs the server's detector compares; without them, nearest bodies. */
   private relink() {
     const live = [...this.bodies.values()].filter((b) => !b.gone);
-    const maxD = Math.min(this.w, this.h) * 0.42;
+    const maxD = this.fit.s * 2; // 2 m
     const seen = new Set<string>();
     const out: Link[] = [];
     const add = (a: Body, b: Body, grid: boolean) => {
@@ -311,11 +353,13 @@ export class Mesh {
       seen.add(k);
       out.push({ a, b, grid });
     };
-    for (let i = 0; i < live.length; i++) {
-      for (let j = i + 1; j < live.length; j++) {
-        const a = live[i].data, b = live[j].data;
-        if (Math.abs(a.row - b.row) + Math.abs(a.col - b.col) === 1) add(live[i], live[j], true);
-      }
+    for (const [ia, ib] of this.serverLinks) {
+      const a = this.bodies.get(ia), b = this.bodies.get(ib);
+      if (a && b && !a.gone && !b.gone) add(a, b, true);
+    }
+    if (out.length) {
+      this.links = out;
+      return;
     }
     for (const a of live) {
       const near = live
@@ -422,14 +466,29 @@ export class Mesh {
     const { k, x: vx, y: vy } = this.view;
     g.setTransform(this.dpr * k, 0, 0, this.dpr * k, this.dpr * vx, this.dpr * vy);
     const bodies = [...this.bodies.values()];
+    this.drawVenue(g);
     this.underlay?.(g, now);
+    this.drawClusters(g, now);
+
+    // GPS accuracy: the true spot is somewhere in this circle.
+    for (const b of bodies) {
+      const acc = b.data.acc ?? 0;
+      if (acc <= 0 || b.gone) continue;
+      g.fillStyle = rgba(b.color, 0.05 * b.alpha);
+      g.strokeStyle = rgba(b.color, 0.18 * b.alpha);
+      g.lineWidth = 1;
+      g.beginPath();
+      g.arc(b.hx, b.hy, acc * this.fit.s, 0, Math.PI * 2);
+      g.fill();
+      g.stroke();
+    }
 
     // Heat under swaying and wave phones: where the crowd is moving.
     g.globalCompositeOperation = this.theme === 'light' ? 'source-over' : 'lighter';
     for (const b of bodies) {
       const st = b.data.status;
       if (st !== 'swaying' && st !== 'wave') continue;
-      const r = st === 'wave' ? 150 + Math.sin(now / 180 + b.seed * 9) * 18 : 105;
+      const r = this.fit.s * (st === 'wave' ? 2.4 + Math.sin(now / 180 + b.seed * 9) * 0.3 : 1.6);
       const grad = g.createRadialGradient(b.x, b.y, 0, b.x, b.y, r);
       const heat = this.theme === 'light' ? 0.45 : 1;
       grad.addColorStop(0, rgba(b.color, (st === 'wave' ? 0.2 : 0.1) * b.alpha * heat));
@@ -455,7 +514,7 @@ export class Mesh {
 
     // Mesh links.
     const waveKeys = new Set(this.waves.map((w) => key(w.from, w.to)));
-    const maxD = Math.min(this.w, this.h) * 0.42;
+    const maxD = this.fit.s * 2;
     for (const l of this.links) {
       const { a, b } = l;
       const d = Math.hypot(b.x - a.x, b.y - a.y);
@@ -540,7 +599,7 @@ export class Mesh {
       g.arc(b.x, b.y, r + 6 + sway * 9, 0, Math.PI * 2);
       g.stroke();
 
-      if (st === 'connecting') {
+      if (st === 'connecting' || b.data.outside) {
         g.save();
         g.translate(b.x, b.y);
         g.rotate(now / 400);
@@ -623,10 +682,91 @@ export class Mesh {
     return { w: this.w, h: this.h };
   }
 
-  /** Canvas-space home (tapped spot) of a body: what custom areas count. */
-  homeOf(id: string) {
-    const b = this.bodies.get(id);
-    return b ? { x: b.hx, y: b.hy } : null;
+  /** The venue floor: outline, 1 m grid, stage edge and a scale bar. */
+  private drawVenue(g: CanvasRenderingContext2D) {
+    const { s, ox, oy } = this.fit;
+    const W = this.venue.w * s, H = this.venue.h * s;
+    const light = this.theme === 'light';
+    g.fillStyle = light ? 'rgba(255,255,255,0.7)' : 'rgba(17,24,36,0.65)';
+    g.fillRect(ox, oy, W, H);
+    g.strokeStyle = light ? 'rgba(15,23,42,0.06)' : 'rgba(148,163,184,0.06)';
+    g.lineWidth = 1;
+    const step = s < 12 ? 5 : 1; // metres between grid lines
+    g.beginPath();
+    for (let m = step; m < this.venue.w; m += step) {
+      g.moveTo(ox + m * s, oy);
+      g.lineTo(ox + m * s, oy + H);
+    }
+    for (let m = step; m < this.venue.h; m += step) {
+      g.moveTo(ox, oy + m * s);
+      g.lineTo(ox + W, oy + m * s);
+    }
+    g.stroke();
+    g.strokeStyle = light ? 'rgba(15,23,42,0.25)' : 'rgba(148,163,184,0.28)';
+    g.lineWidth = 1.5;
+    g.strokeRect(ox, oy, W, H);
+    // Stage along the top edge.
+    g.fillStyle = light ? 'rgba(15,23,42,0.08)' : 'rgba(148,163,184,0.12)';
+    g.fillRect(ox + W * 0.3, oy - 14, W * 0.4, 14);
+    g.fillStyle = light ? 'rgba(15,23,42,0.5)' : 'rgba(148,163,184,0.6)';
+    g.font = '600 10px Inter, system-ui, sans-serif';
+    g.textAlign = 'center';
+    g.fillText('STAGE', ox + W / 2, oy - 4);
+    // Scale bar: 5 m.
+    g.textAlign = 'left';
+    g.strokeStyle = g.fillStyle;
+    g.lineWidth = 2;
+    g.beginPath();
+    g.moveTo(ox, oy + H + 12);
+    g.lineTo(ox + 5 * s, oy + H + 12);
+    g.stroke();
+    g.fillText(`5 m · venue ${this.venue.w} × ${this.venue.h} m`, ox + 5 * s + 8, oy + H + 16);
+  }
+
+  /** Where the crowd packs together: a soft disc per cluster with its density and trend. */
+  private drawClusters(g: CanvasRenderingContext2D, now: number) {
+    const light = this.theme === 'light';
+    for (const c of this.clusters) {
+      const p = this.venueToWorld(c.x, c.y);
+      const r = Math.max(10, c.r * this.fit.s);
+      const col: RGB = c.level === 'red' ? WAVE : c.level === 'yellow' ? COLOR.swaying : [56, 189, 248];
+      const grad = g.createRadialGradient(p.x, p.y, 0, p.x, p.y, r);
+      grad.addColorStop(0, rgba(col, (c.level === 'red' ? 0.22 : 0.12) * (light ? 0.7 : 1)));
+      grad.addColorStop(1, rgba(col, 0));
+      g.fillStyle = grad;
+      g.beginPath();
+      g.arc(p.x, p.y, r, 0, Math.PI * 2);
+      g.fill();
+      // Forming: rings converge inward. Dispersing: rings spread outward.
+      if (c.trend !== 'steady') {
+        const f = ((now / 1600) % 1);
+        const rr = c.trend === 'forming' ? r * (1.25 - 0.45 * f) : r * (0.8 + 0.45 * f);
+        g.strokeStyle = rgba(col, 0.35 * (c.trend === 'forming' ? f : 1 - f));
+        g.lineWidth = 1.5;
+        g.beginPath();
+        g.arc(p.x, p.y, rr, 0, Math.PI * 2);
+        g.stroke();
+      }
+      g.setLineDash([4, 4]);
+      g.strokeStyle = rgba(col, 0.45);
+      g.lineWidth = 1;
+      g.beginPath();
+      g.arc(p.x, p.y, r, 0, Math.PI * 2);
+      g.stroke();
+      g.setLineDash([]);
+      const arrow = c.trend === 'forming' ? ' ↑' : c.trend === 'dispersing' ? ' ↓' : '';
+      const label = `${c.people ?? c.count} people · ${c.density.toFixed(1)}/m²${arrow}`;
+      g.font = '600 11px Inter, system-ui, sans-serif';
+      const tw = g.measureText(label).width;
+      g.fillStyle = light ? 'rgba(255,255,255,0.9)' : 'rgba(10,14,21,0.8)';
+      g.beginPath();
+      g.roundRect(p.x - tw / 2 - 7, p.y - r - 22, tw + 14, 18, 9);
+      g.fill();
+      g.fillStyle = rgba(col, 1);
+      g.textAlign = 'center';
+      g.fillText(label, p.x, p.y - r - 9);
+      g.textAlign = 'left';
+    }
   }
 
   neighbourCount(id: string) {
