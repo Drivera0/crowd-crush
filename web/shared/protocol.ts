@@ -69,6 +69,21 @@ export interface PhoneState {
   type: 'state';
   node: NodeStatus;
   zone: Level | '';
+  /**
+   * Personal guidance when this phone is in danger (red zone, packed cluster or
+   * a push passing through): the direction to move, as a unit vector in venue
+   * coordinates (x right, y down the map), toward lower density and, when one
+   * is close enough in that direction, an open exit.
+   */
+  move?: { dx: number; dy: number; to?: string; reason: 'push' | 'density' };
+  /** Venue bearing (degrees clockwise from north of the map's "up"), when the venue is GPS-anchored: lets a phone with a compass point the arrow for real. */
+  bearing?: number;
+  /** This phone's position (venue metres), for the little map on its screen. */
+  x?: number;
+  y?: number;
+  /** Venue size (metres), for the same map. */
+  w?: number;
+  h?: number;
 }
 
 export type ToPhone = Ping | PhoneState;
@@ -125,12 +140,63 @@ export interface Cluster {
   density: number;
   level?: Level;
   trend: 'forming' | 'steady' | 'dispersing';
+  /** How fast the estimated density is changing (people/m² per minute). */
+  rate?: number;
+  /** Projected seconds until it reaches the danger density at the current rate (early warning). */
+  eta?: number;
 }
 
 export interface Stats {
   phones: number;
   msgPerSec: number;
   medianRtt: number;
+  /** Mean detector step time over the last few seconds (ms). */
+  detectMs?: number;
+  /** Size of the last snapshot sent to dashboards (bytes). */
+  snapshotBytes?: number;
+}
+
+/** GET /api/edge?from=&to=: why the detector did (or didn't) call this neighbour pair a travelling wave. */
+export interface EdgeExplain {
+  from: string;
+  to: string;
+  /** Resampling step of the traces (ms). */
+  stepMs: number;
+  /** Band-passed horizontal motion of each phone over the correlation window, oldest first (m/s²); null = no valid sample. */
+  a: (number | null)[];
+  b: (number | null)[];
+  /** Cross-correlation |r| at each lag (ms). Positive lag = b moves after a. */
+  lags: number[];
+  corr: (number | null)[];
+  lagMs: number;
+  peak: number;
+  /** Height of the best separate peak (periodic motion has several). */
+  second: number;
+  wave: boolean;
+  /** Each test the detector applies, and whether it passed. */
+  checks: { name: string; pass: boolean; detail: string }[];
+}
+
+/** GET /api/eval: the detector run over every scenario and many random crowds (docs/eval.json). */
+export interface EvalReport {
+  generated: string;
+  seeds: number;
+  rows: {
+    scenario: string;
+    layout: 'line' | 'crowd' | 'sim';
+    /** True if Pulse should alert. */
+    expect: 'red' | 'calm' | 'yellow-ok';
+    runs: number;
+    red: number;
+    yellow: number;
+    calm: number;
+    /** Median seconds to the first red, when it went red. */
+    medianRedS?: number;
+    /** Simulation rows: median lead time vs ground truth (s; positive = Pulse first). */
+    medianLeadS?: number;
+    note?: string;
+  }[];
+  summary: { falseAlarms: number; lookAlikeRuns: number; missed: number; positiveRuns: number };
 }
 
 /** Simulated people (only in mode "sim"): [x, y, pressure N/m, hasPhone 0|1]. */
@@ -167,6 +233,8 @@ export interface Alert {
   level: Level;
   score: number;
   kind?: 'wave' | 'density' | 'rule';
+  /** A density pre-warning: not dangerous yet, but projected to be soon. */
+  early?: boolean;
   brief?: string;
   /** Structured briefing: what is happening and where … */
   headline?: string;

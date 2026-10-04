@@ -99,6 +99,24 @@ button:disabled { opacity: 0.4; }
 }
 .me[hidden] { display: none; }
 
+/* "Move this way": full-screen guidance */
+.guide {
+  position: fixed; inset: 0; z-index: 10;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+  padding: max(20px, env(safe-area-inset-top)) 20px max(20px, env(safe-area-inset-bottom));
+  background: #b91c1c; color: #fff; text-align: center;
+  animation: guidepulse 1.2s ease-in-out infinite;
+}
+.guide[hidden] { display: none; }
+@keyframes guidepulse { 50% { background: #7f1d1d; } }
+.guide-kicker { margin: 0; font-size: 14px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; opacity: 0.85; }
+.guide-title { margin: 0; font-size: 34px; }
+.arrow-wrap { width: min(52vw, 260px); aspect-ratio: 1; }
+.arrow { width: 100%; height: 100%; fill: #fff; filter: drop-shadow(0 6px 18px rgba(0,0,0,0.35)); transition: transform 400ms ease; }
+.guide-to { margin: 0; font-size: 20px; font-weight: 700; }
+.mini-map { width: min(70vw, 300px); height: auto; border-radius: 12px; background: rgba(0,0,0,0.25); }
+.guide-note, .guide-tip { margin: 0; font-size: 14px; opacity: 0.9; max-width: 28em; }
+
 .spinner {
   width: 54px; height: 54px; border-radius: 50%;
   border: 4px solid #1e293b; border-top-color: var(--accent);

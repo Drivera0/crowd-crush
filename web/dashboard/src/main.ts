@@ -1,6 +1,6 @@
 import './style.css';
 import { onPage, page } from './shell';
-import type { Alert, AlertRules, Cluster, Config, FloorplanSuggestion, Hardware, Level, Node, NodeDetail, SimAction, SimState, Snapshot, ToDash, Venue } from '../../shared/protocol';
+import type { Alert, AlertRules, Cluster, Config, EdgeExplain, EvalReport, FloorplanSuggestion, Hardware, Level, Node, NodeDetail, SimAction, SimState, Snapshot, ToDash, Venue } from '../../shared/protocol';
 import { wsURL } from '../../shared/protocol';
 import { animate } from 'motion';
 import { Areas, type Tool } from './areas';
@@ -180,7 +180,10 @@ function renderStatus(zone: Level, phones: number, clusters: Cluster[]) {
   $('kDense').parentElement!.classList.toggle('hot', packed.length > 0);
   if (tight.length) {
     cls = 'yellow';
-    text = `Crowd packing tighter (${tight[0].density.toFixed(1)} people/m²)`;
+    const soon = tight.filter((c) => c.eta != null).sort((a, b) => a.eta! - b.eta!)[0];
+    text = soon
+      ? `Crowd packing fast: dangerous in ~${Math.round(soon.eta!)} s`
+      : `Crowd packing tighter (${tight[0].density.toFixed(1)} people/m²)`;
   }
   if (zone === 'yellow' || watch.length) {
     cls = 'yellow';
@@ -715,6 +718,8 @@ function onSnapshot(s: Snapshot) {
   setCounter('cRate', Math.round(s.stats.msgPerSec));
   setCounter('cRtt', s.stats.medianRtt || null);
   setCounter('cWaves', s.waves.length);
+  $('cDetect').textContent = s.stats.detectMs != null ? s.stats.detectMs.toFixed(2) : '–';
+  $('cSnap').textContent = s.stats.snapshotBytes != null ? (s.stats.snapshotBytes / 1024).toFixed(1) : '–';
 
   const replay = s.mode === 'replay';
   const simulating = s.mode === 'sim';
@@ -1316,7 +1321,7 @@ function renderAlertCards() {
       const el = document.createElement('div');
       el.className = `alert-card ${a.level} ${a.status === 'ack' ? 'ack' : ''}`;
       const where = zoneNames.get(a.zone) ?? a.zone;
-      const kind = a.kind === 'density' ? 'Crowding' : a.kind === 'rule' ? 'Rule' : 'Crowd push';
+      const kind = a.early ? 'Early warning' : a.kind === 'density' ? 'Crowding' : a.kind === 'rule' ? 'Rule' : 'Crowd push';
       el.innerHTML =
         `<div class="ac-top"><b>${a.level === 'red' ? 'Danger' : 'Watch'}</b><span>${esc(kind)} · ${esc(where)} · ${fmtTime(a.t)}</span>` +
         `${a.test ? '<span class="tag">TEST</span>' : ''}${a.escalated ? '<span class="esc">escalated</span>' : ''}</div>` +
@@ -1620,3 +1625,197 @@ onPage((p) => {
   if (p === 'home') renderChecklist();
   if (p === 'venue') renderTemplates();
 });
+
+// ---------------------------------------------------------------------------
+// why did it fire? — the evidence behind a red link
+// ---------------------------------------------------------------------------
+
+let explainPair: [string, string] | null = null;
+let explainTimer = 0;
+
+areas.onLink = (from, to) => void openExplain([from, to]);
+$('exClose').addEventListener('click', () => closeExplain());
+
+function closeExplain() {
+  window.clearInterval(explainTimer);
+  explainPair = null;
+  $('explain').hidden = true;
+}
+
+async function openExplain(pair: [string, string]) {
+  openDrawer(null);
+  explainPair = pair;
+  const el = $('explain');
+  if (el.hidden) {
+    el.hidden = false;
+    animate(el, { opacity: [0, 1], x: [40, 0] }, { type: 'spring', bounce: 0.25, duration: 0.45 });
+  }
+  window.clearInterval(explainTimer);
+  await refreshExplain();
+  explainTimer = window.setInterval(() => void refreshExplain(), 1000);
+}
+
+async function refreshExplain() {
+  const pair = explainPair;
+  if (!pair) return;
+  let e: EdgeExplain;
+  try {
+    const r = await fetch(`/api/edge?from=${encodeURIComponent(pair[0])}&to=${encodeURIComponent(pair[1])}`);
+    if (r.status === 404) {
+      $('exSummary').textContent = 'These two phones are no longer neighbours (one moved or went offline).';
+      return;
+    }
+    if (!r.ok) throw new Error(r.statusText);
+    e = (await r.json()) as EdgeExplain;
+  } catch (err) {
+    $('exSummary').textContent = `Couldn't load the evidence: ${(err as Error).message}`;
+    return;
+  }
+  if (explainPair !== pair) return;
+  $('exPair').textContent = `${e.from.slice(0, 6)} → ${e.to.slice(0, 6)}`;
+  $('exA').textContent = e.from.slice(0, 6);
+  $('exB').textContent = e.to.slice(0, 6);
+  const v = $('exVerdict');
+  v.className = `st ${e.wave ? 'wave' : 'ok'}`;
+  v.textContent = e.wave ? 'Push detected' : 'Not a push';
+  const failed = e.checks.filter((c) => !c.pass);
+  $('exSummary').textContent = e.wave
+    ? `${e.to.slice(0, 6)} repeats ${e.from.slice(0, 6)}'s motion ${Math.abs(e.lagMs)} ms later (similarity ${e.peak.toFixed(2)}): a push passing from one person to the next.`
+    : `Not counted as a push: ${failed.map((c) => c.name.toLowerCase()).join(', ') || 'below the thresholds'}.`;
+  $('exWin').textContent = `${((e.a.length * e.stepMs) / 1000).toFixed(0)} s`;
+  $('exPeak').textContent = `peak ${e.peak.toFixed(2)} at ${e.lagMs} ms`;
+  drawTraces(e);
+  drawCorr(e);
+  $('exChecks').replaceChildren(
+    ...e.checks.map((c) => {
+      const li = document.createElement('li');
+      li.innerHTML = `<span class="${c.pass ? 'ok' : 'no'}">${c.pass ? '✓' : '✗'}</span><span>${esc(c.name)}<small>${esc(c.detail)}</small></span>`;
+      return li;
+    }),
+  );
+}
+
+function setupCanvas(id: string) {
+  const c = $(id) as HTMLCanvasElement;
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const w = c.clientWidth, h = c.clientHeight;
+  if (c.width !== Math.round(w * dpr)) {
+    c.width = Math.round(w * dpr);
+    c.height = Math.round(h * dpr);
+  }
+  const g = c.getContext('2d')!;
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+  return { g, w, h, css: getComputedStyle(document.documentElement) };
+}
+
+function drawTraces(e: EdgeExplain) {
+  const { g, w, h, css } = setupCanvas('exTrace');
+  const all = [...e.a, ...e.b].filter((v): v is number => v != null);
+  const span = Math.max(0.2, ...all.map(Math.abs));
+  g.strokeStyle = css.getPropertyValue('--line').trim();
+  g.beginPath();
+  g.moveTo(0, h / 2);
+  g.lineTo(w, h / 2);
+  g.stroke();
+  const line = (vals: (number | null)[], color: string) => {
+    g.strokeStyle = color;
+    g.lineWidth = 1.6;
+    g.beginPath();
+    let pen = false;
+    vals.forEach((v, i) => {
+      if (v == null) {
+        pen = false;
+        return;
+      }
+      const x = (i / Math.max(1, vals.length - 1)) * w;
+      const y = h / 2 - (v / span) * (h / 2 - 3);
+      if (pen) g.lineTo(x, y);
+      else g.moveTo(x, y);
+      pen = true;
+    });
+    g.stroke();
+  };
+  line(e.a, css.getPropertyValue('--ok').trim());
+  line(e.b, css.getPropertyValue('--handling').trim());
+}
+
+function drawCorr(e: EdgeExplain) {
+  const { g, w, h, css } = setupCanvas('exCorr');
+  const lo = e.lags[0] ?? -1500, hi = e.lags[e.lags.length - 1] ?? 1500;
+  const X = (ms: number) => ((ms - lo) / (hi - lo || 1)) * w;
+  const Y = (r: number) => h - 14 - r * (h - 22);
+  // The "wave" window: 120–1200 ms either way; inside ±120 ms = moving together.
+  g.fillStyle = css.getPropertyValue('--warn-soft').trim();
+  g.fillRect(X(-120), 0, X(120) - X(-120), h - 14);
+  g.fillStyle = css.getPropertyValue('--muted').trim();
+  g.font = '10px Inter, system-ui, sans-serif';
+  g.textAlign = 'center';
+  g.fillText('together', X(0), 10);
+  for (const ms of [-1000, -500, 0, 500, 1000]) if (ms >= lo && ms <= hi) g.fillText(String(ms), X(ms), h - 2);
+  g.strokeStyle = css.getPropertyValue('--line').trim();
+  g.setLineDash([3, 4]);
+  g.beginPath();
+  g.moveTo(0, Y(0.6));
+  g.lineTo(w, Y(0.6));
+  g.stroke();
+  g.setLineDash([]);
+  g.strokeStyle = css.getPropertyValue(e.wave ? '--wave' : '--fg-2').trim();
+  g.lineWidth = 1.8;
+  g.beginPath();
+  let pen = false;
+  e.lags.forEach((ms, i) => {
+    const r = e.corr[i];
+    if (r == null) {
+      pen = false;
+      return;
+    }
+    if (pen) g.lineTo(X(ms), Y(r));
+    else g.moveTo(X(ms), Y(r));
+    pen = true;
+  });
+  g.stroke();
+  g.fillStyle = g.strokeStyle;
+  g.beginPath();
+  g.arc(X(e.lagMs), Y(e.peak), 4, 0, Math.PI * 2);
+  g.fill();
+  g.textAlign = 'left';
+}
+
+// ---------------------------------------------------------------------------
+// detector evaluation (docs/eval.json via /api/eval)
+// ---------------------------------------------------------------------------
+
+async function loadEval() {
+  let rep: EvalReport;
+  try {
+    const r = await fetch('/api/eval');
+    if (!r.ok) return;
+    rep = (await r.json()) as EvalReport;
+  } catch {
+    return;
+  }
+  const s = rep.summary;
+  $('evalMeta').textContent = `${rep.seeds} random crowds per scenario · ${new Date(rep.generated).toLocaleDateString()}`;
+  const red = rep.rows.filter((r) => r.expect === 'red' && r.medianRedS != null).map((r) => r.medianRedS!);
+  const med = red.length ? red.sort((a, b) => a - b)[Math.floor(red.length / 2)] : null;
+  $('evalSummary').innerHTML =
+    `<div><b>${s.falseAlarms}</b><span>false alarms in ${s.lookAlikeRuns} look-alike runs</span></div>` +
+    `<div><b>${s.positiveRuns - s.missed}/${s.positiveRuns}</b><span>real pushes caught</span></div>` +
+    `<div><b>${med != null ? `${med.toFixed(0)} s` : '–'}</b><span>median time to red</span></div>`;
+  const tb = $('evalTable').querySelector('tbody')!;
+  tb.replaceChildren(
+    ...rep.rows.map((r) => {
+      const tr = document.createElement('tr');
+      const bad = (r.expect === 'calm' && r.red > 0) || (r.expect === 'red' && r.red < r.runs);
+      tr.className = bad ? 'bad' : '';
+      tr.innerHTML =
+        `<td>${esc(r.scenario)}</td><td>${r.layout}</td><td>${r.expect === 'yellow-ok' ? 'calm/yellow' : r.expect}</td>` +
+        `<td>${r.red}</td><td>${r.yellow}</td><td>${r.calm}</td><td>${r.medianRedS != null ? `${r.medianRedS.toFixed(0)} s` : r.medianLeadS != null ? `lead ${r.medianLeadS.toFixed(0)} s` : '–'}</td>`;
+      if (r.note) tr.title = r.note;
+      return tr;
+    }),
+  );
+  $('evalTable').hidden = false;
+}
+void loadEval();

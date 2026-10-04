@@ -1,5 +1,5 @@
 import './style.css';
-import type { Config, FromPhone, Hello, Motion, Pong, ToPhone } from '../../shared/protocol';
+import type { Config, FromPhone, Hello, Motion, PhoneState, Pong, ToPhone } from '../../shared/protocol';
 import { wsURL } from '../../shared/protocol';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -256,6 +256,10 @@ $('joinBtn').addEventListener('click', async () => {
     return;
   }
   const req = (DeviceMotionEvent as unknown as { requestPermission?: PermissionFn }).requestPermission;
+  // iOS asks separately for the compass (orientation). Both prompts must start
+  // inside this tap, before any await, or Safari refuses them.
+  const orientReq = (window.DeviceOrientationEvent as unknown as { requestPermission?: PermissionFn } | undefined)?.requestPermission;
+  const orientAsked = typeof orientReq === 'function' ? orientReq.call(DeviceOrientationEvent).catch(() => 'denied' as const) : null;
   if (typeof req === 'function') {
     try {
       const r = await req.call(DeviceMotionEvent);
@@ -276,6 +280,7 @@ $('joinBtn').addEventListener('click', async () => {
   }
   void keepAwake();
   startSensors();
+  void (orientAsked ?? Promise.resolve('granted')).then((r) => r === 'granted' && startCompass());
   await loadConfig();
   if (mode === 'manual' && manual) startLive();
   else await locate();
@@ -388,6 +393,7 @@ function connect() {
     } else if (msg.type === 'state') {
       setConn('Connected', 'on');
       applyState(msg.node, msg.zone);
+      applyGuidance(msg);
     }
   };
   sock.onclose = () => {
@@ -434,6 +440,99 @@ function applyState(node: string, zone: string) {
   $('icon').textContent = icon;
   $('headline').textContent = head;
   $('sub').textContent = sub;
+}
+
+// ---- "Move this way": personal guidance from the server ----
+
+let guidance: PhoneState | null = null;
+let heading: number | null = null; // degrees clockwise from north, if the phone has a compass
+let lastBuzz = 0;
+
+function startCompass() {
+  // iOS gives a compass heading directly; Android gives absolute orientation.
+  window.addEventListener('deviceorientation', (e) => {
+    const h = (e as DeviceOrientationEvent & { webkitCompassHeading?: number }).webkitCompassHeading;
+    if (typeof h === 'number' && !Number.isNaN(h)) {
+      heading = h;
+      drawGuidance();
+    }
+  });
+  window.addEventListener('deviceorientationabsolute', (e) => {
+    const a = (e as DeviceOrientationEvent).alpha;
+    if (typeof a === 'number') {
+      heading = (360 - a) % 360;
+      drawGuidance();
+    }
+  });
+}
+
+function applyGuidance(s: PhoneState) {
+  const had = !!guidance?.move;
+  guidance = s;
+  const g = $('guide');
+  g.hidden = !s.move;
+  if (!s.move) return;
+  // Buzz on Android when guidance starts (iPhones can't vibrate from a web page).
+  const now = Date.now();
+  if (!had || now - lastBuzz > 15_000) {
+    lastBuzz = now;
+    navigator.vibrate?.([300, 120, 300, 120, 600]);
+  }
+  drawGuidance();
+}
+
+/** The arrow points the real way when compass + venue bearing are known; otherwise relative to the map (stage at the top). */
+function drawGuidance() {
+  const s = guidance;
+  if (!s?.move) return;
+  const mapAngle = (Math.atan2(s.move.dx, -s.move.dy) * 180) / Math.PI; // 0 = up the map, clockwise
+  const real = heading !== null && s.bearing !== undefined;
+  const screenAngle = real ? s.bearing! + mapAngle - heading! : mapAngle;
+  $('arrow').style.transform = `rotate(${screenAngle}deg)`;
+  $('guideTo').textContent = s.move.to ? `Toward ${s.move.to}` : s.move.reason === 'push' ? 'Out of the push, to the side' : 'Toward more space';
+  $('guideNote').textContent = real
+    ? 'The arrow points the real way. Turn until it points forward.'
+    : 'The arrow is relative to the venue map below (stage at the top).';
+  drawMiniMap(s);
+}
+
+function drawMiniMap(s: PhoneState) {
+  const c = $('miniMap') as HTMLCanvasElement;
+  const g = c.getContext('2d')!;
+  const W = c.width, H = c.height;
+  g.clearRect(0, 0, W, H);
+  const vw = s.w ?? cfg.venueW, vh = s.h ?? cfg.venueH;
+  const k = Math.min((W - 16) / vw, (H - 16) / vh);
+  const ox = (W - vw * k) / 2, oy = (H - vh * k) / 2;
+  g.strokeStyle = 'rgba(255,255,255,0.7)';
+  g.lineWidth = 2;
+  g.strokeRect(ox, oy, vw * k, vh * k);
+  g.fillStyle = 'rgba(255,255,255,0.25)';
+  g.fillRect(ox + vw * k * 0.3, oy, vw * k * 0.4, 6); // stage edge
+  if (s.x === undefined || s.y === undefined || !s.move) return;
+  const px = ox + s.x * k, py = oy + s.y * k;
+  const len = Math.min(W, H) * 0.3;
+  const ex = px + s.move.dx * len, ey = py + s.move.dy * len;
+  g.strokeStyle = '#fff';
+  g.lineWidth = 4;
+  g.beginPath();
+  g.moveTo(px, py);
+  g.lineTo(ex, ey);
+  g.stroke();
+  const a = Math.atan2(ey - py, ex - px);
+  g.fillStyle = '#fff';
+  g.beginPath();
+  g.moveTo(ex, ey);
+  g.lineTo(ex - 12 * Math.cos(a - 0.5), ey - 12 * Math.sin(a - 0.5));
+  g.lineTo(ex - 12 * Math.cos(a + 0.5), ey - 12 * Math.sin(a + 0.5));
+  g.closePath();
+  g.fill();
+  g.beginPath();
+  g.arc(px, py, 7, 0, Math.PI * 2);
+  g.fill();
+  g.strokeStyle = '#b91c1c';
+  g.lineWidth = 3;
+  g.stroke();
 }
 
 // stats line, so testers can see it's alive
