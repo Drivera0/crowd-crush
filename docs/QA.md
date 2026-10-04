@@ -1,72 +1,101 @@
-# Pulse: the 20 hardest questions
+# Pulse: the hardest questions
 
-Short, honest answers. Numbers come from the README, `docs/EVAL.md` and `docs/loadtest.md`; anything in `[brackets]` is a placeholder to fill before judging.
+Short, honest answers. Every number names its condition and comes from [EVAL.md](EVAL.md), [LOCATE.md](LOCATE.md), [loadtest.md](loadtest.md), [APP.md](APP.md), the README's simulator section, or the table-demo measurement (`go test -run TestTableMeasure -v ./server/internal/detect`, quoted in [DEMO.md](DEMO.md)). Anything in `[brackets]` is a placeholder to fill before judging.
+
+**The answer under every answer:** nearly everything here was measured in a simulator or on synthetic phones. Real-phone checks so far are one Android phone streaming through the server (its noise calibrates the table-demo phones), plus whatever the judges do tonight. Say that first if a judge asks "how do you know?"
+
+## What's real and what's simulated
+
+**1. What have you actually tested on real phones?**
+One Android phone, streaming through the server on 3 October (its readings lying on the table and held in the hand set the noise of the simulated table phones). The phone page's behaviour on each browser was checked in headless Chrome emulation, not on the devices themselves (SETUP.md §6). The Android app's screen-off stream was measured on an Android 12 emulator, not the real phone (APP.md). The Bluetooth beacons are compile-checked and unit-tested, not exercised on a radio (BEACONS.md). Nobody has recorded a real push yet. `[REAL: what got tested on judges' phones today, if anything: phones, browsers, push went red y/n]`
+
+**2. So what are your numbers worth?**
+They show the method holds up against the cases we could think of, under stated conditions. They don't show it works in a real crowd. Three kinds of source: hand-written scripted signals (a push is a damped sine travelling at 2.4 m/s), a Social Force crowd simulator, and synthetic "messy" phones (GPS error, pockets, dropouts) built on top. The detector's thresholds were tuned on the same simulator, which flatters it. What would count as validation: labelled recordings of real crowds, replayed through the same pipeline with thresholds frozen beforehand. Every run Pulse sees can be recorded, labelled and replayed through the tests for exactly that.
+
+**3. How did you check the simulator?**
+Mean walking speed is within ±0.10 m/s of Weidmann's fundamental diagram from 0.5 to 5 people/m², except at 2.5/m² (−0.13), in a corridor. A 1 m door lets 120 people out at 1.6 persons/(m·s) (1.50–1.72 by seed), against ~1.6–1.9 measured by Kretz et al. and Seyfried et al. The furnished venues check door flows against SFPE's 1.32 persons/(m·s) and turnstiles against the Green Guide's 660 per hour. That makes the crowd plausible, not proven. Bodies are discs, and evacuation and panic were not validated.
 
 ## How it works
 
-**1. How does the push detection actually work?**
-Each phone sends a 100 ms summary of its motion; the server band-passes the left-right axis to 0.15–1.5 Hz, because a crowd sway is slow. For each pair of physical neighbours (within 1.1 m), it cross-correlates the last 6 s of both traces at lags from −1.5 s to +1.5 s: slide one trace over the other and find the shift where they match best. A wave edge needs a strong match (|r| ≥ 0.6) at a lag of 120–1200 ms, a peak that clearly beats any other (by 0.2), and a chain of at least 3 phones carrying it in the same direction.
+**4. How does the push detection work?**
+Each phone sends a 100 ms motion summary. The server levels it with the phone's gravity vector (so it works however the phone is carried), keeps the horizontal motion and band-passes it to 0.15–1.5 Hz, because a crowd sway is slow. For each pair of neighbours it slides one trace over the other (±1.5 s over the last 6 s) and finds the shift where they match best. A wave hop needs a strong match (|r| ≥ 0.6) at a lag of 120–1200 ms, one clear peak, and mostly horizontal motion. It only counts as a push when it chains through at least three phones in a consistent direction. Clocks are synced NTP-style per phone, so a lag of a few hundred ms is real.
 
-**2. Why doesn't dancing or jumping set it off?**
-When everyone jumps to the beat, neighbours move at the same moment, so the best lag is about zero, and zero lag is never a wave. Swaying to music is periodic, so several lags match equally well and the "clear peak" test rejects it; a stadium Mexican wave is mostly vertical and gets vetoed. In the simulator, dance, sway, Mexican wave, marching, walking past, pocketed phones and random bumps all stay calm `[EVAL: false alarms / look-alike runs]`.
+**5. Why doesn't dancing or jumping set it off?**
+Jumping to a beat moves neighbours at the same moment: lag near zero, never a wave. Swaying to music is periodic, so several lags match equally well and the "one clear peak" test rejects it. A stadium Mexican wave is mostly vertical and gets vetoed. In the simulator, 0 of 600 look-alike runs went red (dance, sway, slow sway, Mexican wave, marching, walking, phones handled, pocketed, people bumping, walking past), with ideal phones, realistic phones and harsh ones (EVAL.md). At the table, jumping and dancing gave 0 of 10 yellows for every row of 2–5 phones (synthetic phones). One false red appeared in 600 runs, only in the 1 m GPS-error condition.
 
-**3. How do you line up timestamps from phones with different clocks?**
-NTP-style: on connect the server sends 8 pings, keeps the clock offset from the one with the smallest round trip, and re-syncs every 30 s. Every reading is corrected before detection, and the dashboard shows each phone's RTT and offset. The simulator tests the detector with ±25 ms of clock error.
+**6. Then what's the difference between a dense, swaying dance floor and a crush?**
+Honestly, the hard case. A crush pins people: in the simulator, people above the injury-level pressure (1600 N/m) move about as little as people standing calmly (0.06–0.10 against 0.08 m/s²), so there's no motion signature of a quiet crush (EVAL.md finding 2). Pulse catches it by density, and catches pushes by how they travel. For a small group pressed together and moving as one, the table profile shows a yellow "moving as one", never red, because it can't tell pressure from friends rocking together irregularly. Combining "dense" and "swaying" into a red was rejected: a dense crowd swaying to a slow song would trip it.
 
-**4. How does the density alert work?**
-Every 250 ms, DBSCAN groups phones within 1.2 m of each other (at least 3), and each cluster gets a density and a trend (forming, steady, dispersing). Density is the larger of the cluster average and the 90th-percentile local density, so a packed front isn't hidden inside a big loose crowd. Yellow above 2 people/m², red above 4/m², each held 2 s, and the early warning raises yellow when the trend projects the cluster reaching danger soon.
+**7. How does the density alert work?**
+Every 250 ms phones are grouped (DBSCAN, 1.2 m), and each group gets an estimated people/m²: phones within 1.5 m of each member, at the densest well-supported spot, divided by the share of people running Pulse (`participation`). Yellow above 2/m², red above 4/m², each held 2 s. An early warning goes yellow sooner when the trend projects the group reaching 4/m² within 30 s.
 
-**5. Why not machine learning?**
-There is no labelled dataset of real crowd crushes from phones, and any model trained on our own simulator would just learn the simulator. A deterministic detector can be explained to a safety officer: every alert opens a panel with both phones' traces, the correlation curve and which checks passed. With real recordings, ML could tune the thresholds later; it shouldn't make the call today.
+**8. Why not machine learning?**
+There is no labelled dataset of real crushes recorded from phones, and a model trained on our simulator would learn the simulator. A deterministic detector can be explained to a safety officer: every alert opens a panel with both phones' traces, the correlation curve and which checks passed. With real recordings, learning could tune thresholds later. It shouldn't make the call today.
 
-**6. What does Gemini do, and what happens when it's wrong or down?**
-Gemini writes the one-line headline and action for staff, and reads an uploaded floor plan into stage, exits and walls. It never decides whether a zone is dangerous: the detector raises the alert first and Gemini only words it, with a 5 s timeout and a template sentence if it fails; a staff-written area message overrides its action word for word. The floor-plan reading is saved only after staff review and apply it.
+**9. What does Gemini do? What if it's wrong or down?**
+Two jobs. It writes each briefing as structured JSON (a headline and an action), and reads an uploaded floor plan into venue size, stage, exits and walls, which staff review before applying. It never decides whether a zone is dangerous: the detector raises the alert first. 5 s timeout, then a template sentence. A staff-written message for an area replaces its action word for word. ElevenLabs speaks the briefing; without it, the browser's voice does.
 
-## Honest results and limits
+## Positions and GPS
 
-**7. How early does it warn? Is it ever late?**
-In the Social Force simulator, which knows the true pressure on every body: when a crowd builds at the stage, Pulse went red 17–19 s before injury-level pressure in 3 of 5 runs, because the density passed its 4/m² line first. On a sudden surge into a loose crowd it was about 2 s late: the density has to hold for 2 s and the cluster has to fill. The density-trend early warning is meant to close that gap `[EVAL: surge lead time with early warning]`.
+**10. GPS indoors is terrible. How do you know who stands next to whom?**
+You mostly don't, and Pulse stops pretending to. With realistic phone GPS (median 5 m off, drifting) the detector no longer trusts the dot: everyone within reach of both accuracy radii is a candidate neighbour, and shared motion decides. In the simulator that catches 80 of 80 pushes with realistic phones and 69 of 80 with harsh ones (10 m, most phones in pockets and bags), with 0 of 600 false alarms in both (EVAL.md, seeds 1–20). At the table we skip GPS entirely: phones line up in a row in join order.
 
-**8. Does the push detector fire in the crowd simulator?**
-Almost never, and we say so. Simulated bodies are stiff discs, so a push crosses packed neighbours in tens of milliseconds, under the 120 ms per-hop floor, and in a loose crowd it dies out within about 2 m. Either real people transmit pushes more slowly than stiff discs, or the floor needs lowering for packed crowds; only real recorded pushes can settle it, and the density path covers the simulator case.
+**11. And packing, with 5 m of GPS error?**
+Not caught red. A patch packed at 6/m², 3 m deep, blurred by 4 m of error reads about 2/m², and so does a comfortable crowd. With realistic GPS, 0 of 80 packing events go red; 59 of 80 raise a yellow, a median 12.7 s before the simulated danger, against 4 of 460 calm runs (EVAL.md). At 2.5 m error, 35 of 80 go red, late. At 1 m it's as good as exact positions. What fixes it: positions good to about a metre (tap your spot, a seat or section, UWB, Wi-Fi RTT, Bluetooth ranging in a native app) or counts that don't need positions (area capacity rules, turnstiles, the boards' Bluetooth device counts).
 
-**9. How accurate is the location? GPS indoors is terrible.**
-Yes: phone GPS is about 5–25 m outdoors and worse indoors, far coarser than the 1.1 m neighbour radius. So GPS fixes worse than 25 m are ignored, and the demo uses tap-your-spot on the venue map. GPS suits open-air venues and coarse clusters; fine positioning would need Bluetooth or UWB ranging between phones, which needs a native app.
+**12. What does the position estimator add?**
+A Kalman filter per phone (position plus its GPS bias), steps from the accelerometer, the entry spot, and above all: phones jostled together are found by their shared motion and pulled together on the map. With realistic phones the median error goes from 4.5 m to 3.6 m, and surges go from 0 of 60 caught to 58 of 60, with no false red in 60 look-alike runs. But the red comes about 5 s *after* the simulated danger starts (2 of 59 before it). Indoors with no GPS at all, walking in from the QR code: about 5 m, 51 of 60 caught, about 6 s late (LOCATE.md, seeds 201–220). Not checked on a real phone.
 
-**10. What does a web page stop you doing that a native app could?**
-A web page only streams while it's open and the screen is on, so it can't run in a pocket all night. It can't do Bluetooth or UWB ranging between phones, background location, or phone-to-phone relay when the cell network jams, and iPhones won't vibrate from a web page. A real deployment would put the same client inside the event's or ticketing platform's app.
+**13. The arrow on my phone: is it right?**
+With exact positions, 79 % of arrows are within 45° of the arrow computed from everyone's true position. At 5 m GPS error it's 38 %, barely better than a random arrow (25 %). So each arrow carries a confidence, and below 0.5 the phone should show words instead: with realistic GPS 24 % of arrows would be shown (EVAL.md). At the table the positions are exact. During a push the arrow points sideways, out of the push and slightly with it, never against it: that's standard crowd-safety advice.
 
-**11. Most people won't have it open. Doesn't that break density?**
-Density counts phones, so it's divided by a `participation` estimate set per event; with a third of the crowd online, 4 phones in a small area read as 12 people. It's the weakest number in the system: too high and real crushes look half as dense, too low and comfortable groups raise alarms. The push detector depends less on it, because it only needs a few neighbouring phones in a chain.
+## Small groups, phones and browsers
 
-**12. How did you validate the simulator?**
-Against Weidmann's fundamental diagram (1993), the speed-density benchmark that Vadere and JuPedSim are checked against. Mean walking speed is within ±0.10 m/s of Weidmann from 1 to 5 people/m², except at 2.5/m² (−0.14), and we only checked one-way corridor flow. That makes the crowd plausible, not proven: it's a test bench, not evidence about real crushes.
+**14. Can two phones show anything?**
+A chain needs three phones, so two can never make a red. With the table profile on (demo spot, five or fewer phones in a zone), a push from one to the other is yellow in a median 1.2 s and never red, with no red dots (10 of 10 runs, synthetic). Three to five phones: a push every 3 s goes red in a median 7.8–8.0 s; one push alone stays yellow.
 
-**13. A handful of phones at a hackathon proves what?**
-That the method works end to end on real phones, real networks and real hardware. It does not prove the thresholds for 50,000 people; those need recordings from real events, which is why every run can be recorded, labelled and replayed through the tests.
+**15. Doesn't that table profile just make the demo easier?**
+It shortens smoothing and hold time in zones with five phones or fewer, and only while the demo spot is on. The per-pair tests and the three-phone chain are unchanged, which is why jumping and dancing still stay calm. Without it the same pushes go red in about 10 s instead of 8. A zone with a real crowd in it runs exactly as without the profile.
 
-**14. What happens when the detector is wrong?**
-A false alarm costs a steward a look: each alert is an incident card that staff acknowledge or resolve, and the evidence panel shows why it fired. Nothing acts on the crowd automatically except a "move this way" arrow toward more space. A miss is the worse failure, so Pulse is one more signal for an existing safety team, never a replacement for stewards and cameras.
+**16. What about battery and the screen going off?**
+The web page only streams while it's open and on screen; it holds a wake lock so the screen stays on, and the screen is the real battery cost. Screen off, the page's motion stream stops (0 messages/s, measured with the page left alone). The Android app wraps the same page and moves the stream into native code when the screen goes off: 9.9 messages/s for 5 minutes, 3,012 readings, no gap (APP.md). Both were measured on an Android 12 emulator, not a real phone, and battery draw was not measured. A real event would run it inside the ticket app, and only at high-risk moments (doors, headliner, exits).
 
-## Scale, privacy and business
+**17. Does it work on iPhone?**
+The phone page does: Join, allow Motion & Orientation, streaming, the red screen and the arrow (checked in emulation; `[REAL: iPhone checked on a real device y/n]`). What an iPhone web page can't do: Web Bluetooth (so no beacon positioning), vibration, or running with the screen off. An iPhone app would need CoreBluetooth and a different advert format, because iOS won't let an app advertise manufacturer data (APP.md). Not built.
 
-**15. Does it scale to a stadium?**
-Each phone is compared only with up to 6 nearest neighbours within 1.1 m, so the pair count grows linearly with the crowd, not with its square. Each phone sends 10 messages a second; `[LOADTEST: one Go server handled N phones at M msg/s with detector step X ms]`. Beyond one server, the venue splits naturally by zone.
+**18. What does the phone-to-phone mesh prove?**
+That phones can carry each other's data. Phones open WebRTC links to a few nearby phones; when a phone's server connection is closed ("Jam half the phones"), it keeps reporting through its neighbours and still gets its warnings, up to 3 hops. What it doesn't prove: that it works when the cell network is actually jammed. Setting up the links needs the server, and phones on different mobile networks need the internet to reach each other (no TURN server). Real off-grid relay needs Bluetooth or Wi-Fi Direct in a native app. `[MESH: number of real phones the jam demo has run on]`
 
-**16. What about privacy and GDPR?**
-Attendees opt in; the phone sends a random session ID, its position in venue metres and motion numbers, nothing else: no names, contacts, audio, photos or location history. GPS is converted to venue metres on arrival, and latitude and longitude are never stored, logged or sent to the dashboard. Under GDPR it would still be personal data while a session is live, so a deployment needs a stated purpose (safety), a retention limit on recordings and a consent screen in the ticket app.
+## Privacy, cameras, business
 
-**17. Who pays, and how?**
-Venue safety teams, promoters and ticketing platforms, priced per event or per attendee. The pitch is no hardware to install: attendees opt in through the ticket app, and the safety team watches one screen. The signs and zone lights are optional extras for places where staff can't watch a screen.
+**19. What about privacy?**
+A phone sends a random session ID, its position in venue metres and motion numbers. No names, contacts, audio, photos or location history. GPS is converted to venue metres the moment it arrives; latitude and longitude are never stored, logged or sent to the dashboard. On the mesh, phones see a hashed handle, not each other's IDs, and raw GPS never passes through another phone. The Bluetooth scan only reports devices named `PULSE-…`. A phone's Leave screen shows what the server holds about it and when it is dropped (30 s). Under GDPR a live session is still personal data, so a deployment needs a stated purpose, a retention limit on recordings and a consent screen in the ticket app.
 
-**18. Who else does this?**
-Camera analytics count heads and estimate density from CCTV (WaitTime, and the crowd modules in mainstream video-analytics suites); Wi-Fi and Bluetooth analytics count devices in a zone (Cisco Spaces, Crowd Connected for event apps); 3D sensors count people at entrances (Xovis). Academic work used phones too: ETH Zurich ran a crowd-density app at the London Lord Mayor's Show (Wirz et al., 2013). Pulse's difference is measuring how pressure travels between neighbouring people, not just how many are there, and talking back to each attendee's phone; we'd want to combine with cameras, not replace them.
+**20. Why not cameras?**
+Cameras count heads from above and estimate density; they need line of sight, light, installation and an operator, and they raise their own privacy questions. They can't tell a person in the crowd which way to go. Pulse measures how a push travels between neighbours and talks back to each person's phone. We'd want to sit next to cameras, not replace them: density from cameras would fix our weakest number. Others in the space: camera analytics (CCTV head counts), Wi-Fi and Bluetooth device counting, 3D people counters at entrances, and academic phone-based crowd sensing (ETH Zurich at the Lord Mayor's Show, Wirz et al. 2013). `[VERIFY: check any company you name before naming it]`
 
-**19. Why would an attendee keep the page open and drain their battery?**
-Today they wouldn't for a whole night, which is why it belongs inside the ticket app, where it can run only in high-risk moments (doors, headliner, exits). The page uses motion sensors and a 10 Hz upload, which is light; the screen staying on is the real cost. The arrow on their own phone is the reason to opt in: it's safety information for them, not just for the venue.
+**21. Who pays, and how?**
+Venue safety teams, promoters and ticketing platforms, `[PRICE: per event or per attendee, one number]`. The pitch is no hardware to install: attendees opt in through the ticket app, and the safety team watches one screen. The sign and zone lights are optional, for places where staff can't watch a screen. `[BUYER: one verified fact about the buyer, e.g. how many large events a promoter runs a year]`
 
-**20. What does the hardware add if phones do the sensing?**
-Staff and attendees can't all watch a screen, so the Arduino UNO R4 sign flashes STOP in the worst zone and the ESP32 zone lights show each zone's level. The ESP32s also count nearby Bluetooth devices as a second, camera-free crowd estimate (counts only, no addresses), and hear each other to estimate board-to-board distance. Everything still works without them.
+**22. Most people won't have it open. Doesn't that break density?**
+Density counts phones, so it's divided by a `participation` estimate set per event: with a third of the crowd online, 4 phones in a small area read as 12 people. It's the weakest number in the system: too high and real crushes look half as dense, too low and comfortable groups raise alarms. The push detector depends on it less: it needs a few neighbouring phones in a chain.
+
+## Scale and engineering
+
+**23. Does it scale to a stadium?**
+One Go server took 1000 fake phones at 10 messages/s each: 10,000 messages/s, none dropped, dashboard snapshots steady at 10 Hz (worst gap 111 ms), status endpoint 0.5 ms at the median (loadtest.md). Caveats: the load generator ran on the same machine, and the server was showing a simulation at the time, so the dashboard numbers are the simulation's. Each phone is compared with a handful of neighbours, so the work grows with the crowd, not its square. The detector step for 1000 phones takes 27–90 ms and the estimator 11.8 ms on one core, inside a 250 ms tick (LOCATE.md). Beyond one server, the venue splits by zone.
+
+**24. How early does it warn?**
+In the crowd simulator with exact positions: when a crowd builds at the stage, red a median 18.4 s before the simulated danger (20 of 20 seeds), because the density passes 4/m² first. On a sudden surge into a loose crowd it's about 2 s late (median −2.1 s); the early warning moves the first warning to at or before the danger on 3 of 5 seeds (README). With realistic GPS and the estimator, about 5 s late (question 12).
+
+**25. Does the push detector fire inside the crowd simulator?**
+Almost never, and we say so. Simulated bodies are stiff discs, so a push crosses packed neighbours in tens of milliseconds, under the 120 ms per-hop floor, and in a loose crowd it dies within about 2 m. Either real people pass a push on more slowly than stiff discs, or the floor needs lowering for packed crowds. Only real recorded pushes settle it. In the simulator, surges are caught by density.
+
+**26. What happens when it's wrong?**
+A false alarm costs a steward a look: each alert is an incident card that staff acknowledge or resolve, with the evidence one click away. Unanswered red alerts can re-announce themselves (switchable). Nothing acts on the crowd automatically except an arrow. A miss is the worse failure, so Pulse is one more signal for an existing safety team, never a replacement for stewards and cameras.
+
+**27. What does the hardware add?**
+Staff and attendees can't all watch a screen. The Arduino UNO R4 sign flashes STOP for the worst zone; the two ESP32 zone lights show their zone's level. All three run over USB with no Wi-Fi. The ESP32s also count nearby Bluetooth devices (counts only, no addresses) and hear each other. Everything works without them.
 
 ## If you don't know
 
