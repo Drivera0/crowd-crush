@@ -181,16 +181,11 @@ type Status struct {
 
 // Pulse is a board's GET /pulse report.
 type Pulse struct {
-	Kind   string `json:"kind"`
-	Level  string `json:"level"`
-	RSSI   int    `json:"rssi"`
-	Uptime int64  `json:"uptime"`
-	BLE    *struct {
-		Devices int   `json:"devices"`
-		Near    int   `json:"near"`
-		Scans   int64 `json:"scans"`
-		Age     int64 `json:"age"`
-	} `json:"ble"`
+	Kind   string     `json:"kind"`
+	Level  string     `json:"level"`
+	RSSI   int        `json:"rssi"`
+	Uptime int64      `json:"uptime"`
+	BLE    *BLEReport `json:"ble"`
 	// Name is the board's Bluetooth beacon name (PULSE-A); MAC the short
 	// address suffix it reports.
 	Name  string `json:"name"`
@@ -207,6 +202,35 @@ type Pulse struct {
 	WiFi *bool  `json:"wifi"`
 	SSID string `json:"ssid"`
 	IP   string `json:"ip"`
+	// Sign only: Radio is the R4's radio-module firmware ("0.6.0"); Mode what
+	// runs now ("wifi" or "beacon": Bluetooth PULSE-S, no Wi-Fi); Beacon whether
+	// beacon mode was asked for (B 1); BLEErr why it fell back to Wi-Fi.
+	Radio  string `json:"radio"`
+	Mode   string `json:"mode"`
+	Beacon bool   `json:"beacon"`
+	BLEErr string `json:"bleErr"`
+}
+
+// BLEReport is a zone light's Bluetooth crowd counter ({"devices":…}). The
+// sign sends a plain boolean instead ("ble":true = advertising its beacon):
+// that decodes to Beacon with Devices = -1 (no counter).
+type BLEReport struct {
+	Devices int   `json:"devices"`
+	Near    int   `json:"near"`
+	Scans   int64 `json:"scans"`
+	Age     int64 `json:"age"`
+	Beacon  bool  `json:"-"`
+}
+
+// UnmarshalJSON accepts the counter object or a boolean.
+func (b *BLEReport) UnmarshalJSON(data []byte) error {
+	var on bool
+	if json.Unmarshal(data, &on) == nil {
+		*b = BLEReport{Devices: -1, Near: -1, Beacon: on}
+		return nil
+	}
+	type plain BLEReport
+	return json.Unmarshal(data, (*plain)(b))
 }
 
 // Peer is another Pulse board's beacon as this board hears it.

@@ -9,7 +9,10 @@
 //   {"kind":"sign","level":"calm","zone":"B","rssi":-58,"uptime":123,"wifi":true,
 //    "fw":"1a2b3c4 2026-10-04","ssid":"HomeWiFi","ip":"192.168.1.88"}
 //   (rssi = Wi-Fi signal in dBm, uptime in seconds, fw = firmware build id:
-//   content hash of this sketch + build date, written by scripts/boards.sh)
+//   content hash of this sketch + build date, written by scripts/boards.sh;
+//   also "radio":"0.6.0" (radio module firmware), "mode":"wifi"|"beacon",
+//   "beacon" (asked for with B 1), "ble" (advertising), "name":"PULSE-S" while
+//   advertising, "bleErr" (why beacon mode fell back to Wi-Fi))
 //
 // The same commands work over the USB cable (Serial, 115200 baud), one per
 // line, so the sign needs no Wi-Fi when it's plugged into the laptop
@@ -19,6 +22,7 @@
 //   W <ssid><TAB><password>      save a Wi-Fi network in flash and join it (tried before the
 //   W <ssid> <password>          built-in ones; the password is never printed; without a tab
 //   W -                          the last space splits them). "W -" forgets it.
+//   B 1 | B 0 | B                Bluetooth beacon mode on / off / report (below)
 //
 // Wi-Fi is optional: if it hasn't connected within 15 s the sign carries on
 // over USB only (a small "USB" shows while calm) and keeps retrying Wi-Fi in
@@ -31,12 +35,20 @@
 //   three dots               = still trying Wi-Fi (first 15 s)
 //   "USB"                    = no Wi-Fi: plug it into the laptop running the server
 //
-// Beacon mode (SIGN_BEACON 1, e.g. scripts/flash-sign.ps1 -Beacon): the sign
-// advertises itself over Bluetooth as "PULSE-S", like the zone lights, so
-// phones and the other boards can use it as a third position anchor. The
-// R4's Wi-Fi and Bluetooth share one radio module and ArduinoBLE can't run
-// alongside WiFiS3, so a beacon sign has no Wi-Fi: it is driven over USB only
-// (SIGN_URL=serial:auto). Needs the ArduinoBLE library.
+// Beacon mode (a runtime switch kept in EEPROM, no reflash): "B 1" over USB
+// reboots the sign into a Bluetooth beacon advertising "PULSE-S" with
+// manufacturer data FF FF 'P' 'L' 'S' 'S' (the zone lights' format), so the
+// zone lights and phones can use it as a third position anchor. "B 0" reboots
+// it back to Wi-Fi. The R4's Wi-Fi and Bluetooth share one radio module (the
+// ESP32-S3, which is also the USB bridge) and run one at a time here, so a
+// beacon sign has no Wi-Fi: drive it over USB (SIGN_URL=serial:auto). Level
+// commands, the matrix and S keep working. Switching restarts the radio
+// module, so the USB port drops for a few seconds and comes back. Needs radio
+// firmware 0.2.0 or newer (S reports it as "radio"). If Bluetooth fails to
+// start or hangs (a 5 s watchdog catches a hang), the sign falls back to
+// Wi-Fi + USB, says why in S ("bleErr") and stays there until the next "B 1".
+//   B 1 | B 0 | B                beacon on / off (each reboots) / report the mode
+// Needs the ArduinoBLE library (arduino-cli lib install ArduinoBLE).
 //
 // Flash it with scripts/boards.sh flash (Mac / Linux) or pwsh scripts/flash-sign.ps1
 // (Windows): both stamp the build id. Wi-Fi is optional: copy
@@ -45,19 +57,15 @@
 // the laptop and use SIGN_URL=serial:auto; over Wi-Fi the IP is printed on the
 // Serial Monitor (115200 baud): SIGN_URL=http://<that ip>.
 
-#ifndef SIGN_BEACON
-#define SIGN_BEACON 0
-#endif
 #ifndef BEACON_NAME
 #define BEACON_NAME "PULSE-S"
 #endif
 
-#if SIGN_BEACON
-#include <ArduinoBLE.h>
-#else
 #include <WiFiS3.h>
 #include <EEPROM.h>
-#endif
+#include <ArduinoBLE.h>
+#include <WDT.h>
+#include "WiFiCommands.h"
 #include "Arduino_LED_Matrix.h"
 #include "arduino_secrets.h"
 // pulse_build.h is written by scripts/boards.sh / the flash scripts: #define PULSE_FW "<hash> <date>".
@@ -105,9 +113,26 @@ SavedNet saved = {0, "", ""};
 const int ALARM_PIN = 7;
 
 ArduinoLEDMatrix matrix;
-#if !SIGN_BEACON
 WiFiServer server(80);
-#endif
+
+// Beacon mode, kept in EEPROM after the saved network.
+struct ModeRec {
+  uint32_t magic;
+  uint8_t beacon;   // 1 = run as a Bluetooth beacon (B 1)
+  uint8_t failed;   // Bluetooth didn't start: stay on Wi-Fi until the next B 1
+  uint8_t trying;   // set while Bluetooth starts; still set at boot = it hung (watchdog reset)
+  uint8_t espDirty; // the radio module may still run Bluetooth: restart it before using it
+  char err[40];     // why it failed
+};
+const int MODE_ADDR = 128;
+const uint32_t MODE_MAGIC = 0x504C4243; // "PLBC"
+ModeRec mode = {MODE_MAGIC, 0, 0, 0, 0, ""};
+bool beaconMode = false; // running as a beacon now
+bool bleUp = false;      // advertising
+char radioFw[16] = "";
+const unsigned long BLE_SETTLED_MS = 20000; // healthy this long: a later reset isn't a start failure
+bool bleSettled = false;
+unsigned long lastBlePoll = 0;
 
 enum Level { CALM, YELLOW, RED };
 enum Route { NOT_FOUND, LEVEL, PULSE };
@@ -214,26 +239,91 @@ unsigned long wifiSince = 0;  // start of the current attempt (boot or loss)
 unsigned long lastBegin = 0;
 unsigned long lastPoll = 0;
 
-#if SIGN_BEACON
-bool bleUp = false;
+void saveMode() { EEPROM.put(MODE_ADDR, mode); }
 
-// beginBeacon starts a non-connectable advert carrying only the name.
-void beginBeacon() {
-  if (!BLE.begin()) {
-    Serial.println("ble: failed to start");
-    return;
-  }
-  BLE.setLocalName(BEACON_NAME);
-  BLE.setDeviceName(BEACON_NAME);
-  BLE.setConnectable(false);
-  bleUp = BLE.advertise();
-  Serial.print("ble: advertising as ");
-  Serial.println(bleUp ? BEACON_NAME : "(failed)");
+// restartRadio restarts the ESP32-S3 radio module (it is also the USB bridge,
+// so the USB port drops and comes back) and gives it time to boot. Clears
+// espDirty first, so a board that gets reset along with it can't loop.
+void restartRadio() {
+  mode.espDirty = 0;
+  saveMode();
+  Serial.println("radio: restarting the radio module (USB drops for a moment)");
+  Serial.flush();
+  delay(50);
+  std::string res = "";
+  modem.begin();
+  modem.write_nowait(std::string(PROMPT(_RESET)), res, "%s", CMD(_RESET));
+  delay(3000);
 }
 
-void pollWiFi() {}
-const char* curSsid = "";
-#else
+// versionAtLeast compares "0.4.1"-style versions.
+bool versionAtLeast(const char* v, int a, int b, int c) {
+  int x = 0, y = 0, z = 0;
+  if (sscanf(v, "%d.%d.%d", &x, &y, &z) < 2) return false;
+  if (x != a) return x > a;
+  if (y != b) return y > b;
+  return z >= c;
+}
+
+// bleFail records why Bluetooth didn't start and reboots into Wi-Fi + USB mode.
+void bleFail(const char* why) {
+  mode.trying = 0;
+  mode.failed = 1;
+  strncpy(mode.err, why, sizeof mode.err - 1);
+  mode.err[sizeof mode.err - 1] = 0;
+  saveMode();
+  Serial.print("ble: ");
+  Serial.print(why);
+  Serial.println("; rebooting into Wi-Fi + USB mode (B 1 tries again)");
+  Serial.flush();
+  delay(100);
+  NVIC_SystemReset();
+}
+
+// beginBeacon starts a non-connectable advert: the name plus the Pulse
+// manufacturer marker. A 5 s watchdog turns a hang into a reset; the
+// "trying" flag in EEPROM then sends the next boot to Wi-Fi mode.
+void beginBeacon() {
+  if (!versionAtLeast(radioFw, 0, 2, 0)) {
+    char why[40];
+    snprintf(why, sizeof why, "radio firmware %s too old (need 0.2.0)", radioFw[0] ? radioFw : "?");
+    bleFail(why);
+  }
+  mode.trying = 1;
+  mode.espDirty = 1;
+  saveMode();
+  WDT.begin(5000);
+  if (!BLE.begin()) bleFail("BLE.begin failed");
+  WDT.refresh();
+  static const uint8_t marker[] = {0xFF, 0xFF, 'P', 'L', 'S', 'S'};
+  BLE.setLocalName(BEACON_NAME);
+  BLE.setDeviceName(BEACON_NAME);
+  BLE.setManufacturerData(marker, sizeof marker);
+  BLE.setConnectable(false);
+  BLE.setAdvertisingInterval(160); // 100 ms
+  bleUp = BLE.advertise();
+  WDT.refresh();
+  if (!bleUp) bleFail("advertise failed");
+  Serial.print("ble: advertising as ");
+  Serial.println(BEACON_NAME);
+}
+
+// pollBeacon feeds the watchdog (it can't be stopped once started) and lets ArduinoBLE handle events.
+void pollBeacon() {
+  WDT.refresh();
+  unsigned long now = millis();
+  if (!bleSettled && now > BLE_SETTLED_MS) {
+    bleSettled = true;
+    mode.trying = 0;
+    saveMode();
+    WDT.refresh();
+  }
+  if (now - lastBlePoll >= 200) {
+    lastBlePoll = now;
+    BLE.poll();
+  }
+}
+
 int netIdx = -1;          // network being tried: 0 = the saved one (if any), then the built-in ones
 const char* curSsid = ""; // name of the network being tried or joined
 
@@ -304,10 +394,8 @@ void pollWiFi() {
   }
 }
 
-#endif
-
 // usbOnly: Wi-Fi has been down for longer than the grace period (always, in beacon mode).
-bool usbOnly() { return SIGN_BEACON || (!wifiUp && millis() - wifiSince >= WIFI_GRACE_MS); }
+bool usbOnly() { return beaconMode || (!wifiUp && millis() - wifiSince >= WIFI_GRACE_MS); }
 
 void setup() {
   Serial.begin(115200);
@@ -316,12 +404,35 @@ void setup() {
   matrix.renderBitmap(waiting, 8, 12);
   Serial.print("Pulse sign, firmware ");
   Serial.println(PULSE_FW);
-#if SIGN_BEACON
-  beginBeacon();
-#else
+  EEPROM.get(MODE_ADDR, mode);
+  if (mode.magic != MODE_MAGIC) {
+    memset(&mode, 0, sizeof mode);
+    mode.magic = MODE_MAGIC;
+  }
+  mode.err[sizeof mode.err - 1] = 0;
+  if (mode.beacon && mode.trying) {
+    // The last start of Bluetooth never finished: the watchdog reset the board.
+    mode.trying = 0;
+    mode.failed = 1;
+    strcpy(mode.err, "Bluetooth start hung (watchdog)");
+    saveMode();
+  }
+  beaconMode = mode.beacon && !mode.failed;
+  // Bluetooth may still run on the radio module (beacon before, or a reset in beacon mode): start it clean.
+  if (mode.espDirty) restartRadio();
   // The radio module's firmware version (Bluetooth beacon mode needs 0.2.0 or newer).
+  strncpy(radioFw, WiFi.firmwareVersion(), sizeof radioFw - 1);
   Serial.print("radio firmware ");
-  Serial.println(WiFi.firmwareVersion());
+  Serial.println(radioFw);
+  if (beaconMode) {
+    beginBeacon();
+    return;
+  }
+  if (mode.beacon && mode.failed) {
+    Serial.print("ble: beacon mode is on but Bluetooth failed (");
+    Serial.print(mode.err);
+    Serial.println("); running Wi-Fi + USB. B 1 tries again, B 0 turns it off.");
+  }
   EEPROM.get(0, saved);
   if (saved.magic != SAVED_MAGIC) saved.ssid[0] = 0;
   saved.ssid[sizeof saved.ssid - 1] = 0;
@@ -329,7 +440,6 @@ void setup() {
   WiFi.setTimeout(1000);
   wifiSince = millis();
   beginWiFi();
-#endif
 }
 
 const char* levelName() { return level == RED ? "red" : level == YELLOW ? "yellow" : "calm"; }
@@ -364,10 +474,6 @@ void statusJSON(char* body, size_t n) {
   for (int i = 0; zone[i] && j < 7; i++)
     if (zone[i] != '"' && zone[i] != '\\') z[j++] = zone[i];
   z[j] = 0;
-#if SIGN_BEACON
-  snprintf(body, n, "{\"kind\":\"sign\",\"level\":\"%s\",\"zone\":\"%s\",\"rssi\":0,\"uptime\":%lu,\"wifi\":false,\"name\":\"%s\",\"ble\":%s,\"fw\":\"%s\"}",
-           levelName(), z, millis() / 1000, BEACON_NAME, bleUp ? "true" : "false", PULSE_FW);
-#else
   char ssid[34];
   j = 0;
   for (int i = 0; curSsid[i] && j < 33; i++)
@@ -378,9 +484,20 @@ void statusJSON(char* body, size_t n) {
     IPAddress a = WiFi.localIP();
     snprintf(ip, sizeof ip, "%u.%u.%u.%u", a[0], a[1], a[2], a[3]);
   }
-  snprintf(body, n, "{\"kind\":\"sign\",\"level\":\"%s\",\"zone\":\"%s\",\"rssi\":%d,\"uptime\":%lu,\"wifi\":%s,\"fw\":\"%s\",\"ssid\":\"%s\",\"ip\":\"%s\"}",
-           levelName(), z, wifiUp ? (int)WiFi.RSSI() : 0, millis() / 1000, wifiUp ? "true" : "false", PULSE_FW, ssid, ip);
-#endif
+  // radio: the radio module's firmware; mode: what runs now ("beacon" = Bluetooth, no Wi-Fi);
+  // beacon: what was asked for (B 1 / B 0); ble: advertising as name; bleErr: why beacon mode fell back.
+  char err[40];
+  j = 0;
+  if (mode.beacon && mode.failed)
+    for (int i = 0; mode.err[i] && j < 39; i++)
+      if (mode.err[i] != '"' && mode.err[i] != '\\') err[j++] = mode.err[i];
+  err[j] = 0;
+  snprintf(body, n,
+           "{\"kind\":\"sign\",\"level\":\"%s\",\"zone\":\"%s\",\"rssi\":%d,\"uptime\":%lu,\"wifi\":%s,\"fw\":\"%s\",\"ssid\":\"%s\",\"ip\":\"%s\","
+           "\"radio\":\"%s\",\"mode\":\"%s\",\"beacon\":%s,\"ble\":%s,\"name\":\"%s\",\"bleErr\":\"%s\"}",
+           levelName(), z, wifiUp ? (int)WiFi.RSSI() : 0, millis() / 1000, wifiUp ? "true" : "false", PULSE_FW, ssid, ip,
+           radioFw, beaconMode ? "beacon" : "wifi", mode.beacon ? "true" : "false", bleUp ? "true" : "false",
+           bleUp ? BEACON_NAME : "", err);
 }
 
 // Parses "GET /level?v=red&zone=B HTTP/1.1" or "GET /pulse HTTP/1.1".
@@ -398,7 +515,39 @@ Route handleRequestLine(const String& line) {
 char serialBuf[128];
 int serialLen = 0;
 
-#if !SIGN_BEACON
+// handleBeaconCommand: "B 1" / "B 0" saves the mode and reboots into it; "B" only reports it.
+void handleBeaconCommand(char* arg) {
+  while (*arg == ' ') arg++;
+  if (*arg != '0' && *arg != '1') {
+    Serial.print("beacon: ");
+    if (beaconMode) Serial.println("on (Bluetooth " BEACON_NAME ", no Wi-Fi)");
+    else if (mode.beacon) { Serial.print("on but fell back to Wi-Fi: "); Serial.println(mode.err); }
+    else Serial.println("off (Wi-Fi + USB)");
+    return;
+  }
+  bool on = *arg == '1';
+  if (on == beaconMode && (on || !mode.beacon)) {
+    Serial.println(on ? "beacon: already on" : "beacon: already off");
+    return;
+  }
+  mode.beacon = on;
+  mode.failed = 0;
+  mode.trying = 0;
+  mode.err[0] = 0;
+  // Restart the radio module at boot either way: Bluetooth starts on a fresh module, Wi-Fi without Bluetooth left on.
+  if (on || beaconMode) mode.espDirty = 1;
+  saveMode();
+  if (!on && !beaconMode) { // "B 0" after a fallback: already on Wi-Fi, just forget the request
+    Serial.println("beacon: off (Wi-Fi + USB)");
+    return;
+  }
+  Serial.println(on ? "beacon: on; rebooting into Bluetooth beacon mode (USB only, no Wi-Fi)" : "beacon: off; rebooting into Wi-Fi + USB mode");
+  Serial.flush();
+  if (wifiUp) WiFi.disconnect();
+  delay(200);
+  NVIC_SystemReset();
+}
+
 // handleWifiCommand saves (or with "-" forgets) the network from a W line and starts joining it.
 void handleWifiCommand(char* arg) {
   while (*arg == ' ') arg++;
@@ -431,19 +580,19 @@ void handleWifiCommand(char* arg) {
   netIdx = -1; // start over from the saved network
   beginWiFi();
 }
-#endif
 
 void handleSerialLine(char* s) {
   while (*s == ' ') s++;
-  if (s[0] == 'S' || s[0] == 'L' || s[0] == 'W') lastContact = millis();
+  if (s[0] == 'S' || s[0] == 'L' || s[0] == 'W' || s[0] == 'B') lastContact = millis();
   if (s[0] == 'S' && (s[1] == 0 || s[1] == ' ')) {
-    char body[256];
+    char body[400];
     statusJSON(body, sizeof body);
     Serial.println(body);
-#if !SIGN_BEACON
   } else if (s[0] == 'W' && (s[1] == ' ' || s[1] == '\t')) {
-    handleWifiCommand(s + 2);
-#endif
+    if (beaconMode) Serial.println("wifi: not in beacon mode (no Wi-Fi): B 0 first");
+    else handleWifiCommand(s + 2);
+  } else if (s[0] == 'B' && (s[1] == 0 || s[1] == ' ')) {
+    handleBeaconCommand(s + 1);
   } else if (s[0] == 'L' && s[1] == ' ') {
     char* lv = s + 2;
     while (*lv == ' ') lv++;
@@ -468,7 +617,6 @@ void pollSerial() {
   }
 }
 
-#if !SIGN_BEACON
 void serveClient() {
   WiFiClient client = server.available();
   if (!client) return;
@@ -492,7 +640,7 @@ void serveClient() {
   }
   if (route != NOT_FOUND) lastContact = millis();
   if (route == PULSE) {
-    char body[256];
+    char body[400];
     statusJSON(body, sizeof body);
     client.println("HTTP/1.1 200 OK");
     client.println("Content-Type: application/json");
@@ -514,7 +662,6 @@ void serveClient() {
   delay(1);
   client.stop();
 }
-#endif
 
 // renderBitmap is a macro that takes the frame's address, so it can't be
 // handed a ?: expression directly; route frames through a named parameter.
@@ -554,12 +701,12 @@ void render() {
 
 void loop() {
   pollSerial();
-#if SIGN_BEACON
-  BLE.poll();
-#else
-  pollWiFi();
-  if (wifiUp) serveClient();
-#endif
+  if (beaconMode) {
+    pollBeacon();
+  } else {
+    pollWiFi();
+    if (wifiUp) serveClient();
+  }
   render();
   delay(10);
 }

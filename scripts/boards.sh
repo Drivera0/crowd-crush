@@ -5,6 +5,7 @@
 #   scripts/boards.sh flash               compile + upload the right sketch to every board on USB, one at a time
 #   scripts/boards.sh flash --port P      just that board
 #   scripts/boards.sh wifi                save a Wi-Fi network on every board over USB (asks for name + password)
+#   scripts/boards.sh beacon on|off       sign as Bluetooth beacon PULSE-S (no Wi-Fi, USB only) / back to Wi-Fi + USB
 #   scripts/boards.sh env                 print the SIGN_URL line for the boards on USB
 #   scripts/boards.sh env --write         ...and write it into .env (only that line changes; nothing else is printed)
 #   scripts/boards.sh env --wifi          use the boards' Wi-Fi addresses instead of USB (for a server that can't see USB)
@@ -61,6 +62,10 @@ ensure_cores() {
     "$cli" core list 2>/dev/null | grep -q '^arduino:renesas_uno ' || {
       say "Installing the Arduino UNO R4 core (once)…"
       "$cli" core update-index >/dev/null && "$cli" core install arduino:renesas_uno
+    }
+    "$cli" lib list 2>/dev/null | grep -q '^ArduinoBLE ' || {
+      say "Installing the ArduinoBLE library (once; the sign's beacon mode)…"
+      "$cli" lib install ArduinoBLE >/dev/null
     } ;;
   esac
   case " $want " in *" zone-light "*)
@@ -182,6 +187,24 @@ EOF
   [ "$n" -gt 0 ] || die "no board answered on USB (flash them first: scripts/boards.sh flash)"
 }
 
+# The sign's Bluetooth beacon mode, a switch kept in its flash (no reflash). On: it advertises
+# PULSE-S for the phones and zone lights, with no Wi-Fi (drive it over USB: SIGN_URL=serial:auto).
+cmd_beacon() {
+  local want="" only_port=""
+  while [ $# -gt 0 ]; do
+    case $1 in on|off) want=$1; shift ;; --port) only_port=$2; shift 2 ;; *) die "beacon: want on or off [--port P]" ;; esac
+  done
+  [ -n "$want" ] || die "beacon: want on or off"
+  need_ports_free
+  local port="$only_port"
+  if [ -z "$port" ]; then
+    port=$(boards scan -plain | awk -F'\t' '$2 == "sign" && $6 == "yes" {print $1; exit}')
+    [ -n "$port" ] || die "no sign answered on USB (plugged in? firmware current? scripts/boards.sh flash)"
+  fi
+  local flag=""; [ "$want" = on ] && flag=-on
+  boards beacon -port "$port" $flag </dev/null
+}
+
 cmd_env() {
   local args=()
   while [ $# -gt 0 ]; do
@@ -202,8 +225,9 @@ case $cmd in
   scan) need_ports_free; boards scan "$@" ;;
   flash) cmd_flash "$@" ;;
   wifi) cmd_wifi "$@" ;;
+  beacon) cmd_beacon "$@" ;;
   env) cmd_env "$@" ;;
   preflight) exec "$repo/scripts/preflight.sh" "$@" ;;
-  -h|--help|help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//' ;;
-  *) die "unknown command $cmd (status, flash, wifi, env, preflight)" ;;
+  -h|--help|help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) die "unknown command $cmd (status, flash, wifi, beacon, env, preflight)" ;;
 esac
