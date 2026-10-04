@@ -13,6 +13,17 @@ Ordered by value per hour. Judging: technical complexity · design · pitch · o
    - **Wireless on a power bank:** the sketch remembers two Wi-Fi networks (home + phone hotspot) and joins whichever is there. It answers `GET /pulse` so the server can find it on the local network by itself (`SIGN_URL=auto`). Discovery works when the server runs natively (the Mac); inside WSL, keep the explicit IP.
    - Power bank: test 10–15 min first; some switch off when the draw is this low.
 
+## Requested next (business-facing product)
+- [ ] **Setup flow / main menu** (~2 h): first-run wizard and a home screen. 1) Event name and venue, 2) floor plan, 3) watch areas and alert rules, 4) hardware and lights, 5) share the join QR → Go live.
+- [ ] **ElevenLabs-style redesign** (~2–3 h): clean monochrome, sidebar navigation (Live · Venue · Areas & alerts · Hardware · Simulation · Recordings · Settings), calmer typography, motion on state changes.
+- [ ] **Venue templates + floor plan import** (~1.5 h): preset sizes (club, theatre floor, arena floor, festival field) that bound where phones can be; upload a floor-plan image as the map background.
+- [ ] **Gemini reads the floor plan** (~2 h): from an uploaded image, extract the outline, stage, exits and scale as editable geometry (MLH Best Use of Gemini).
+- [ ] **Custom alert rules per area** (~2 h): e.g. density above X/m² for Y s, any push, more than N phones; who/what gets notified (sign, light, voice, message text).
+- [ ] **Better AI briefing** (~1.5 h): structured card (what / where / what to do / confidence), acknowledge and resolve, escalation if unacknowledged, briefing history.
+- [ ] **Boards find each other** (~2–3 h): ESP32s and the sign advertise Bluetooth beacons; each reports the signal strength of the others → estimated distances, board-to-board links on the map, staff drag boards onto their real spots.
+- [ ] **Node animation polish** (~1 h).
+- [ ] **Realistic crowd simulation** (in progress, background): Social Force Model people, steerable from the dashboard (surge, gather, shove, exits), with ground-truth lead time.
+
 ## Cheap wins (< 1 h each)
 - [ ] **Venue floor plan as the map background**: upload an image, or an iPhone 15 Pro Max LiDAR room scan exported as an image.
 - [ ] **`.tech` domain + named Cloudflare tunnel** (MLH Best Use of .Tech; stops the join QR changing). DNS is slow: start early. Steps in `docs/SETUP.md` §3.
