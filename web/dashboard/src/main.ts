@@ -2051,6 +2051,8 @@ const actionText: Record<string, string> = {
 let simScenarios: SimScenario[] = [];
 let simScenario = 'concert';
 let simPreviewFor = '';
+/** Staff picked a scenario themselves (so a late scenario list or a running crowd must not change it under them). */
+let simScenarioPicked = false;
 
 function scenarioOf(id: string): SimScenario | undefined {
   return simScenarios.find((s) => s.id === id);
@@ -2083,6 +2085,7 @@ function chooseScenario(id: string, byUser: boolean) {
   const s = scenarioOf(id);
   if (!s) return;
   simScenario = id;
+  if (byUser) simScenarioPicked = true;
   const people = $('simPeople') as HTMLInputElement;
   people.max = String(Math.min(1000, s.maxPeople));
   people.step = s.maxPeople > 200 ? '10' : '1';
@@ -2402,10 +2405,10 @@ async function pollSim() {
       simScenarios = st.scenarios;
       renderScenarios();
     }
-    if (!simStarted) {
-      // Started elsewhere (another console, "surge around the phones"): the picker follows the running scenario.
+    if (!simStarted || (st.scenario && simStarted.scenario !== st.scenario)) {
+      // Started elsewhere (another console, "surge around the phones", the API): the picker follows the running scenario.
       simStarted = { people: st.people ?? 0, part: Math.round((st.participation ?? 0) * 100), scenario: st.scenario ?? 'concert' };
-      if (!simSlidersTouched && st.scenario && st.scenario !== simScenario) chooseScenario(st.scenario, false);
+      if (!simScenarioPicked && st.scenario && st.scenario !== simScenario) chooseScenario(st.scenario, false);
     }
     // The action buttons are the running scenario's (not the picker's) while it runs.
     const running = scenarioOf(st.scenario ?? 'concert');
@@ -2425,8 +2428,9 @@ void (async () => {
     const st = (await r.json()) as SimState;
     if (st.scenarios?.length) {
       simScenarios = st.scenarios;
-      if (st.running && st.scenario) simScenario = st.scenario;
-      chooseScenario(simScenario, false);
+      if (st.running && st.scenario && !simScenarioPicked) simScenario = st.scenario;
+      if (!simScenarioPicked) chooseScenario(simScenario, false);
+      else renderScenarios();
     }
   } catch {
     /* server busy */

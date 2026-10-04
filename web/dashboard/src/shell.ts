@@ -37,7 +37,7 @@ const PAGES: Record<Page, { title: string; sub: string; map?: { title: string; s
   sim: {
     title: 'Simulation',
     sub: 'A virtual crowd you can steer into a crush, and saved runs to play back.',
-    map: { title: 'Simulated crowd', sub: 'Small dots are people without the app, ringed dots carry Pulse. Colour is how crushed each person is: pale = free, amber = tight, red = dangerous, deep red = crushed.' },
+    map: { title: 'Simulated crowd', sub: 'Each shape is a person seen from above (shoulders and head, facing the way they face); ringed dots are the phones running Pulse. Colour is how crushed each person is: pale = free, amber = tight, red = dangerous, deep red = crushed.' },
   },
   drill: { title: 'Alert drill', sub: 'Send a test alert and see what each output did.' },
   settings: { title: 'Settings', sub: 'Privacy, and technical details for your technician.' },

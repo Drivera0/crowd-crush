@@ -113,7 +113,7 @@ var scenarios = []*Scenario{
 			{Type: ActShove, Label: "Shove…", Tip: "Drag on the map: a push in that direction", Kind: "drag"},
 		}, build: buildClassroom},
 	{ID: "auditorium", Name: "Auditorium", Desc: "A 504-seat lecture theatre with a lobby: intermission, the show ending, an evacuation with an exit blocked.",
-		People: 300, MaxPeople: 504, Participation: 0.6, W: 30, H: 24,
+		People: 300, MaxPeople: 504, Participation: 0.6, W: 30, H: 25,
 		Actions: []protocol.SimActionSpec{
 			{Type: ActCalm, Label: "Show on", Tip: "The audience sits; whoever is out in the lobby comes back to their seat", Kind: "behaviour"},
 			{Type: ActIntermission, Label: "Intermission", Tip: "More than half the audience heads for the bar and toilets in the lobby, then comes back", Kind: "behaviour"},
@@ -284,8 +284,10 @@ func buildClassroom(w *World, people int) {
 	walls, _ = addExit(g, walls, "door-back", "Back door", roomW, 13.6, roomW, 14.5, 1, 0, true, false, true)
 	walls, _ = addExit(g, walls, "corr-top", "Corridor, front end", roomW+0.2, 0, g.W-0.2, 0, 0, -1, false, false, true)
 	walls, _ = addExit(g, walls, "corr-bottom", "Corridor, back end", roomW+0.2, H, g.W-0.2, H, 0, 1, false, false, true)
-	w.addRect("board", "Whiteboard", 1.6, 0, 7.6, 0.08, &walls)
-	w.addRect("desk", "Teacher's desk", 3.7, 0.9, 5.5, 1.5, &walls)
+	// The whiteboard is on the wall (drawn, not an obstacle); the teacher's desk
+	// leaves a metre in front of it and a metre to the first row, like the aisles.
+	w.vs.furniture = append(w.vs.furniture, protocol.SimFurniture{Kind: "board", Label: "Whiteboard", X0: 1.6, Y0: 0, X1: 7.6, Y1: 0.08})
+	w.addRect("desk", "Teacher's desk", 3.7, 1.0, 5.5, 1.5, &walls)
 	blocks := []float64{0.9, 3.7, 6.5} // desk x0 per column (aisles 1.0 m, margins 0.9 m)
 	aisles := []float64{0.45, 3.2, 6.0, 8.75}
 	for i := 0; i < rows; i++ {
@@ -296,7 +298,7 @@ func buildClassroom(w *World, people int) {
 		}
 	}
 	g.Walls = walls
-	g.BarrierY, g.BarrierX0, g.BarrierX1 = 0, 0, g.W
+	g.BarrierY, g.BarrierX0, g.BarrierX1 = -1, 0, g.W // no stage: nothing is ever "on the stage"
 	w.G = g
 	w.solid = g.solid()
 	w.vs.front = -math.Pi / 2
@@ -463,11 +465,14 @@ const seatwayOff = 0.28
 
 // ---- the stadium gate ----
 
+// stileLane is the length (m) of the railings in front of each turnstile.
+const stileLane = 1.6
+
 func buildGate(w *World, people int) {
 	const (
 		W, H     = 30.0, 22.0
-		stileW   = 0.6
-		stileX0  = 12.6
+		stileW   = 0.9 // a real turnstile is ~0.55 m; a disc body of 0.26 m needs 0.9 to get through the social force of the jambs
+		stileX0  = 12.5
 		nStiles  = 4
 		throatX0 = 10.0
 		throatX1 = 20.0
@@ -475,15 +480,20 @@ func buildGate(w *World, people int) {
 	g := &Geometry{W: W, H: H, custom: true}
 	walls := outerWalls(W, H)
 	for i := 0; i < nStiles; i++ {
-		x := stileX0 + float64(i)*2*stileW
+		x := stileX0 + float64(i)*(stileW+0.5)
 		var e *Exit
 		walls, e = addExit(g, walls, "stile-"+string(rune('a'+i)), "Turnstile "+string(rune('A'+i)), x, 0, x+stileW, 0, 0, -1, false, false, true)
 		e.Rate = 660.0 / 3600 // Green Guide: 660 persons per turnstile per hour (from memory)
 		w.vs.gates = append(w.vs.gates, e)
+		// Railings either side make a single-file lane in front of each turnstile.
+		for _, lx := range []float64{x, x + stileW} {
+			walls = append(walls, Seg{lx, 0, lx, stileLane})
+			w.vs.furniture = append(w.vs.furniture, protocol.SimFurniture{Kind: "fence", X0: round2(lx), Y0: 0, X1: round2(lx), Y1: stileLane})
+		}
 		w.vs.furniture = append(w.vs.furniture, protocol.SimFurniture{Kind: "turnstile", Label: e.Name, X0: round2(x), Y0: 0, X1: round2(x + stileW), Y1: 0.6})
 	}
-	walls, _ = addExit(g, walls, "gate-relief", "Relief gate", 17.8, 0, 19.8, 0, 0, -1, false, false, false)
-	w.vs.furniture = append(w.vs.furniture, protocol.SimFurniture{Kind: "gate", Label: "Relief gate", X0: 17.8, Y0: 0, X1: 19.8, Y1: 0.3})
+	walls, _ = addExit(g, walls, "gate-relief", "Relief gate", 18.2, 0, 19.9, 0, 0, -1, false, false, false)
+	w.vs.furniture = append(w.vs.furniture, protocol.SimFurniture{Kind: "gate", Label: "Relief gate", X0: 18.2, Y0: 0, X1: 19.9, Y1: 0.3})
 	// Crowd fences: a funnel from the approach to the throat.
 	fence := []Seg{{6, H, 6, 12}, {6, 12, throatX0, 0}, {W - 6, H, W - 6, 12}, {W - 6, 12, throatX1, 0}}
 	walls = append(walls, fence...)
@@ -491,7 +501,7 @@ func buildGate(w *World, people int) {
 		w.vs.furniture = append(w.vs.furniture, protocol.SimFurniture{Kind: "fence", X0: round2(s.X0), Y0: round2(s.Y0), X1: round2(s.X1), Y1: round2(s.Y1)})
 	}
 	g.Walls = walls
-	g.BarrierY, g.BarrierX0, g.BarrierX1 = 0, throatX0, throatX1
+	g.BarrierY, g.BarrierX0, g.BarrierX1 = -1, throatX0, throatX1
 	w.G = g
 	w.solid = g.solid()
 	w.vs.front = -math.Pi / 2

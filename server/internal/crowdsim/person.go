@@ -697,16 +697,18 @@ func (w *World) gateTick() {
 		if w.T < e.nextAt {
 			continue
 		}
-		// The next person: nearest to the gate, on the inside, within reach.
+		// The next person: the one at the mouth (nearest to the gate, in
+		// front of it, on the inside).
 		mx, my := e.mid()
 		var best *Agent
-		bd := 0.9
+		bd := 1.0
 		for _, a := range w.agents {
 			if a.p.goal != gEnter || a.p.target != e {
 				continue
 			}
 			d := math.Hypot(a.X-mx, a.Y-my)
-			if d < bd && (a.X-mx)*e.nx+(a.Y-my)*e.ny < 0 {
+			lat := math.Abs((a.X-mx)*e.ny - (a.Y-my)*e.nx)
+			if d < bd && lat < 0.3 && (a.X-mx)*e.nx+(a.Y-my)*e.ny < 0 {
 				best, bd = a, d
 			}
 		}
@@ -738,6 +740,12 @@ func (w *World) region(a *Agent) int {
 // distance plus queue, with a bias toward the familiar one. nil = none open.
 func (w *World) chooseExit(a *Agent) *Exit {
 	p := a.p
+	// Inside a turnstile's railings there is no changing your mind.
+	for _, e := range w.vs.gates {
+		if e.Open && a.Y < stileLane+0.3 && a.X >= math.Min(e.X0, e.X1)-0.05 && a.X <= math.Max(e.X0, e.X1)+0.05 {
+			return e
+		}
+	}
 	reg := w.region(a)
 	var best *Exit
 	bc := math.Inf(1)
@@ -1057,9 +1065,17 @@ func (w *World) venueIntent(a *Agent) (speed, ex, ey float64, h how) {
 				}
 				return 0, 0, 0, howStand
 			}
-			if e.Rate > 0 && math.Abs(along) < 0.8 && e.token != a {
-				// At a turnstile that isn't ours yet: queue.
-				return 0, 0, 0, howStand
+			if e.Rate > 0 && e.token != a {
+				// At the mouth of a turnstile that isn't ours yet: wait there
+				// (the others queue behind, kept back by their time gap).
+				lat := math.Abs((a.X-mx)*e.ny - (a.Y-my)*e.nx)
+				if math.Abs(along) < 0.6 && lat < 0.3 {
+					return 0, 0, 0, howStand
+				}
+			} else if e.Rate > 0 && math.Abs(along) < 1.2 {
+				// Ours: straight through the middle of the gap.
+				ex, ey, _ = toward(a, mx+0.8*e.nx, my+0.8*e.ny)
+				return a.V0, ex, ey, howWalk
 			}
 		} else if d := math.Hypot(a.X-p.tx, a.Y-p.ty); d < 0.6 || (p.goal == gPOI && d < 2.0 && w.vs.nav.clearLine(a.X, a.Y, w.vs.nav.cell(p.tx, p.ty))) {
 			switch p.goal {
