@@ -31,6 +31,33 @@ func TestSetSendsLevelOnce(t *testing.T) {
 	}
 }
 
+// The Uno R4 sometimes resets a connection that arrives while it is still
+// closing the previous one; a one-off test alert must still get through.
+func TestRetriesAResetConnection(t *testing.T) {
+	retryDelay = 10 * time.Millisecond
+	calls := 0
+	got := make(chan string, 10)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			conn, _, _ := w.(http.Hijacker).Hijack()
+			conn.Close() // drop it like the board does
+			return
+		}
+		got <- r.URL.RawQuery
+	}))
+	defer srv.Close()
+	New(srv.URL).Force("red", "B")
+	select {
+	case q := <-got:
+		if q != "v=red&zone=B" {
+			t.Fatalf("got %s", q)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no retry after a reset connection")
+	}
+}
+
 func TestDisabledIsNoop(t *testing.T) {
 	New("").Set("red", "A") // must not panic or block
 	var c *Client

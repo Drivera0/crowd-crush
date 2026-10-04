@@ -20,6 +20,9 @@ import (
 
 type state struct{ level, zone string }
 
+// retryDelay is the pause before retrying a failed send.
+var retryDelay = 300 * time.Millisecond
+
 type target struct {
 	zone string // "" = follow the worst zone
 	base string
@@ -144,9 +147,24 @@ func (t *target) set(s state, force bool) {
 
 func (t *target) loop() {
 	for s := range t.pending {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		err := t.send(ctx, s)
-		cancel()
+		var err error
+		// The Uno R4 serves one connection at a time and can reset a request
+		// that lands while it is still closing the previous one, so a failed
+		// send gets one quick retry unless a newer state is already waiting.
+		for attempt := 0; attempt < 2; attempt++ {
+			if attempt > 0 {
+				if len(t.pending) > 0 {
+					break
+				}
+				time.Sleep(retryDelay)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			err = t.send(ctx, s)
+			cancel()
+			if err == nil {
+				break
+			}
+		}
 		if err != nil {
 			log.Printf("sign %s: %v", t.base, err)
 			t.mu.Lock()
