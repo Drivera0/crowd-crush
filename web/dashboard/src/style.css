@@ -862,3 +862,14 @@ button.danger-btn { background: var(--wave); border-color: var(--wave); color: #
 .locating::before { content: ''; display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; border: 1.5px dashed var(--muted); vertical-align: -1px; animation: spin 2.4s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .hw-checkin { display: flex; align-items: center; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
+
+/* The phone-to-phone mesh layer (meshnet.ts). */
+.mesh-count { font-variant-numeric: tabular-nums; color: var(--muted, #94a3b8); }
+.mesh-count.relay { color: #a78bfa; font-weight: 600; }
+.mesh-count[hidden], .mesh-layer[hidden] { display: none; }
+.mesh-layer { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.mesh-layer input { accent-color: #a78bfa; margin: 0; }
+.lg.mesh-lg { background: none; border-top: 2px dashed #a78bfa; border-radius: 0; height: 0; width: 14px; }
+.tt-mesh { color: #a78bfa; }
+.d-jam { margin-top: 6px; }
+#jamHalf.on { border-color: #a78bfa; color: #a78bfa; }

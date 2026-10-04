@@ -286,6 +286,14 @@
                     </div>
                     <p id="demoMsg" class="muted small" aria-live="polite"></p>
                   </div>
+                  <div class="ops-block">
+                    <h4>Phones relaying for each other</h4>
+                    <p class="muted small">Closes the server connection of half the phones. They keep reporting through the phones next to them, and still get their warnings. Or jam one phone from its details panel.</p>
+                    <div class="row">
+                      <button id="jamHalf" class="sm">Jam half the phones</button>
+                    </div>
+                    <p id="jamMsg" class="muted small" aria-live="polite"></p>
+                  </div>
                 </details>
               </aside>
             </div>
@@ -547,6 +555,8 @@
           </div>
           <div id="legend">
             <span id="locating" class="locating" hidden data-tip="Connected, but with no position yet (waiting for a usable GPS fix, or for a tap on the phone's map). Not counted anywhere until placed."></span>
+            <span id="meshCount" class="mesh-count" hidden data-tip="Phones that sent a reading in the last 2 seconds, and how many of those reach the server through another phone instead of their own connection."></span>
+            <label id="meshLayerWrap" class="mesh-layer" hidden data-tip="Direct phone-to-phone links (WebRTC). Packets travel along a link while one phone's data is being relayed through another."><input id="meshLayer" type="checkbox" checked /><i class="lg mesh-lg"></i>Mesh</label>
             <span><i class="lg ok"></i>Calm</span>
             <span><i class="lg swaying"></i>Swaying</span>
             <span><i class="lg wave"></i>In a push</span>
@@ -627,6 +637,12 @@
               <dt>Clock offset</dt><dd id="dOffset">–</dd>
               <dt>Last reading</dt><dd id="dAge">–</dd>
               <dt>Neighbours</dt><dd id="dNeigh">–</dd>
+              <dt>Mesh</dt><dd id="dMesh">–</dd>
+              <dt>Mesh data</dt><dd id="dMeshData">–</dd>
+              <dt>Mesh position</dt><dd id="dMeshPos">–</dd>
+            </dl>
+            <dl class="d-grid d-jam">
+              <dt>Lost-signal demo</dt><dd><button id="dJam" class="sm" hidden>Jam connection</button></dd>
             </dl>
             <p class="d-privacy">
               <svg viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z" /></svg>

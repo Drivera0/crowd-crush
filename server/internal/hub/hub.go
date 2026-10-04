@@ -109,7 +109,14 @@ func (c *conn) writer(ctx context.Context) {
 type phoneConn struct {
 	*conn
 	id   string
+	ua   string
 	sync *clocksync.Sync
+	// lastRead is when the socket last delivered anything (hub clock, ms).
+	lastRead atomic.Int64
+	// relayLim limits what this phone may hand over for others (mesh.go).
+	relayLim bucket
+	// sentClock is the last offset told to the phone (mesh.go: "clock").
+	sentClock atomic.Int64
 }
 
 // Hub tracks connected phones and dashboards.
@@ -119,23 +126,33 @@ type Hub struct {
 	mu     sync.Mutex
 	phones map[string]*phoneConn
 	dashes map[*conn]struct{}
+	// The mesh (mesh.go): phones reached through another phone, the public
+	// handle of every phone seen, clocks kept for phones that come back
+	// relayed, and signalling rate limits.
+	relayed map[string]*relayed
+	handles map[string]string
+	clocks  map[string]savedClock
+	sigLim  map[string]*bucket
+	mesh    meshCounters
 
 	motionMsgs atomic.Int64
 }
 
 // New creates a hub delivering events to h.
 func New(h Handler) *Hub {
-	return &Hub{h: h, phones: map[string]*phoneConn{}, dashes: map[*conn]struct{}{}}
+	return &Hub{h: h, phones: map[string]*phoneConn{}, dashes: map[*conn]struct{}{},
+		relayed: map[string]*relayed{}, handles: map[string]string{}, clocks: map[string]savedClock{}, sigLim: map[string]*bucket{}}
 }
 
 // MotionCount is the total number of motion messages received.
 func (hb *Hub) MotionCount() int64 { return hb.motionMsgs.Load() }
 
-// PhoneCount is how many phones are connected right now.
+// PhoneCount is how many phones are connected right now (their own socket
+// or relayed through the mesh).
 func (hb *Hub) PhoneCount() int {
 	hb.mu.Lock()
 	defer hb.mu.Unlock()
-	return len(hb.phones)
+	return len(hb.phones) + len(hb.relayed)
 }
 
 // DashCount is how many dashboards are connected right now.
@@ -192,11 +209,20 @@ func (hb *Hub) ServePhone(w http.ResponseWriter, r *http.Request) {
 		hello.UA = hello.UA[:40]
 	}
 
-	pc := &phoneConn{conn: newConn(ws, 32), id: hello.ID, sync: &clocksync.Sync{}}
+	pc := &phoneConn{conn: newConn(ws, 32), id: hello.ID, ua: hello.UA, sync: &clocksync.Sync{}}
+	pc.lastRead.Store(Now())
+	pc.sentClock.Store(noClock)
 	hb.mu.Lock()
 	old := hb.phones[hello.ID]
 	hb.phones[hello.ID] = pc
+	// Its own socket takes over from any relayed path.
+	_, wasRelayed := hb.relayed[hello.ID]
+	delete(hb.relayed, hello.ID)
+	hb.registerHandle(hello.ID)
 	hb.mu.Unlock()
+	if mh, ok := hb.h.(MeshHandler); ok && wasRelayed {
+		mh.PhoneRoute(hello.ID, "", 0)
+	}
 	if old != nil { // same phone reconnected: the new socket wins
 		old.close()
 		old.ws.CloseNow()
@@ -206,6 +232,7 @@ func (hb *Hub) ServePhone(w http.ResponseWriter, r *http.Request) {
 		hb.mu.Lock()
 		current := hb.phones[hello.ID] == pc
 		if current {
+			hb.saveClock(pc)
 			delete(hb.phones, hello.ID)
 		}
 		hb.mu.Unlock()
@@ -231,6 +258,7 @@ func (hb *Hub) ServePhone(w http.ResponseWriter, r *http.Request) {
 		default:
 		}
 		now := Now()
+		pc.lastRead.Store(now)
 		typ, err := protocol.PeekType(b)
 		if err != nil {
 			continue
@@ -242,36 +270,85 @@ func (hb *Hub) ServePhone(w http.ResponseWriter, r *http.Request) {
 				pc.sync.Pong(p.T0, p.T1, now)
 				if off, _, ok := pc.sync.Result(); ok {
 					hb.h.PhoneSync(pc.id, off, pc.sync.LastRTT())
+					hb.tellClock(pc, off)
 				}
 			}
-		case protocol.TypeMotion:
-			var m protocol.Motion
-			if json.Unmarshal(b, &m) != nil {
+		case protocol.TypeRelay:
+			hb.relayIn(pc, b, now)
+		case protocol.TypeJam:
+			var j protocol.Jam
+			if json.Unmarshal(b, &j) != nil {
 				continue
 			}
-			hb.motionMsgs.Add(1)
-			if _, _, ok := pc.sync.Result(); !ok {
-				continue // no clock yet: can't place this reading in time
+			if j.On {
+				hb.yield(pc, now) // it will close this socket and go through the mesh
+			} else if mh, ok := hb.h.(MeshHandler); ok {
+				mh.PhoneJam(pc.id, false)
 			}
-			m.T = pc.sync.Correct(m.T)
-			hb.h.PhoneMotion(pc.id, m, now)
-		case protocol.TypeHello:
-			// Phone moved to a new spot without reconnecting.
-			var h helloMsg
-			if json.Unmarshal(b, &h) == nil && h.ID == pc.id {
-				hb.hello(h, hello.UA)
-			}
-		case protocol.TypePos:
-			var p protocol.Pos
-			if json.Unmarshal(b, &p) == nil {
-				hb.h.PhonePos(pc.id, p.X, p.Y)
-			}
-		case protocol.TypeGPS:
-			var g protocol.GPS
-			if json.Unmarshal(b, &g) == nil {
-				hb.h.PhoneGPS(pc.id, g.Lat, g.Lon, g.Acc)
-			}
+		default:
+			hb.phoneMsg(pc.id, hello.UA, typ, b, now, func(t int64) (int64, bool) {
+				if _, _, ok := pc.sync.Result(); !ok {
+					return 0, false // no clock yet: can't place this reading in time
+				}
+				return pc.sync.Correct(t), true
+			})
 		}
+	}
+}
+
+// noClock: no offset has been told to the phone yet.
+const noClock = int64(-1) << 62
+
+// tellClock sends the phone its clock offset when it changed by more than
+// a couple of milliseconds, so the traces phones exchange on the mesh share
+// the server's time base.
+func (hb *Hub) tellClock(pc *phoneConn, off int64) {
+	if last := pc.sentClock.Load(); last != noClock && off-last <= 2 && last-off <= 2 {
+		return
+	}
+	pc.sentClock.Store(off)
+	if b, err := json.Marshal(protocol.Clock{Type: protocol.TypeClock, Offset: off}); err == nil {
+		pc.trySend(b)
+	}
+}
+
+// phoneMsg handles one message from phone id, whether it came on the phone's
+// own socket or through a relay (mesh.go). correct turns a phone timestamp
+// into server time; false = the phone's clock isn't known yet.
+func (hb *Hub) phoneMsg(id, ua, typ string, b []byte, now int64, correct func(int64) (int64, bool)) {
+	switch typ {
+	case protocol.TypeMotion:
+		var m protocol.Motion
+		if json.Unmarshal(b, &m) != nil {
+			return
+		}
+		hb.motionMsgs.Add(1)
+		t, ok := correct(m.T)
+		if !ok {
+			return
+		}
+		m.T = t
+		hb.h.PhoneMotion(id, m, now)
+	case protocol.TypeHello:
+		// Phone moved to a new spot without reconnecting.
+		var h helloMsg
+		if json.Unmarshal(b, &h) == nil && h.ID == id {
+			hb.hello(h, ua)
+		}
+	case protocol.TypePos:
+		var p protocol.Pos
+		if json.Unmarshal(b, &p) == nil {
+			hb.h.PhonePos(id, p.X, p.Y)
+		}
+	case protocol.TypeGPS:
+		var g protocol.GPS
+		if json.Unmarshal(b, &g) == nil {
+			hb.h.PhoneGPS(id, g.Lat, g.Lon, g.Acc)
+		}
+	case protocol.TypeBeacons:
+		hb.beacons(id, b) // Bluetooth beacon report (beacons.go)
+	default:
+		hb.meshMsg(id, typ, b, now)
 	}
 }
 
@@ -329,6 +406,7 @@ func (hb *Hub) syncLoop(ctx context.Context, pc *phoneConn) {
 		pc.sync.EndBurst()
 		if off, rtt, ok := pc.sync.Result(); ok {
 			hb.h.PhoneSync(pc.id, off, rtt)
+			hb.tellClock(pc, off)
 		}
 		if !sleep(ctx, pc.done, ResyncEvery) {
 			return
@@ -349,17 +427,32 @@ func sleep(ctx context.Context, done chan struct{}, d time.Duration) bool {
 	}
 }
 
-// SendPhone sends a message to one phone if it is connected.
+// SendPhone sends a message to one phone if it is connected: on its own
+// socket, or, for a relayed phone, wrapped in a relay envelope to the phone
+// that last delivered for it (mesh.go).
 func (hb *Hub) SendPhone(id string, v any) {
 	hb.mu.Lock()
 	p, ok := hb.phones[id]
-	hb.mu.Unlock()
+	var via *phoneConn
 	if !ok {
+		if r := hb.relayed[id]; r != nil {
+			via = hb.phones[r.via]
+		}
+	}
+	hb.mu.Unlock()
+	if !ok && via == nil {
 		return
 	}
 	b, err := json.Marshal(v)
-	if err == nil {
+	if err != nil {
+		return
+	}
+	if ok {
 		p.trySend(b)
+		return
+	}
+	if env, err := json.Marshal(protocol.Relay{Type: protocol.TypeRelay, To: Handle(id), Msg: b}); err == nil {
+		via.trySend(env)
 	}
 }
 

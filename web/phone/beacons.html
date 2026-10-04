@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0b0f14" />
+    <meta name="darkreader-lock" />
+    <title>Pulse · Bluetooth beacon check</title>
+    <style>
+      :root { --bg: #0b0f14; --panel: #131a23; --line: #243040; --fg: #e8eef5; --muted: #8a97a8; --ok: #22c55e; --bad: #ef4444; --warn: #facc15; --accent: #38bdf8; color-scheme: dark; }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.45 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+      main { max-width: 720px; margin: 0 auto; padding: 16px 14px 48px; display: flex; flex-direction: column; gap: 14px; }
+      h1 { font-size: 22px; margin: 4px 0 0; }
+      h2 { font-size: 15px; margin: 0 0 8px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+      section { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
+      p { margin: 0 0 8px; }
+      p:last-child { margin-bottom: 0; }
+      .muted { color: var(--muted); }
+      .small { font-size: 13px; }
+      ul.checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+      ul.checks li::before { content: '✕'; color: var(--bad); display: inline-block; width: 1.4em; font-weight: 700; }
+      ul.checks li.yes::before { content: '✓'; color: var(--ok); }
+      ul.checks li.na::before { content: '–'; color: var(--muted); }
+      code { background: #0b1219; border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; font-size: 13px; word-break: break-all; user-select: all; }
+      .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+      button { font: inherit; border: 0; border-radius: 10px; padding: 10px 16px; background: var(--accent); color: #001018; font-weight: 600; cursor: pointer; }
+      button.ghost { background: #1e293b; color: var(--fg); font-weight: 500; }
+      button.tiny { padding: 4px 9px; font-size: 12px; border-radius: 7px; }
+      button:disabled { opacity: 0.4; cursor: default; }
+      .scroll { overflow-x: auto; }
+      table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+      th, td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+      th:first-child, td:first-child { text-align: left; }
+      th { color: var(--muted); font-weight: 500; font-size: 12px; }
+      td.empty { text-align: center; color: var(--muted); white-space: normal; }
+      .big { font-size: 20px; font-weight: 600; }
+      .tag { display: inline-block; border-radius: 999px; padding: 1px 9px; font-size: 12px; font-weight: 600; background: #1e293b; }
+      .tag.on { background: #14532d; color: #bbf7d0; }
+      .tag.warn { background: #4a3a05; color: #fde68a; }
+      canvas { width: 100%; height: auto; display: block; background: #0b1219; border-radius: 8px; border: 1px solid var(--line); }
+      #err { color: var(--bad); }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div>
+        <h1>Bluetooth beacon check</h1>
+        <p class="muted">Can this phone locate itself from the Pulse boards? You don’t have to join the crowd for this.</p>
+      </div>
+
+      <section>
+        <h2>This browser</h2>
+        <ul id="checks" class="checks"></ul>
+        <p id="verdict" style="margin-top: 10px"></p>
+        <div id="flagHelp" hidden>
+          <p class="small muted">To let Chrome on Android hear signal strengths directly (scan mode), open this address in a new tab, set it to <b>Enabled</b>, tap <b>Relaunch</b>, then come back here:</p>
+          <p><code id="flag"></code></p>
+        </div>
+      </section>
+
+      <section>
+        <h2>Start</h2>
+        <div class="row">
+          <button id="scanBtn" hidden>Start scanning</button>
+          <button id="connBtn" hidden>Connect to a Pulse board</button>
+          <button id="stopBtn" class="ghost" hidden>Stop</button>
+          <span id="mode" class="tag">not started</span>
+        </div>
+        <p id="links" class="small muted" style="margin-top: 8px"></p>
+        <p id="err" class="small" style="margin-top: 8px"></p>
+      </section>
+
+      <section>
+        <h2>Boards heard</h2>
+        <div class="scroll">
+          <table>
+            <thead>
+              <tr><th>Board</th><th>Via</th><th>RSSI</th><th>Smoothed</th><th>1 m ref</th><th>Distance</th><th>Age</th><th></th></tr>
+            </thead>
+            <tbody id="rows"><tr><td class="empty" colspan="8">Nothing yet.</td></tr></tbody>
+          </table>
+        </div>
+        <p class="small muted" style="margin-top: 8px">Calibrate: stand 1 m from a board, wait for the smoothed number to settle, then tap “1 m”. That reading becomes the board’s 1 m reference.</p>
+      </section>
+
+      <section>
+        <h2>Estimated position</h2>
+        <p id="fix" class="big">–</p>
+        <p id="fixNote" class="small muted"></p>
+        <canvas id="map" width="680" height="460" aria-label="Venue map with the boards and the estimated position"></canvas>
+        <p class="small muted" style="margin-top: 8px">Squares: boards on the venue map. Rings: the distance to each. Dot: the estimate, with its uncertainty shaded.</p>
+      </section>
+
+      <section>
+        <h2>Boards at this venue</h2>
+        <div class="scroll">
+          <table>
+            <thead>
+              <tr><th>Beacon</th><th>Board</th><th>On the map</th><th>1 m ref</th><th>Connect mode</th></tr>
+            </thead>
+            <tbody id="boards"><tr><td class="empty" colspan="5">Loading…</td></tr></tbody>
+          </table>
+        </div>
+        <p id="layout" class="small muted" style="margin-top: 8px"></p>
+      </section>
+
+      <section>
+        <h2>Privacy</h2>
+        <p class="small muted">
+          This page only asks for Bluetooth devices whose name starts with <b>PULSE-</b>: the venue’s own boards. It never sees or
+          reports any other Bluetooth device near you. What leaves the phone is the signal strength of those boards (scan mode), or a
+          random id written to a board you chose (connect mode). No names, no addresses, no location history.
+        </p>
+      </section>
+    </main>
+    <script type="module" src="./src/beacons-diag.ts"></script>
+  </body>
+</html>
