@@ -12,9 +12,9 @@ import (
 
 func TestDBSCAN(t *testing.T) {
 	pts := []Point{
-		{"a", 0, 0}, {"b", 0.5, 0}, {"c", 1.0, 0}, {"d", 1.5, 0}, // a chain: one group
-		{"e", 10, 10}, {"f", 10.4, 10}, // only two: noise at minPts 3
-		{"g", 20, 5}, // alone
+		{ID: "a", X: 0, Y: 0}, {ID: "b", X: 0.5, Y: 0}, {ID: "c", X: 1.0, Y: 0}, {ID: "d", X: 1.5, Y: 0}, // a chain: one group
+		{ID: "e", X: 10, Y: 10}, {ID: "f", X: 10.4, Y: 10}, // only two: noise at minPts 3
+		{ID: "g", X: 20, Y: 5}, // alone
 	}
 	g := DBSCAN(pts, 0.6, 3)
 	if len(g) != 1 || len(g[0]) != 4 {
@@ -27,8 +27,8 @@ func TestDBSCAN(t *testing.T) {
 
 func TestDescribe(t *testing.T) {
 	// Four phones on a 1 m square: centroid in the middle, radius √0.5+0.5.
-	pts := []Point{{"a", 0, 0}, {"b", 1, 0}, {"c", 0, 1}, {"d", 1, 1}}
-	c := describe(pts, []int{0, 1, 2, 3}, 0.5)
+	pts := []Point{{ID: "a", X: 0, Y: 0}, {ID: "b", X: 1, Y: 0}, {ID: "c", X: 0, Y: 1}, {ID: "d", X: 1, Y: 1}}
+	c := describe(pts, []int{0, 1, 2, 3}, 0.5, AccDisc)
 	r := math.Sqrt(0.5) + 0.5
 	if math.Abs(c.X-0.5) > 1e-9 || math.Abs(c.R-r) > 1e-9 || c.Count != 4 || c.People != 8 {
 		t.Fatalf("%+v", c)
@@ -37,7 +37,7 @@ func TestDescribe(t *testing.T) {
 		t.Fatalf("density %.3f est %.3f", c.Density, c.Est)
 	}
 	// Tiny clusters use at least 1 m².
-	c = describe([]Point{{"a", 0, 0}, {"b", 0, 0}, {"c", 0, 0}}, []int{0, 1, 2}, 1)
+	c = describe([]Point{{ID: "a", X: 0, Y: 0}, {ID: "b", X: 0, Y: 0}, {ID: "c", X: 0, Y: 0}}, []int{0, 1, 2}, 1, AccDisc)
 	if c.Density != 3 {
 		t.Fatalf("density %.2f, want 3 (area floor 1 m²)", c.Density)
 	}
@@ -46,7 +46,7 @@ func TestDescribe(t *testing.T) {
 func TestTrackingKeepsIDs(t *testing.T) {
 	tr := NewTracker(ConfigFrom(detect.DefaultConfig()))
 	group := func(cx float64) []Point {
-		return []Point{{"a", cx, 5}, {"b", cx + 0.5, 5}, {"c", cx, 5.5}}
+		return []Point{{ID: "a", X: cx, Y: 5}, {ID: "b", X: cx + 0.5, Y: 5}, {ID: "c", X: cx, Y: 5.5}}
 	}
 	cs, _ := tr.Update(0, append(group(3), group(15)...))
 	if len(cs) != 2 {
@@ -98,7 +98,7 @@ func runGather(t *testing.T, n int, seed int64, cfg detect.Config, verbose bool)
 		pts := make([]Point, n)
 		for i := range pts {
 			x, y := sc.PosAt(i, sec)
-			pts[i] = Point{fmt.Sprint(i), x, y}
+			pts[i] = Point{ID: fmt.Sprint(i), X: x, Y: y}
 		}
 		cs, ch := tr.Update(ms, pts)
 		out.changes = append(out.changes, ch...)
@@ -174,10 +174,10 @@ func TestParticipation(t *testing.T) {
 
 // ring is n phones evenly on a disc of radius r around (10, 10) (plus the centre).
 func ring(n int, r float64) []Point {
-	pts := []Point{{"c", 10, 10}}
+	pts := []Point{{ID: "c", X: 10, Y: 10}}
 	for i := 0; i < n; i++ {
 		a := 2 * math.Pi * float64(i) / float64(n)
-		pts = append(pts, Point{fmt.Sprint(i), 10 + r*math.Cos(a), 10 + r*math.Sin(a)})
+		pts = append(pts, Point{ID: fmt.Sprint(i), X: 10 + r*math.Cos(a), Y: 10 + r*math.Sin(a)})
 	}
 	return pts
 }
@@ -267,14 +267,14 @@ func packedInThin() []Point {
 	for x := thin / 2; x < 20; x += thin {
 		for y := thin / 2; y < 14; y += thin {
 			if !in(x, y) {
-				pts = append(pts, Point{fmt.Sprintf("t%.2f,%.2f", x, y), x, y})
+				pts = append(pts, Point{ID: fmt.Sprintf("t%.2f,%.2f", x, y), X: x, Y: y})
 			}
 		}
 	}
 	packed := 1 / math.Sqrt(6*part)
 	for x := 8 + packed/2; x < 12; x += packed {
 		for y := 5 + packed/2; y < 9; y += packed {
-			pts = append(pts, Point{fmt.Sprintf("p%.2f,%.2f", x, y), x, y})
+			pts = append(pts, Point{ID: fmt.Sprintf("p%.2f,%.2f", x, y), X: x, Y: y})
 		}
 	}
 	return pts
@@ -314,7 +314,7 @@ func TestPackedPatchReadsPacked(t *testing.T) {
 	for i := range idx {
 		idx[i] = i
 	}
-	c := describe(pts, idx, 0.6)
+	c := describe(pts, idx, 0.6, AccDisc)
 	old := quantilePeak(pts) / 0.6
 	t.Logf("%d phones: est %.2f people/m² at (%.1f, %.1f) (old estimate %.2f, disc %.2f); truth 6 in the patch, 1.5 around it",
 		len(pts), c.Est, c.PeakX, c.PeakY, old, c.Density/0.6)
@@ -326,15 +326,15 @@ func TestPackedPatchReadsPacked(t *testing.T) {
 	}
 	// A single phone standing in a lucky spot doesn't make a thin crowd packed.
 	lucky := append([]Point{}, pts[:40]...)
-	lucky = append(lucky, Point{"x", lucky[0].X + 0.1, lucky[0].Y}, Point{"y", lucky[0].X, lucky[0].Y + 0.1})
+	lucky = append(lucky, Point{ID: "x", X: lucky[0].X + 0.1, Y: lucky[0].Y}, Point{ID: "y", X: lucky[0].X, Y: lucky[0].Y + 0.1})
 	if p, _, _ := LocalPeak(lucky); p/0.6 > 2.5 {
 		t.Errorf("thin crowd with one tight trio reads %.2f people/m²", p/0.6)
 	}
 	// Neighbours outside the centres count: the edge of an area sees the crowd past it.
-	inner := []Point{{"a", 0, 0}}
+	inner := []Point{{ID: "a", X: 0, Y: 0}}
 	all := append([]Point{}, inner...)
 	for i := 0; i < 9; i++ {
-		all = append(all, Point{fmt.Sprint(i), 0.5 + 0.1*float64(i), 0})
+		all = append(all, Point{ID: fmt.Sprint(i), X: 0.5 + 0.1*float64(i), Y: 0})
 	}
 	if p, _, _ := LocalPeakAmong(all, inner); math.Abs(p-10/(math.Pi*LocalR*LocalR)) > 1e-9 {
 		t.Errorf("peak %.3f, want the 10 phones around the centre", p)

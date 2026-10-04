@@ -63,6 +63,9 @@ const (
 type Point struct {
 	ID   string
 	X, Y float64
+	// Acc is the accuracy radius of the position (m): the 68 % radius a
+	// phone's GPS reports. 0 = exact (placed by hand).
+	Acc float64
 }
 
 // Config is the clustering and density-alert part of the detector config.
@@ -80,6 +83,11 @@ type Config struct {
 	// yellow. EarlyWarnS 0 = off.
 	EarlyWarnS float64
 	EarlyFloor float64
+	// AccDisc: around a phone whose position is only known to ± Acc metres
+	// the local density is counted over a disc of radius AccDisc × Acc when
+	// that is wider than LocalR, and a cluster of such phones is at least
+	// that wide. 0 = positions are taken as exact.
+	AccDisc float64
 }
 
 // Early-warning rate estimate: least-squares slope of the estimated density
@@ -97,7 +105,8 @@ const (
 func ConfigFrom(c detect.Config) Config {
 	return Config{Eps: c.ClusterEps, MinPts: c.ClusterMinPts, TrendMs: c.ClusterTrendMs,
 		Watch: c.DensityWatch, Danger: c.DensityDanger, Participation: c.Participation,
-		Margin: c.Margin, HoldMs: c.HoldMs, EarlyWarnS: c.EarlyWarnS, EarlyFloor: c.EarlyFloor}
+		Margin: c.Margin, HoldMs: c.HoldMs, EarlyWarnS: c.EarlyWarnS, EarlyFloor: c.EarlyFloor,
+		AccDisc: c.DensityAccDisc}
 }
 
 // Cluster is one group of phones.
@@ -112,6 +121,11 @@ type Cluster struct {
 	PeakY   float64
 	People  int     // estimated head count (Count / Participation)
 	Est     float64 // estimated people per m²
+	// Acc is the median position accuracy of the members (m; 0 = placed by
+	// hand). When it is several metres, Est is the density averaged over a
+	// disc about that wide (AccDisc × Acc), which reads lower than the
+	// density at the tightest spot of the crowd: a lower bound.
+	Acc     float64
 	Trend   string
 	Level   string
 	Members []string
@@ -179,7 +193,7 @@ func (t *Tracker) Update(now int64, pts []Point) ([]Cluster, []Change) {
 	groups := DBSCAN(pts, cfg.Eps, cfg.MinPts)
 	found := make([]Cluster, len(groups))
 	for i, g := range groups {
-		found[i] = describe(pts, g, cfg.Participation)
+		found[i] = describe(pts, g, cfg.Participation, cfg.AccDisc)
 	}
 
 	// Greedy nearest matching of new clusters to tracks.
@@ -434,13 +448,17 @@ func slope(h []sample, from int64) float64 {
 // describe turns a group of points into a cluster (no ID, trend or level).
 // Local densities count every phone (not only the cluster's members) as a
 // neighbour.
-func describe(pts []Point, idx []int, participation float64) Cluster {
+func describe(pts []Point, idx []int, participation, accDisc float64) Cluster {
 	var c Cluster
+	accs := make([]float64, 0, len(idx))
 	for _, i := range idx {
 		c.X += pts[i].X
 		c.Y += pts[i].Y
 		c.Members = append(c.Members, pts[i].ID)
+		accs = append(accs, pts[i].Acc)
 	}
+	sort.Float64s(accs)
+	c.Acc = accs[len(accs)/2]
 	n := float64(len(idx))
 	c.X /= n
 	c.Y /= n
@@ -448,7 +466,9 @@ func describe(pts []Point, idx []int, participation float64) Cluster {
 	for _, i := range idx {
 		far = math.Max(far, math.Hypot(pts[i].X-c.X, pts[i].Y-c.Y))
 	}
-	c.R = far + padM
+	// Phones that only know where they are to ± Acc can't show a group
+	// tighter than that.
+	c.R = math.Max(far, accDisc*c.Acc) + padM
 	c.Count = len(idx)
 	c.Density = n / c.Area()
 	// Peak local density: phones within LocalR of a member, at the
@@ -460,7 +480,7 @@ func describe(pts []Point, idx []int, participation float64) Cluster {
 	for k, i := range idx {
 		sub[k] = pts[i]
 	}
-	c.Peak, c.PeakX, c.PeakY = LocalPeakAmong(pts, sub)
+	c.Peak, c.PeakX, c.PeakY = localPeak(pts, sub, accDisc)
 	if participation <= 0 {
 		participation = 1
 	}
@@ -496,25 +516,42 @@ func LocalPeak(pts []Point) (peak, x, y float64) { return LocalPeakAmong(pts, pt
 // the quantile's centre. Phones per m²; divide by participation for people
 // per m². Zero for no centres. This is the one density estimate behind
 // cluster levels, early warning, area density rules and briefings.
+//
+// A centre whose position is only known to ± Acc metres counts over a disc
+// of radius AccDisc × Acc when that is wider than LocalR (its count is then
+// scaled to the LocalR disc): the density at the scale its position
+// supports. Exactly placed centres (Acc 0) are unaffected.
 func LocalPeakAmong(all, centres []Point) (peak, x, y float64) {
+	return localPeak(all, centres, AccDisc)
+}
+
+// AccDisc is the default of Config.AccDisc (detect.Config.DensityAccDisc),
+// used by LocalPeakAmong.
+const AccDisc = 0.5
+
+func localPeak(all, centres []Point, accDisc float64) (peak, x, y float64) {
 	if len(centres) == 0 {
 		return 0, 0, 0
 	}
 	r2 := LocalR * LocalR
 	type local struct {
-		k    int
+		k    float64 // phones within LocalR (or the equivalent, from a wider disc)
 		x, y float64
 	}
 	loc := make([]local, 0, len(centres))
 	for _, p := range centres {
+		rr := r2
+		if u := accDisc * p.Acc; u > LocalR {
+			rr = u * u
+		}
 		k := 0
 		for _, q := range all {
 			dx, dy := p.X-q.X, p.Y-q.Y
-			if dx*dx+dy*dy <= r2 {
+			if dx*dx+dy*dy <= rr {
 				k++
 			}
 		}
-		loc = append(loc, local{max(k, 1), p.X, p.Y})
+		loc = append(loc, local{float64(max(k, 1)) * r2 / rr, p.X, p.Y})
 	}
 	sort.SliceStable(loc, func(a, b int) bool { return loc[a].k < loc[b].k })
 	q := loc[min(len(loc)-1, int(PeakQuantile*float64(len(loc))))]
@@ -524,14 +561,14 @@ func LocalPeakAmong(all, centres []Point) (peak, x, y float64) {
 	top := loc[len(loc)-1]
 	for i := 1; i <= len(loc); i++ {
 		k := loc[len(loc)-i].k
-		if v := min(k, PeakAgree*i); v > best {
+		if v := math.Min(k, float64(PeakAgree*i)); v > best {
 			best, bx, by = v, top.x, top.y
 		}
-		if PeakAgree*i >= k {
+		if float64(PeakAgree*i) >= k {
 			break // further down, k only shrinks
 		}
 	}
-	return float64(best) / (math.Pi * r2), bx, by
+	return best / (math.Pi * r2), bx, by
 }
 
 // DBSCAN groups points that have at least minPts points (themselves
