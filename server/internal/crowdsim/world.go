@@ -299,6 +299,9 @@ type Config struct {
 	// Layout, when it has walls or exits, replaces the default geometry
 	// (see LayoutGeometry).
 	Layout *protocol.VenueLayout
+	// Realism makes the phones messy (GPS error, carry, dropouts; see
+	// realism.go). The zero value is the ideal phone.
+	Realism Realism
 }
 
 // Scenarios lists the start scenarios.
@@ -329,12 +332,21 @@ type World struct {
 	solid     []Seg
 	grid      grid
 	truth     Truth
+	pins      []Pin  // real people pinned in place (pinned.go)
+	press     *Press // the crowd leaning toward a point (pinned.go)
 	events    []Event
 	ticks     int64
 	periodic  float64 // corridor length if x wraps around (calibration), else 0
 	counter   bool    // counterflow corridor: walkers steer as in the venue
 	quiet     bool    // phones off (settling before t = 0)
+	realism   Realism
+	seed      int64
+	env       Env        // what the messy phones share (common GPS error)
+	envRng    *rand.Rand // nil with ideal phones
 }
+
+// Realism is the phones' imperfections.
+func (w *World) Realism() Realism { return w.realism }
 
 // New creates a world in the given scenario.
 func New(c Config) (*World, error) {
@@ -353,8 +365,15 @@ func New(c Config) (*World, error) {
 	if !(c.Participation > 0 && c.Participation <= 1) {
 		return nil, errors.New("participation must be in (0, 1]")
 	}
+	if err := c.Realism.Validate(); err != nil {
+		return nil, err
+	}
 	w := &World{G: LayoutGeometry(c.W, c.H, c.Layout), StartMs: c.StartMs, Participation: c.Participation,
-		Action: ActCalm, rng: rand.New(rand.NewSource(c.Seed)), Churn: true, Trips: true}
+		Action: ActCalm, rng: rand.New(rand.NewSource(c.Seed)), Churn: true, Trips: true,
+		realism: c.Realism, seed: c.Seed}
+	if !c.Realism.Ideal() {
+		w.envRng = rand.New(rand.NewSource(mixSeed(c.Seed, -7)))
+	}
 	w.BeatHz = 1.8 + 0.4*w.rng.Float64() // 108–132 BPM
 	w.solid = w.G.solid()
 	w.truth.Init()
@@ -833,6 +852,7 @@ func (w *World) forces(h float64) {
 		w.grid.build(w.agents)
 		w.grid.pairs(w.agents, pair)
 	}
+	w.resetPins()
 	for _, a := range w.agents {
 		for _, s := range w.solid {
 			cx, cy := closest(s, a.X, a.Y)
@@ -862,6 +882,7 @@ func (w *World) forces(h float64) {
 				a.fy -= kap * vt * ty
 			}
 		}
+		w.pinForce(a, h) // real people standing in the crowd (pinned.go)
 		sx, sy := a.sx, a.sy
 		if a.stand {
 			m := math.Hypot(sx, sy)
