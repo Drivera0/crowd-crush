@@ -16,7 +16,7 @@ Every number below has its condition next to it. Most evidence is from the simul
 | **Most Likely to Become a Startup** | strong | named buyer, nothing to install, a console with setup, incidents, drills, escalation | `[PRICE]`, `[BUYER]` |
 | MLH Best Use of Gemini | good | structured briefings + floor-plan vision with a response schema | floor-plan read on camera |
 | MLH Best Use of ElevenLabs | good | every red alert spoken; escalation re-speaks | ElevenLabs voice (not browser fallback) audible at the table |
-| MLH Best Use of .Tech | only if done | QR points at the `.tech` domain | `[TECH: domain + named tunnel live? y/n]` |
+| MLH Best Use of .Tech | only if done | QR points at the `.tech` domain | pulsecrowd.tech claimed; named tunnel `[live? y/n]` |
 | Best Design | medium | two surfaces: console + one-arrow phone screen; table layer for small groups | clean screenshots |
 | Best Solo | good | one person: server, detector, estimator, simulator, two web apps, Android app, three boards | confirm the track exists |
 | Social Good / UN SDG | good | crowd safety; SDG 11, SDG 3 | `[SDG: name the target on Devpost]` |
@@ -64,7 +64,7 @@ Every number below has its condition next to it. Most evidence is from the simul
 
 ### MLH Best Use of .Tech
 - The join QR points at `https://<name>.tech` through a named Cloudflare tunnel, so it doesn't change on restart; the dashboard tests the link itself.
-- Missing: `[TECH]`. If it isn't done, drop this track.
+- Domain: `pulsecrowd.tech` (GitHub Student Pack). Confirm the named tunnel is live before claiming this track.
 
 ### Best Design
 - Console: one status sentence, alert cards with their evidence, a map whose vocabulary is people ("packed in", "moving as one", never "cluster").

@@ -10,7 +10,7 @@ Style: dark background, one colour per level (calm / yellow / red, as on the das
 
 **On the slide:** Pulse. Early warning for crowd crushes, using the phones already in the crowd.
 
-**Show:** the ripple logo; under it the join QR and the `[TECH: .tech URL]`.
+**Show:** the ripple logo; under it the join QR and `pulsecrowd.tech`.
 
 **Notes:** "Scan this while I talk. No app." Let the first phones join while slide 2 is up.
 
@@ -138,7 +138,6 @@ Style: dark background, one colour per level (calm / yellow / red, as on the das
 
 | Placeholder | Slide | Fill with |
 |---|---|---|
-| `[TECH: .tech URL]` | 1 | the join URL, or drop it |
 | `[ORIGIN: …]` | 2 | Dan's moment, or cut |
 | `[PRICE]` | 11 | per event or per attendee |
 | `[BUYER: one verified fact]` | 11 | a checked fact about the buyer, or cut |
