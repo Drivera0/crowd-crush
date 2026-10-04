@@ -1,4 +1,5 @@
 import './style.css';
+import { alarm, unlockAlarm } from './alarm';
 import type { Config, FromPhone, Hello, Motion, PhoneState, Pong, ToPhone } from '../../shared/protocol';
 import { wsURL } from '../../shared/protocol';
 import { demoShake, demoState, initLeave } from './demo';
@@ -381,6 +382,8 @@ function checkEnv() {
 
 $('joinBtn').addEventListener('click', async () => {
   $('joinErr').hidden = true;
+  unlockAlarm(); // sound is only allowed from inside a tap
+
   // Both platforms only expose motion (and GPS) to HTTPS pages.
   if (!window.isSecureContext) return fail('join', 'insecure', envHelp.insecure());
   const req = (window.DeviceMotionEvent as unknown as { requestPermission?: PermissionFn } | undefined)?.requestPermission;
@@ -920,11 +923,13 @@ function applyGuidance(s: PhoneState) {
     syncPocket();
     return;
   }
-  // Buzz on Android when guidance starts (iPhones can't vibrate from a web page).
+  // Buzz on Android when guidance starts (iPhones can't vibrate from a web page),
+  // and sound the alarm and flash the screen on every phone.
   const now = Date.now();
   if (!had || now - lastBuzz > 15_000) {
     lastBuzz = now;
     navigator.vibrate?.([300, 120, 300, 120, 600]);
+    alarm();
   }
   drawGuidance();
 }
