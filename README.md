@@ -146,3 +146,7 @@ A random session ID, a position in the venue and motion numbers. No names, conta
 - Locating phones in a real crowd is the hard part. Phone GPS is good to 5–25 m outdoors and worse indoors, far coarser than the 1.1 m neighbour radius.
 - Density counts phones, so people per m² is only as good as the estimate of how many people have the page open.
 - In the crowd simulator the travelling-wave detector almost never fires: stiff simulated bodies pass a push on faster than the detector's 120 ms floor. Recordings of real pushes would settle whether the model or the detector is wrong ([docs/SIMULATOR.md](docs/SIMULATOR.md)).
+
+## License
+
+[MIT](LICENSE)
