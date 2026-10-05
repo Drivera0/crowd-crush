@@ -2,7 +2,7 @@
 
 **Early warning for crowd crushes, using the phones already in the crowd.**
 
-[![CI](https://github.com/Drivera0/crowd-crush/actions/workflows/ci.yml/badge.svg)](https://github.com/Drivera0/crowd-crush/actions/workflows/ci.yml)
+[![CI](https://github.com/Drivera0/pulse/actions/workflows/ci.yml/badge.svg)](https://github.com/Drivera0/pulse/actions/workflows/ci.yml)
 
 Phones in a crowd stream their motion to one Go server. Each phone is a dot on the venue map. When neighbouring phones start swaying in a wave that travels from person to person, or people pack in past a safe density, the zone goes yellow, then red. Staff get a plain-language briefing, spoken aloud, a sign on the barrier flashes, and each phone in danger shows its owner which way to move.
 
@@ -19,8 +19,8 @@ Built solo at StormHacks 2026.
 No accounts, no API keys and no internet are needed. You need Go 1.25+ and Node 20+.
 
 ```sh
-git clone https://github.com/Drivera0/crowd-crush.git
-cd crowd-crush
+git clone https://github.com/Drivera0/pulse.git
+cd pulse
 make build        # npm install, build the two web apps, build the Go binaries
 ./bin/pulse       # dashboard: http://localhost:8080/dash/   phone page: http://localhost:8080/
 ```
@@ -149,4 +149,4 @@ A random session ID, a position in the venue and motion numbers. No names, conta
 
 ## License
 
-[MIT](LICENSE)
+[Apache License 2.0](LICENSE)
