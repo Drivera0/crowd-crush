@@ -10,4 +10,4 @@ With Pulse running, open **https://pulsecrowd.tech/deck** in Safari. For true fu
 
 No internet at the table: AirDrop `present.html` from the Mac to the iPad and open it from Files. It works offline; only the font falls back to the iPad's own.
 
-Slide content and sources: [../DECK.md](../DECK.md). The spoken script: [../PITCH.md](../PITCH.md). Every number is simulator or synthetic-phone data unless a slide says otherwise; slide 2's figure (159, Itaewon, 29 October 2022) is from Korea Herald and Inquirer/AFP reporting.
+Slide content and sources: [../DECK.md](../hackathon/DECK.md). The spoken script: [../PITCH.md](../hackathon/PITCH.md). Every number is simulator or synthetic-phone data unless a slide says otherwise; slide 2's figure (159, Itaewon, 29 October 2022) is from Korea Herald and Inquirer/AFP reporting.
