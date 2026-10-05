@@ -1,12 +1,12 @@
 # Pulse: the demo video and the plan to demo day
 
-Two parts: what to do between now and judging, in order, and the word-for-word script for the 3-minute Devpost video. The live table script is [PITCH.md](PITCH.md); the clicks and fallbacks are [DEMO.md](DEMO.md); the boards are [TABLE-DEMO.md](TABLE-DEMO.md).
+Two parts: what to do between now and judging, in order, and the word-for-word script for the 3-minute Devpost video. The live table script is [PITCH.md](PITCH.md); the clicks and fallbacks are [DEMO.md](DEMO.md); the boards are [TABLE-DEMO.md](../TABLE-DEMO.md).
 
 ## The plan, in order
 
 ### 1. Mac setup (once, at home, about an hour)
 
-- [ ] Install Go, Node, Arduino IDE 2 (or `brew install arduino-cli`) and `cloudflared` ([SETUP.md](SETUP.md)).
+- [ ] Install Go, Node, Arduino IDE 2 (or `brew install arduino-cli`) and `cloudflared` ([SETUP.md](../SETUP.md)).
 - [ ] Clone the repo, `make build`.
 - [ ] Copy `~/.cloudflared/` (`cert.pem`, `config.yml`, the tunnel's `.json`) from the PC to the Mac. Treat the `.json` like a password. Then `cloudflared tunnel run pulse` on the Mac: `https://pulsecrowd.tech` now points at the Mac.
 - [ ] `.env` on the Mac: the API keys, `PUBLIC_URL=https://pulsecrowd.tech`, and `scripts/boards.sh env --write` for the boards over USB.
@@ -39,7 +39,7 @@ This is the most important step: almost every number in the pitch comes from the
 
 - [ ] 10-minute setup at the table ([DEMO.md](DEMO.md)), escalation off, preflight **GO**.
 - [ ] Your two phones joined as #1 and #2, so one judge makes a row of three.
-- [ ] Deck open in a second tab ([deck/index.html](deck/index.html)) for a judge who wants slides.
+- [ ] Deck open in a second tab ([deck/index.html](../deck/index.html)) for a judge who wants slides.
 - [ ] Between judges: the 30-second reset in DEMO.md.
 - [ ] Something breaks: drop a rung on the fallback ladder in DEMO.md; never debug in front of a judge.
 
@@ -118,5 +118,5 @@ About 400 spoken words. Read at a calm pace; the shots carry the rest. Times are
 
 - Keep shot 5 as long as it takes to go red for real; speed it up 2× rather than cutting it, and say so on screen ("2× speed") so nobody thinks it's faked.
 - Label shot 8 on screen: "Simulated crowd". The script already says it; the label makes it unmissable.
-- Use only the numbers above. They match [EVAL.md](EVAL.md) and the deck. If your real-phone test gave a different time in step 2, use that time in shot 5.
+- Use only the numbers above. They match [EVAL.md](../EVAL.md) and the deck. If your real-phone test gave a different time in step 2, use that time in shot 5.
 - No footage or photos of real disasters or victims. Text on black is enough for shot 1.

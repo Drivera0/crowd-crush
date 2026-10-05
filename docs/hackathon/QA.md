@@ -1,6 +1,6 @@
 # Pulse: the hardest questions
 
-Short, honest answers. Every number names its condition and comes from [EVAL.md](EVAL.md), [LOCATE.md](LOCATE.md), [loadtest.md](loadtest.md), [APP.md](APP.md), the README's simulator section, or the table-demo measurement (`go test -run TestTableMeasure -v ./server/internal/detect`, quoted in [DEMO.md](DEMO.md)). Anything in `[brackets]` is a placeholder to fill before judging.
+Short, honest answers. Every number names its condition and comes from [EVAL.md](../EVAL.md), [LOCATE.md](../LOCATE.md), [loadtest.md](../loadtest.md), [APP.md](../APP.md), the README's simulator section, or the table-demo measurement (`go test -run TestTableMeasure -v ./server/internal/detect`, quoted in [DEMO.md](DEMO.md)). Anything in `[brackets]` is a placeholder to fill before judging.
 
 **The answer under every answer:** nearly everything here was measured in a simulator or on synthetic phones. Real-phone checks so far are one Android phone streaming through the server (its noise calibrates the table-demo phones), plus whatever the judges do tonight. Say that first if a judge asks "how do you know?"
 

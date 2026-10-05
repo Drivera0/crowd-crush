@@ -1,11 +1,11 @@
 # Running Pulse
 
-The short version. Full details are in [README.md](README.md) and [docs/SETUP.md](docs/SETUP.md).
+The short version. Full details are in [README.md](../../README.md) and [docs/SETUP.md](../SETUP.md).
 
 ## Start it
 
 ```sh
-cd ~/Projects/Personal/crowd-crush
+cd crowd-crush
 scripts/live.sh        # or: make live
 ```
 
@@ -68,14 +68,14 @@ Needs Go, Node and cloudflared (`brew install go node cloudflared`), then:
 make build
 make env                    # enter the keys; writes .env (never commit it)
 cloudflared tunnel login    # browser opens; pick pulsecrowd.tech
-cloudflared tunnel token --cred-file ~/.cloudflared/cedca08e-40ca-424e-9d06-8ea49e636b06.json pulse
+cloudflared tunnel token --cred-file ~/.cloudflared/<tunnel-id>.json pulse
 ```
 
 and create `~/.cloudflared/config.yml`:
 
 ```yaml
-tunnel: cedca08e-40ca-424e-9d06-8ea49e636b06
-credentials-file: /Users/<you>/.cloudflared/cedca08e-40ca-424e-9d06-8ea49e636b06.json
+tunnel: <tunnel-id>
+credentials-file: /Users/<you>/.cloudflared/<tunnel-id>.json
 protocol: http2
 ingress:
   - hostname: pulsecrowd.tech

@@ -1,6 +1,6 @@
 # Pulse: presenter's guide
 
-A plain-language walkthrough of what Pulse is, how it works, what it's built with, and what to say about it. The detailed sources are the README, `docs/REFERENCE.md`, `docs/PITCH.md`, `docs/QA.md` and `docs/EVAL.md`. This file is the version to read the night before.
+A plain-language walkthrough of what Pulse is, how it works, what it's built with, and what to say about it. The detailed sources are the README, `docs/REFERENCE.md`, `docs/hackathon/PITCH.md`, `docs/hackathon/QA.md` and `docs/EVAL.md`. This file is the version to read the night before.
 
 ---
 
@@ -188,7 +188,7 @@ Each comes with its condition. Say the condition.
 
 ## 9. The 2-minute table demo (summary)
 
-Full run sheet: `docs/PITCH.md` and `docs/DEMO.md`.
+Full run sheet: `docs/hackathon/PITCH.md` and `docs/hackathon/DEMO.md`.
 
 | Time | Say | Do |
 |---|---|---|
@@ -215,7 +215,7 @@ Full run sheet: `docs/PITCH.md` and `docs/DEMO.md`.
 
 ## 10. Likely questions, short answers
 
-Full list (27 questions): `docs/QA.md`.
+Full list (27 questions): `docs/hackathon/QA.md`.
 
 - **How do you tell dancing from a crush?** Dancing moves neighbours at the same moment; a push arrives with a delay that travels. Music is rhythmic so it matches at many delays; a push has one clear delay. 0 of 600 look-alike runs went red.
 - **Why not machine learning?** There's no labelled dataset of real crushes from phones, and a model trained on our simulator would just learn the simulator. A deterministic detector can show its evidence.
@@ -244,7 +244,7 @@ Full list (27 questions): `docs/QA.md`.
 
 ## 12. Still to fill in before judging
 
-From `docs/PITCH.md`, `docs/QA.md` and `docs/TRACKS.md`:
+From `docs/hackathon/PITCH.md`, `docs/hackathon/QA.md` and `docs/hackathon/TRACKS.md`:
 
 - `[ORIGIN]` — a first-person moment (concert, festival exit, packed station), or cut it.
 - `[PRICE]` — per event or per attendee, one number.

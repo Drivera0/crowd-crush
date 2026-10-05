@@ -1,10 +1,10 @@
 # Pulse: table demo run sheet
 
-The words are in [PITCH.md](PITCH.md). This file is the clicks, the phones, the reset between judges and what to do when something breaks. Boards on the table (USB, cables, what each LED pattern means, recovery): [TABLE-DEMO.md](TABLE-DEMO.md). Don't duplicate it here; go there when a board misbehaves.
+The words are in [PITCH.md](PITCH.md). This file is the clicks, the phones, the reset between judges and what to do when something breaks. Boards on the table (USB, cables, what each LED pattern means, recovery): [TABLE-DEMO.md](../TABLE-DEMO.md). Don't duplicate it here; go there when a board misbehaves.
 
 ## Pack
 
-Everything in [TABLE-DEMO.md → Pack](TABLE-DEMO.md#pack), plus:
+Everything in [TABLE-DEMO.md → Pack](../TABLE-DEMO.md#pack), plus:
 
 - [ ] Dan's two phones, charged, joined as #1 and #2 (one is also the hotspot)
 - [ ] Printed QR card (the join link) for judges who can't see the screen

@@ -1,6 +1,6 @@
 # Table demo: boards next to the MacBook
 
-The small setup for judges: the sign and the two zone lights sit on the table beside the MacBook, plugged into it by USB, with a few phones. No board needs Wi-Fi; the venue network only matters for the laptop (tunnel, Gemini, ElevenLabs). Full details: [SETUP.md §4](SETUP.md#4-boards-arduino-sign--esp32-zone-lights). Run sheet for the pitch itself: [DEMO.md](DEMO.md).
+The small setup for judges: the sign and the two zone lights sit on the table beside the MacBook, plugged into it by USB, with a few phones. No board needs Wi-Fi; the venue network only matters for the laptop (tunnel, Gemini, ElevenLabs). Full details: [SETUP.md §4](SETUP.md#4-boards-arduino-sign--esp32-zone-lights). Run sheet for the pitch itself: [DEMO.md](hackathon/DEMO.md).
 
 ## Pack
 
@@ -76,7 +76,7 @@ For a 2-D Bluetooth fix (A, B and the sign; see [BEACONS.md](BEACONS.md#the-sign
 | Boards fine but alerts don't show | Preflight ✓ for boards, nothing lights in the drill | Areas drawn without lights? Press **Set up table demo** again: it assigns lights to areas that have none. |
 | Nothing works and judges are coming | — | Boards are optional. Dashboard alerts and voice work without them; the Simulation page needs no phones either. |
 
-The detector's table-profile measurements (thresholds, timings, what a push between two phones looks like) are in [DEMO.md](DEMO.md), not here.
+The detector's table-profile measurements (thresholds, timings, what a push between two phones looks like) are in [DEMO.md](hackathon/DEMO.md), not here.
 
 ## Moving about: judges see their dots move
 
