@@ -5,7 +5,7 @@ The short version. Full details are in [README.md](../../README.md) and [docs/SE
 ## Start it
 
 ```sh
-cd crowd-crush
+cd pulse
 scripts/live.sh        # or: make live
 ```
 
